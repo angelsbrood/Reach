@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_reach._udp</string>
+	</array>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Example discovers and streams from your own Reach cluster on this network.</string>
+</dict>
+</plist>
