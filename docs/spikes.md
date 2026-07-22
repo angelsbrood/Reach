@@ -8,7 +8,7 @@ the decision. Kill criteria come from the pre-filing plan.
 | S4 | Does `LanguageModelSession` accept a third-party `LanguageModel`/executor at runtime, and does an MLX filling stream behind the slot? | **PASS** (2026-07-21) |
 | S1a | QUIC with mutual TLS between provisioned certificates (client-cert challenge + CA pin), loopback | **PASS** (2026-07-21) |
 | S1b | Behavior of the QUIC connection across a Wi-Fi → cellular interface transition (migration vs re-attach) | **PARTIAL PASS** (2026-07-21) — re-attach verified on device; migration leg deferred to the mesh by construction |
-| S2 | Development-signed packet-tunnel extension carrying WireGuardKit traffic on device | pending — needs device |
+| S2 | Development-signed packet-tunnel extension carrying WireGuardKit traffic on device | **KILL FIRED** (2026-07-22) — personal team; official-WireGuard-app fallback activated |
 | S3 | Headscale as a supervised subprocess with programmatic pre-auth key minting | **PASS** (2026-07-21) |
 
 ## S4 — the provider slot is real (2026-07-21)
@@ -86,6 +86,29 @@ mesh provides; the final S1b ruling (and any use of `.handover`
 multipath) lands with S2 and the away leg, tested against the mesh IP.
 Until then, session-layer re-attach is not just the guaranteed path — it
 is the only well-defined one, and it is verified.
+
+## S2 — the entitlement gate refused; the fallback carries the mesh (2026-07-22)
+
+The Keeper shell and its packet-tunnel extension built against WireGuardKit
+hit the kill criterion at the first gate, precisely and informatively:
+*"Personal development teams, including 'Cassandra Spiral', do not support
+the Network Extensions capability."* The only team Xcode holds an account
+for is a personal one; the packet-tunnel entitlement is not grantable on
+it. (WireGuardKit's package build is unverified for the same reason —
+signing blocks before compilation.)
+
+Per the plan's pre-authorized demotion, **the official WireGuard app is
+now the away-leg path**: the keys are still ours and real, the phone's
+wg-quick config travels by QR, and the tunnel's consent dialog is still
+the system's own. The proto-keeper app and extension remain in-tree,
+buildable the day a paid team exists — the seam is the ceremony's
+provisioning target (embedded adapter vs. exported config), nothing in
+the wire or the daemon changes. The beat sheet's "no third-party app in
+the demo's frame" is honestly weakened to "one open-source app in the
+frame" until the account upgrade; the restated milestone at filing prices
+the embedded path where it always was, in funded scope.
+
+## S3 — headscale supervises cleanly (2026-07-21)
 
 headscale v0.29.2 (official darwin_arm64 release binary) launched as a
 subprocess with a generated config: socket up in under a second, user
