@@ -1,0 +1,23 @@
+# Private steering documents — on-disk working files, never in history
+PLAN.md
+reach-designnote-v1.md
+reach-nlnet-v2.md
+
+# Key material and secrets — real keys live under
+# ~/Library/Application Support/Reach and never in the tree
+*.key
+*.pem
+*.p12
+*.der
+*.mobileprovision
+Secrets/
+
+# Build products and user state
+.build/
+DerivedData/
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+
+# OS noise
+.DS_Store
