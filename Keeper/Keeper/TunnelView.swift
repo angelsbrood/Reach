@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct TunnelView: View {
-    @State private var manager = TunnelManager()
+    @Bindable var manager: TunnelManager
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -21,8 +21,6 @@ struct TunnelView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
-        .padding()
-        .task { await manager.bootstrap() }
     }
 
     @ViewBuilder private var header: some View {

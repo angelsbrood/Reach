@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Network
 import ReachWire
@@ -17,11 +18,17 @@ public enum TLSBuilder {
     public static func serverOptions(
         alpn: String,
         identity: SecIdentity,
-        clientTrustRoots: [SecCertificate]
+        clientTrustRoots: [SecCertificate],
+        presentedChain: [SecCertificate] = []
     ) -> NWProtocolQUIC.Options {
         let options = NWProtocolQUIC.Options(alpn: [alpn])
         let sec = options.securityProtocolOptions
-        sec_protocol_options_set_local_identity(sec, sec_identity_create(identity)!)
+        // Presenting the issuing chain lets a client that holds only the
+        // CA's hash (from the pairing QR) verify the server.
+        let secIdentity = presentedChain.isEmpty
+            ? sec_identity_create(identity)!
+            : sec_identity_create_with_certificates(identity, presentedChain as CFArray)!
+        sec_protocol_options_set_local_identity(sec, secIdentity)
         if !clientTrustRoots.isEmpty {
             sec_protocol_options_set_peer_authentication_required(sec, true)
             installVerifyBlock(sec, roots: clientTrustRoots, verifyingClient: true)
@@ -45,6 +52,44 @@ public enum TLSBuilder {
             }, tlsQueue)
         }
         installVerifyBlock(sec, roots: serverTrustRoots, verifyingClient: false)
+        tune(options)
+        return options
+    }
+
+    /// Client options for the enrollment channel: no client identity yet;
+    /// the server is verified by locating, in its presented chain, a
+    /// certificate whose DER hashes to `caHashPin` (carried by the QR read
+    /// off the operator's own screen), then anchoring evaluation to it.
+    public static func enrollClientOptions(
+        alpn: String,
+        caHashPin: Data
+    ) -> NWProtocolQUIC.Options {
+        let options = NWProtocolQUIC.Options(alpn: [alpn])
+        let sec = options.securityProtocolOptions
+        sec_protocol_options_set_verify_block(sec, { _, trustRef, complete in
+            let trust = sec_trust_copy_ref(trustRef).takeRetainedValue()
+            guard let chain = SecTrustCopyCertificateChain(trust) as? [SecCertificate] else {
+                complete(false)
+                return
+            }
+            var anchor: SecCertificate?
+            for certificate in chain {
+                let der = SecCertificateCopyData(certificate) as Data
+                if Data(SHA256.hash(data: der)) == caHashPin {
+                    anchor = certificate
+                    break
+                }
+            }
+            guard let anchor else {
+                complete(false)
+                return
+            }
+            SecTrustSetPolicies(trust, SecPolicyCreateSSL(true, nil))
+            SecTrustSetAnchorCertificates(trust, [anchor] as CFArray)
+            SecTrustSetAnchorCertificatesOnly(trust, true)
+            var error: CFError?
+            complete(SecTrustEvaluateWithError(trust, &error))
+        }, tlsQueue)
         tune(options)
         return options
     }

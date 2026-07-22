@@ -1,9 +1,14 @@
 import Foundation
 
 public struct DaemonConfig: Codable, Sendable {
+    public var clusterID: UUID = UUID()
     public var clusterName: String = "Reach Cluster"
     public var port: UInt16 = 47337
+    public var enrollPort: UInt16 = 47338
     public var modelID: String = "gemma-3-1b"
+    /// The mesh endpoint pinned at the ceremony (host:port for WireGuard).
+    /// Defaults to the first LAN address; the demo environment overrides.
+    public var meshEndpoint: String?
 
     public init() {}
 

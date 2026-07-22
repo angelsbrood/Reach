@@ -31,6 +31,33 @@ public final class Daemon: Sendable {
         }
     }
 
+    /// Starts the ceremony's listener: server-auth-only TLS (clients have
+    /// no certificate yet), the issuing chain presented so the QR's CA-hash
+    /// pin can verify it.
+    public func startEnrollment(service: EnrollmentService) throws {
+        let options = TLSBuilder.serverOptions(
+            alpn: Wire.enrollALPN,
+            identity: tls.identity,
+            clientTrustRoots: [],
+            presentedChain: [tls.caCertificate]
+        )
+        let listener = try QUICListener(port: config.enrollPort, parameters: .reachQUIC(options: options))
+        let accept = Task {
+            do {
+                for try await tunnel in listener.tunnels {
+                    Task {
+                        for await stream in tunnel.inboundStreams {
+                            Task { await service.serve(stream: stream) }
+                        }
+                    }
+                }
+            } catch {
+                Log.error("enrollment listener terminated: \(error)")
+            }
+        }
+        Task { await state.store(enrollListener: listener, task: accept) }
+    }
+
     private let config: DaemonConfig
     private let filling: any SlotFilling
     private let registry: SessionRegistry
@@ -238,10 +265,16 @@ public final class Daemon: Sendable {
 
 private actor StateBox {
     private var listener: QUICListener?
+    private var enrollListener: QUICListener?
     private var tasks: [Task<Void, Never>] = []
 
     func store(listener: QUICListener) {
         self.listener = listener
+    }
+
+    func store(enrollListener: QUICListener, task: Task<Void, Never>) {
+        self.enrollListener = enrollListener
+        tasks.append(task)
     }
 
     func store(accept: Task<Void, Never>, sweeper: Task<Void, Never>) {
@@ -250,6 +283,7 @@ private actor StateBox {
 
     func stop() {
         listener?.cancel()
+        enrollListener?.cancel()
         tasks.forEach { $0.cancel() }
         tasks = []
     }

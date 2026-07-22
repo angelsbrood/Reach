@@ -104,6 +104,36 @@ public struct ClusterCA: Sendable {
         return try issue(commonName: commonName, days: days, extensions: extensions)
     }
 
+    /// Issues a clientAuth leaf for a key the device minted and proved
+    /// possession of — the ceremony's issuance path. The private key never
+    /// leaves the device.
+    public func issueDevice(
+        publicKeyX963: Data,
+        commonName: String,
+        uri: String,
+        days: Int = 365
+    ) throws -> Certificate {
+        let publicKey = try P256.Signing.PublicKey(x963Representation: publicKeyX963)
+        let extensions = try Certificate.Extensions {
+            Critical(KeyUsage(digitalSignature: true))
+            try ExtendedKeyUsage([.clientAuth])
+            SubjectAlternativeNames([.uniformResourceIdentifier(uri)])
+        }
+        let now = Date()
+        return try Certificate(
+            version: .v3,
+            serialNumber: Certificate.SerialNumber(),
+            publicKey: Certificate.PublicKey(publicKey),
+            notValidBefore: now.addingTimeInterval(-3600),
+            notValidAfter: now.addingTimeInterval(TimeInterval(days) * 24 * 3600),
+            issuer: certificate.subject,
+            subject: try DistinguishedName { CommonName(commonName) },
+            signatureAlgorithm: .ecdsaWithSHA256,
+            extensions: extensions,
+            issuerPrivateKey: Certificate.PrivateKey(key)
+        )
+    }
+
     /// Issues a clientAuth leaf for a device or app identity.
     public func issueClient(
         commonName: String,

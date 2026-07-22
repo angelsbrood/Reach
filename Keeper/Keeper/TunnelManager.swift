@@ -50,7 +50,10 @@ final class TunnelManager {
     }
 
     /// Installs (or updates) the tunnel — first save triggers the system's
-    /// VPN consent.
+    /// VPN consent. If a tunnel is already running (e.g. a prior config),
+    /// it is stopped first so the provider reloads the new configuration
+    /// rather than keeping the stale one — starting an already-connected
+    /// tunnel is otherwise a no-op.
     func install() async {
         guard let config = stagedConfig else {
             state = .noConfiguration
@@ -58,6 +61,11 @@ final class TunnelManager {
         }
         do {
             let manager = self.manager ?? NETunnelProviderManager()
+            if manager.connection.status == .connected || manager.connection.status == .connecting {
+                manager.connection.stopVPNTunnel()
+                append("stopping stale tunnel before reinstall")
+                try? await Task.sleep(for: .seconds(1))
+            }
             let proto = NETunnelProviderProtocol()
             proto.providerBundleIdentifier = Self.providerBundleID
             proto.providerConfiguration = ["wgQuickConfig": config]

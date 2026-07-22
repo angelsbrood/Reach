@@ -8,6 +8,9 @@
 
 /* Begin PBXBuildFile section */
 		BB0000000000000000000201 /* WireGuardKit in Frameworks */ = {isa = PBXBuildFile; productRef = BB0000000000000000000200 /* WireGuardKit */; };
+		BB0000000000000000000211 /* ReachWire in Frameworks */ = {isa = PBXBuildFile; productRef = BB0000000000000000000210 /* ReachWire */; };
+		BB0000000000000000000213 /* ReachTransport in Frameworks */ = {isa = PBXBuildFile; productRef = BB0000000000000000000212 /* ReachTransport */; };
+		BB0000000000000000000215 /* ReachIdentity in Frameworks */ = {isa = PBXBuildFile; productRef = BB0000000000000000000214 /* ReachIdentity */; };
 		BB0000000000000000000202 /* PacketTunnel.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000121 /* PacketTunnel.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
 
@@ -128,6 +131,11 @@
 				BB0000000000000000000010 /* Keeper */,
 			);
 			name = Keeper;
+			packageProductDependencies = (
+				BB0000000000000000000210 /* ReachWire */,
+				BB0000000000000000000212 /* ReachTransport */,
+				BB0000000000000000000214 /* ReachIdentity */,
+			);
 			productName = Keeper;
 			productReference = BB0000000000000000000120 /* Keeper.app */;
 			productType = "com.apple.product-type.application";
@@ -183,6 +191,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				BB0000000000000000000300 /* XCLocalSwiftPackageReference "/Users/nellymoon/Library/Caches/reach-vendor/wireguard-apple" */,
+				BB0000000000000000000301 /* XCLocalSwiftPackageReference "../ReachKit" */,
 			);
 			preferredProjectObjectVersion = 90;
 			productRefGroup = BB0000000000000000000020 /* Products */;
@@ -307,6 +316,7 @@
 				DEVELOPMENT_TEAM = 7BCP6LV7HJ;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSCameraUsageDescription = "The keeper scans the cluster\'s pairing code.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = UIInterfaceOrientationPortrait;
@@ -332,6 +342,7 @@
 				DEVELOPMENT_TEAM = 7BCP6LV7HJ;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSCameraUsageDescription = "The keeper scans the cluster\'s pairing code.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = UIInterfaceOrientationPortrait;
@@ -430,12 +441,28 @@
 			isa = XCLocalSwiftPackageReference;
 			relativePath = "/Users/nellymoon/Library/Caches/reach-vendor/wireguard-apple";
 		};
+		BB0000000000000000000301 /* XCLocalSwiftPackageReference "../ReachKit" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../ReachKit;
+		};
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
 		BB0000000000000000000200 /* WireGuardKit */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = WireGuardKit;
+		};
+		BB0000000000000000000210 /* ReachWire */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = ReachWire;
+		};
+		BB0000000000000000000212 /* ReachTransport */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = ReachTransport;
+		};
+		BB0000000000000000000214 /* ReachIdentity */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = ReachIdentity;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

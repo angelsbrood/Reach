@@ -74,13 +74,16 @@ public struct ReachExecutor: FoundationModels.LanguageModelExecutor {
         streamingInto channel: LanguageModelExecutorGenerationChannel
     ) async throws {
         let wire = WireGenerationRequest(request)
-        let session = try await ReachConnectionHub.shared.session(for: configuration)
+        var session = try await ReachConnectionHub.shared.session(for: configuration)
         let genID = UUID()
 
         var lastReceived: UInt64?
         var unacked = 0
         let reconnectDeadline = ContinuousClock.now + .seconds(120)
         var backoff: Duration = .milliseconds(250)
+        // A generation that never started can be re-begun against a fresh
+        // session; once tokens are flowing, only re-attach is safe.
+        var freshStartRetries = 1
 
         while true {
             do {
@@ -124,6 +127,17 @@ public struct ReachExecutor: FoundationModels.LanguageModelExecutor {
                 }
                 throw ReachError.transport("stream ended before finish")
             } catch let error as ReachError {
+                // A session the daemon no longer knows (it restarted, or the
+                // token expired) is recoverable if nothing has streamed yet:
+                // drop the stale session, open a fresh one, begin again.
+                if case .remote(let code, _) = error,
+                   code == "begin-rejected" || code == "reattach-rejected",
+                   lastReceived == nil, freshStartRetries > 0 {
+                    freshStartRetries -= 1
+                    await ReachConnectionHub.shared.invalidateSession(for: configuration)
+                    session = try await ReachConnectionHub.shared.session(for: configuration)
+                    continue
+                }
                 if case .remote = error { throw error }
                 try await waitBeforeRetry(&backoff, deadline: reconnectDeadline, cause: error)
             } catch is CancellationError {

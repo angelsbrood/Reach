@@ -8,7 +8,7 @@ struct Reachd: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "reachd",
         abstract: "The Reach serving daemon: a slot host fronting self-hosted open weights with the Foundation Models framework's native semantics.",
-        subcommands: [Serve.self, Status.self, CA.self, Selftest.self]
+        subcommands: [Serve.self, Pair.self, Status.self, CA.self, Selftest.self]
     )
 }
 
@@ -58,6 +58,17 @@ struct Serve: AsyncParsableCommand {
             identity: Daemon.ListenerIdentity(identity: identity, caCertificate: caCert)
         )
         try await daemon.start(advertise: !noAdvertise)
+        let meshEndpoint = config.meshEndpoint
+            ?? "\(addresses.dropFirst().first.map { $0.map(String.init).joined(separator: ".") } ?? "127.0.0.1"):51820"
+        let wgHost = try WireGuardHost(endpoint: meshEndpoint)
+        let enrollment = EnrollmentService(
+            ca: ca,
+            tokens: TokenStore(),
+            devices: DeviceRegistry(),
+            wgHost: wgHost
+        )
+        try daemon.startEnrollment(service: enrollment)
+        print("[reachd] enrollment listening on :\(config.enrollPort), mesh endpoint \(meshEndpoint)")
         print("[reachd] \(config.clusterName) serving \(config.modelID) on :\(config.port) (\(addresses.map { $0.map(String.init).joined(separator: ".") }.joined(separator: ", ")))")
 
         let prewarm = Task {
