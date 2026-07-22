@@ -8,7 +8,7 @@ the decision. Kill criteria come from the pre-filing plan.
 | S4 | Does `LanguageModelSession` accept a third-party `LanguageModel`/executor at runtime, and does an MLX filling stream behind the slot? | **PASS** (2026-07-21) |
 | S1a | QUIC with mutual TLS between provisioned certificates (client-cert challenge + CA pin), loopback | **PASS** (2026-07-21) |
 | S1b | Behavior of the QUIC connection across a Wi-Fi → cellular interface transition (migration vs re-attach) | **PARTIAL PASS** (2026-07-21) — re-attach verified on device; migration leg deferred to the mesh by construction |
-| S2 | Development-signed packet-tunnel extension carrying WireGuardKit traffic on device | **KILL FIRED** (2026-07-22) — personal team; official-WireGuard-app fallback activated |
+| S2 | Development-signed packet-tunnel extension carrying WireGuardKit traffic on device | **PASS** (2026-07-22) — kill fired on the personal team, reversed same day by program enrollment; embedded tunnel verified end to end |
 | S3 | Headscale as a supervised subprocess with programmatic pre-auth key minting | **PASS** (2026-07-21) |
 
 ## S4 — the provider slot is real (2026-07-21)
@@ -87,7 +87,29 @@ multipath) lands with S2 and the away leg, tested against the mesh IP.
 Until then, session-layer re-attach is not just the guaranteed path — it
 is the only well-defined one, and it is verified.
 
-## S2 — the entitlement gate refused; the fallback carries the mesh (2026-07-22)
+## S2 — the entitlement gate, refused then granted; the embedded tunnel holds (2026-07-22)
+
+**Final verdict: PASS.** The kill fired first and honestly — see below — and
+was reversed the same day when the developer account was upgraded to the
+paid program. On retry the profiles minted for both bundle ids with the
+packet-tunnel entitlement, the go bridge built, and the whole away-leg
+data path ran end to end: WireGuardKit inside the extension, handshake
+within seconds of Start, and a mutually-authenticated QUIC session
+streaming a generation to the daemon's mesh address (10.86.0.1) — ~8 KiB
+each way on the interface counters for one session. The official-app
+fallback below remains recorded as the exercised de-risk path.
+
+Build frictions worth remembering (all patched in a local checkout at
+`~/Library/Caches/reach-vendor/wireguard-apple`; follow-up: push the
+two-line fork under the studio account and repoint the project):
+wireguard-apple's manifest declares platform constants its own
+swift-tools-version (5.3) never had — bump to 5.9; WireGuardKitC.h uses
+BSD types without `<sys/types.h>` under the 27 SDK's strict modules; the
+wg-quick parser is app code, not part of WireGuardKit — two MIT-licensed
+files ride along in the PacketTunnel target; and the go-bridge script
+phase must point at the local package path, with Homebrew's go on PATH.
+
+### The kill, as it first fired
 
 The Keeper shell and its packet-tunnel extension built against WireGuardKit
 hit the kill criterion at the first gate, precisely and informatively:

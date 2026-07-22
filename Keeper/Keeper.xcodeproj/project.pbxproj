@@ -24,14 +24,12 @@
 /* Begin PBXCopyFilesBuildPhase section */
 		BB0000000000000150000000 /* Embed App Extensions */ = {
 			isa = PBXCopyFilesBuildPhase;
-			buildActionMask = 2147483647;
 			dstPath = "";
-			dstSubfolderSpec = 13;
+			dstSubfolder = PlugIns;
 			files = (
 				BB0000000000000000000202 /* PacketTunnel.appex in Embed App Extensions */,
 			);
 			name = "Embed App Extensions";
-			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXCopyFilesBuildPhase section */
 
@@ -77,12 +75,12 @@
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
-		BB0000000000000130000000 /* Frameworks (Keeper) */ = {
+		BB0000000000000130000000 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			files = (
 			);
 		};
-		BB0000000000000230000000 /* Frameworks (PacketTunnel) */ = {
+		BB0000000000000230000000 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			files = (
 				BB0000000000000000000201 /* WireGuardKit in Frameworks */,
@@ -117,7 +115,7 @@
 			buildConfigurationList = BB0000000000000110000000 /* Build configuration list for PBXNativeTarget "Keeper" */;
 			buildPhases = (
 				BB0000000000000120000000 /* Sources */,
-				BB0000000000000130000000 /* Frameworks (Keeper) */,
+				BB0000000000000130000000 /* Frameworks */,
 				BB0000000000000140000000 /* Resources */,
 				BB0000000000000150000000 /* Embed App Extensions */,
 			);
@@ -140,12 +138,10 @@
 			buildPhases = (
 				BB0000000000000250000000 /* Build WireGuardKitGo bridge */,
 				BB0000000000000220000000 /* Sources */,
-				BB0000000000000230000000 /* Frameworks (PacketTunnel) */,
+				BB0000000000000230000000 /* Frameworks */,
 				BB0000000000000240000000 /* Resources */,
 			);
 			buildRules = (
-			);
-			dependencies = (
 			);
 			fileSystemSynchronizedGroups = (
 				BB0000000000000000000013 /* PacketTunnel */,
@@ -186,7 +182,7 @@
 			mainGroup = BB0000000000000000000001;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
-				BB0000000000000000000300 /* XCRemoteSwiftPackageReference "wireguard-apple" */,
+				BB0000000000000000000300 /* XCLocalSwiftPackageReference "/Users/nellymoon/Library/Caches/reach-vendor/wireguard-apple" */,
 			);
 			preferredProjectObjectVersion = 90;
 			productRefGroup = BB0000000000000000000020 /* Products */;
@@ -216,21 +212,13 @@
 		BB0000000000000250000000 /* Build WireGuardKitGo bridge */ = {
 			isa = PBXShellScriptBuildPhase;
 			alwaysOutOfDate = 1;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			inputFileListPaths = (
-			);
-			inputPaths = (
-			);
 			name = "Build WireGuardKitGo bridge";
-			outputFileListPaths = (
-			);
-			outputPaths = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "export PATH=\"$PATH:/opt/homebrew/bin:/usr/local/bin\"\ncd \"${BUILD_DIR%%Build/*}SourcePackages/checkouts/wireguard-apple/Sources/WireGuardKitGo\" && /usr/bin/make\n";
+			shellScript = (
+				"export PATH=\"$PATH:/opt/homebrew/bin:/usr/local/bin\"",
+				"cd \"/Users/nellymoon/Library/Caches/reach-vendor/wireguard-apple/Sources/WireGuardKitGo\" && /usr/bin/make",
+				"",
+			);
 		};
 /* End PBXShellScriptBuildPhase section */
 
@@ -256,7 +244,7 @@
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
-		BB0000000000000011000000 /* Debug (project) */ = {
+		BB0000000000000011000000 /* Debug configuration for PBXProject "Keeper" */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
@@ -287,7 +275,7 @@
 			};
 			name = Debug;
 		};
-		BB0000000000000012000000 /* Release (project) */ = {
+		BB0000000000000012000000 /* Release configuration for PBXProject "Keeper" */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
@@ -310,7 +298,7 @@
 			};
 			name = Release;
 		};
-		BB0000000000000111000000 /* Debug (Keeper) */ = {
+		BB0000000000000111000000 /* Debug configuration for PBXNativeTarget "Keeper" */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = Keeper/Keeper.entitlements;
@@ -321,7 +309,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = UIInterfaceOrientationPortrait;
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = systems.reach.keeper;
@@ -335,7 +323,7 @@
 			};
 			name = Debug;
 		};
-		BB0000000000000112000000 /* Release (Keeper) */ = {
+		BB0000000000000112000000 /* Release configuration for PBXNativeTarget "Keeper" */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = Keeper/Keeper.entitlements;
@@ -346,7 +334,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = UIInterfaceOrientationPortrait;
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks";
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = systems.reach.keeper;
@@ -360,7 +348,7 @@
 			};
 			name = Release;
 		};
-		BB0000000000000211000000 /* Debug (PacketTunnel) */ = {
+		BB0000000000000211000000 /* Debug configuration for PBXNativeTarget "PacketTunnel" */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = PacketTunnel/PacketTunnel.entitlements;
@@ -369,7 +357,10 @@
 				DEVELOPMENT_TEAM = 7BCP6LV7HJ;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = PacketTunnel/Info.plist;
-				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks @executable_path/../../Frameworks";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = systems.reach.keeper.tunnel;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -381,7 +372,7 @@
 			};
 			name = Debug;
 		};
-		BB0000000000000212000000 /* Release (PacketTunnel) */ = {
+		BB0000000000000212000000 /* Release configuration for PBXNativeTarget "PacketTunnel" */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = PacketTunnel/PacketTunnel.entitlements;
@@ -390,7 +381,10 @@
 				DEVELOPMENT_TEAM = 7BCP6LV7HJ;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = PacketTunnel/Info.plist;
-				LD_RUNPATH_SEARCH_PATHS = "@executable_path/Frameworks @executable_path/../../Frameworks";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = systems.reach.keeper.tunnel;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -408,44 +402,39 @@
 		BB0000000000000010000000 /* Build configuration list for PBXProject "Keeper" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
-				BB0000000000000011000000 /* Debug (project) */,
-				BB0000000000000012000000 /* Release (project) */,
+				BB0000000000000011000000 /* Debug configuration for PBXProject "Keeper" */,
+				BB0000000000000012000000 /* Release configuration for PBXProject "Keeper" */,
 			);
 			defaultConfigurationName = Release;
 		};
 		BB0000000000000110000000 /* Build configuration list for PBXNativeTarget "Keeper" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
-				BB0000000000000111000000 /* Debug (Keeper) */,
-				BB0000000000000112000000 /* Release (Keeper) */,
+				BB0000000000000111000000 /* Debug configuration for PBXNativeTarget "Keeper" */,
+				BB0000000000000112000000 /* Release configuration for PBXNativeTarget "Keeper" */,
 			);
 			defaultConfigurationName = Release;
 		};
 		BB0000000000000210000000 /* Build configuration list for PBXNativeTarget "PacketTunnel" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
-				BB0000000000000211000000 /* Debug (PacketTunnel) */,
-				BB0000000000000212000000 /* Release (PacketTunnel) */,
+				BB0000000000000211000000 /* Debug configuration for PBXNativeTarget "PacketTunnel" */,
+				BB0000000000000212000000 /* Release configuration for PBXNativeTarget "PacketTunnel" */,
 			);
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
 
-/* Begin XCRemoteSwiftPackageReference section */
-		BB0000000000000000000300 /* XCRemoteSwiftPackageReference "wireguard-apple" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/WireGuard/wireguard-apple";
-			requirement = {
-				branch = master;
-				kind = branch;
-			};
+/* Begin XCLocalSwiftPackageReference section */
+		BB0000000000000000000300 /* XCLocalSwiftPackageReference "/Users/nellymoon/Library/Caches/reach-vendor/wireguard-apple" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = "/Users/nellymoon/Library/Caches/reach-vendor/wireguard-apple";
 		};
-/* End XCRemoteSwiftPackageReference section */
+/* End XCLocalSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
 		BB0000000000000000000200 /* WireGuardKit */ = {
 			isa = XCSwiftPackageProductDependency;
-			package = BB0000000000000000000300 /* XCRemoteSwiftPackageReference "wireguard-apple" */;
 			productName = WireGuardKit;
 		};
 /* End XCSwiftPackageProductDependency section */
