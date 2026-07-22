@@ -24,6 +24,7 @@ let package = Package(
             dependencies: [
                 "ReachDaemon",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
+                .product(name: "ReachKit", package: "ReachKit"),
             ]
         ),
 
@@ -45,6 +46,12 @@ let package = Package(
             ]
         ),
 
-        .testTarget(name: "ReachDaemonTests", dependencies: ["ReachDaemon"]),
+        .testTarget(
+            name: "ReachDaemonTests",
+            dependencies: [
+                "ReachDaemon",
+                .product(name: "ReachKit", package: "ReachKit"),
+            ]
+        ),
     ]
 )
