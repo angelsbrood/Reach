@@ -7,7 +7,7 @@ the decision. Kill criteria come from the pre-filing plan.
 |---|---|---|
 | S4 | Does `LanguageModelSession` accept a third-party `LanguageModel`/executor at runtime, and does an MLX filling stream behind the slot? | **PASS** (2026-07-21) |
 | S1a | QUIC with mutual TLS between provisioned certificates (client-cert challenge + CA pin), loopback | **PASS** (2026-07-21) |
-| S1b | Behavior of the QUIC connection across a Wi-Fi → cellular interface transition (migration vs re-attach) | pending — needs device |
+| S1b | Behavior of the QUIC connection across a Wi-Fi → cellular interface transition (migration vs re-attach) | **PARTIAL PASS** (2026-07-21) — re-attach verified on device; migration leg deferred to the mesh by construction |
 | S2 | Development-signed packet-tunnel extension carrying WireGuardKit traffic on device | pending — needs device |
 | S3 | Headscale as a supervised subprocess with programmatic pre-auth key minting | **PASS** (2026-07-21) |
 
@@ -68,7 +68,24 @@ Transport rulings for the spine:
   negative tests (and any client-side "am I in?" logic) must probe the data
   plane, not trust `.ready`.
 
-## S3 — headscale supervises cleanly (2026-07-21)
+## S1b — the re-attach guard rail holds on hardware (2026-07-21, partial)
+
+On an iPhone 17 Pro Max (iOS 27) streaming a long generation from the Mac
+over the studio LAN: Wi-Fi switched off mid-stream for ~5 s, then back on.
+The visible stream froze, the daemon kept generating inside its residency
+window, the client's reconnect loop re-attached when the path returned,
+replayed from its last received sequence, and the generation — 2,272
+characters — completed intact.
+
+**Scoping, stated rather than discovered:** the migration-vs-re-attach
+question for a true Wi-Fi → cellular transition cannot be answered before
+the mesh exists, by construction — on cellular there is no route to the
+daemon's LAN address, so there is nothing for a QUIC connection to migrate
+*to*. Constant addressing across paths is precisely what the WireGuard
+mesh provides; the final S1b ruling (and any use of `.handover`
+multipath) lands with S2 and the away leg, tested against the mesh IP.
+Until then, session-layer re-attach is not just the guaranteed path — it
+is the only well-defined one, and it is verified.
 
 headscale v0.29.2 (official darwin_arm64 release binary) launched as a
 subprocess with a generated config: socket up in under a second, user
