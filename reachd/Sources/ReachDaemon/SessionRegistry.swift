@@ -1,0 +1,264 @@
+import Crypto
+import Foundation
+import ReachWire
+
+/// Session residency, minimal per the named stub: generations are owned by
+/// the registry and decoupled from connections — a transport death leaves
+/// the generation running inside its residency window, and a re-attach
+/// replays the un-acked buffer then continues live. One in-flight
+/// generation per session is the tested v0 invariant; the model holds more.
+public actor SessionRegistry {
+    public struct Limits: Sendable {
+        public var residencyWindow: Duration = .seconds(120)
+        public var completedRetention: Duration = .seconds(600)
+        public var bufferCapBytes: Int = 4 * 1024 * 1024
+
+        public init() {}
+    }
+
+    public enum RegistryError: Error, Sendable {
+        case unknownSession
+        case badToken
+        case unknownGeneration
+        case generationAlreadyRunning
+    }
+
+    private struct GenerationRecord {
+        var buffer: [Ev] = []
+        var bufferBytes = 0
+        var nextSeq: UInt64 = 0
+        var state: WireGenerationState = .streaming
+        var task: Task<Void, Never>?
+        var live: AsyncStream<Ev>.Continuation?
+        var detachedAt: ContinuousClock.Instant?
+    }
+
+    private struct SessionRecord {
+        var tokenHash: SHA256Digest
+        var modelID: String
+        var generations: [UUID: GenerationRecord] = [:]
+        var lastSeen: ContinuousClock.Instant
+    }
+
+    private var sessions: [UUID: SessionRecord] = [:]
+    private let limits: Limits
+    private let clock = ContinuousClock()
+
+    public init(limits: Limits = Limits()) {
+        self.limits = limits
+    }
+
+    // MARK: Sessions
+
+    public func openSession(modelID: String) -> (sessionID: UUID, token: String) {
+        let sessionID = UUID()
+        let token = Data((0..<32).map { _ in UInt8.random(in: .min ... .max) }).base64EncodedString()
+        sessions[sessionID] = SessionRecord(
+            tokenHash: SHA256.hash(data: Data(token.utf8)),
+            modelID: modelID,
+            lastSeen: clock.now
+        )
+        return (sessionID, token)
+    }
+
+    public func validate(sessionID: UUID, token: String) throws {
+        guard var record = sessions[sessionID] else { throw RegistryError.unknownSession }
+        guard record.tokenHash == SHA256.hash(data: Data(token.utf8)) else { throw RegistryError.badToken }
+        record.lastSeen = clock.now
+        sessions[sessionID] = record
+    }
+
+    public func resumeStatus(sessionID: UUID, token: String) throws -> [SessionResumed.GenerationStatus] {
+        try validate(sessionID: sessionID, token: token)
+        return sessions[sessionID]!.generations.map { id, record in
+            SessionResumed.GenerationStatus(
+                genID: id,
+                state: record.state,
+                finalSeq: record.state == .streaming ? nil : record.nextSeq
+            )
+        }
+    }
+
+    // MARK: Generations
+
+    /// Starts a generation fed by `events` and returns the seq-stamped
+    /// attachment stream for the connection that began it. Idempotent for
+    /// re-sent `GenerateBegin` frames: a known genID re-attaches from 0.
+    public func begin(
+        sessionID: UUID,
+        genID: UUID,
+        events: @escaping @Sendable () -> AsyncThrowingStream<WireEvent, Error>
+    ) throws -> AsyncStream<Ev> {
+        guard sessions[sessionID] != nil else { throw RegistryError.unknownSession }
+        if sessions[sessionID]!.generations[genID] != nil {
+            // First-frame-loss idempotency (ruling 4).
+            return try attach(sessionID: sessionID, genID: genID, fromSeq: nil)
+        }
+
+        var record = GenerationRecord()
+        let (stream, continuation) = AsyncStream<Ev>.makeStream()
+        record.live = continuation
+        sessions[sessionID]!.generations[genID] = record
+
+        let task = Task { [weak self] in
+            for await event in Self.terminating(events()) {
+                guard let self else { return }
+                let finished = await self.ingest(sessionID: sessionID, genID: genID, event: event)
+                if finished { break }
+            }
+        }
+        sessions[sessionID]!.generations[genID]!.task = task
+        return stream
+    }
+
+    /// Re-attach a live or buffered generation, replaying from `fromSeq`
+    /// (exclusive); nil replays everything still buffered.
+    public func attach(sessionID: UUID, genID: UUID, fromSeq: UInt64?) throws -> AsyncStream<Ev> {
+        guard var session = sessions[sessionID] else { throw RegistryError.unknownSession }
+        guard var record = session.generations[genID] else { throw RegistryError.unknownGeneration }
+
+        record.live?.finish()
+        let (stream, continuation) = AsyncStream<Ev>.makeStream()
+        for buffered in record.buffer where fromSeq.map({ buffered.seq > $0 }) ?? true {
+            continuation.yield(buffered)
+        }
+        if record.state == .streaming {
+            record.live = continuation
+            record.detachedAt = nil
+        } else {
+            continuation.finish()
+            record.live = nil
+        }
+        session.generations[genID] = record
+        sessions[sessionID] = session
+        return stream
+    }
+
+    /// Cumulative ack: trim the buffer at and below `seq`.
+    public func ack(sessionID: UUID, genID: UUID, seq: UInt64) {
+        guard var session = sessions[sessionID],
+              var record = session.generations[genID] else { return }
+        record.buffer.removeAll { $0.seq <= seq }
+        record.bufferBytes = record.buffer.reduce(0) { $0 + $1.approximateSize }
+        session.generations[genID] = record
+        sessions[sessionID] = session
+    }
+
+    /// The serving connection died: keep the generation running, start the
+    /// residency clock.
+    public func detach(sessionID: UUID, genID: UUID) {
+        guard var session = sessions[sessionID],
+              var record = session.generations[genID] else { return }
+        record.live?.finish()
+        record.live = nil
+        record.detachedAt = clock.now
+        session.generations[genID] = record
+        sessions[sessionID] = session
+    }
+
+    public func cancel(sessionID: UUID, genID: UUID) {
+        guard let session = sessions[sessionID],
+              let record = session.generations[genID] else { return }
+        record.task?.cancel()
+    }
+
+    /// Expiry sweep; call periodically. Returns how many generations were
+    /// reaped (for tests and logs).
+    @discardableResult
+    public func sweep() -> Int {
+        var reaped = 0
+        let now = clock.now
+        for (sessionID, var session) in sessions {
+            for (genID, record) in session.generations {
+                let expired: Bool
+                if record.state == .streaming {
+                    expired = record.detachedAt.map { now - $0 > limits.residencyWindow } ?? false
+                    if expired { record.task?.cancel() }
+                } else {
+                    expired = record.detachedAt.map { now - $0 > limits.completedRetention } ?? false
+                }
+                if expired {
+                    session.generations.removeValue(forKey: genID)
+                    reaped += 1
+                }
+            }
+            sessions[sessionID] = session
+        }
+        return reaped
+    }
+
+    // MARK: Internals
+
+    private func ingest(sessionID: UUID, genID: UUID, event: WireEvent) -> Bool {
+        guard var session = sessions[sessionID],
+              var record = session.generations[genID] else { return true }
+
+        let stamped = Ev(seq: record.nextSeq, event: event)
+        record.nextSeq += 1
+        record.buffer.append(stamped)
+        record.bufferBytes += stamped.approximateSize
+        if record.bufferBytes > limits.bufferCapBytes {
+            // Beyond text-demo scale; drop the oldest un-acked rather than
+            // grow without bound. A re-attach past this point restarts.
+            record.buffer.removeFirst()
+        }
+        record.live?.yield(stamped)
+
+        var finished = false
+        if case .finished(let reason) = event {
+            record.state = switch reason {
+            case .complete: .complete
+            case .cancelled: .cancelled
+            case .error: .failed
+            }
+            record.live?.finish()
+            record.live = nil
+            record.detachedAt = clock.now
+            finished = true
+        }
+        session.generations[genID] = record
+        sessions[sessionID] = session
+        return finished
+    }
+
+    /// Guarantees a `.finished` event even if the filling's stream throws
+    /// or ends without one.
+    private static func terminating(
+        _ events: AsyncThrowingStream<WireEvent, Error>
+    ) -> AsyncStream<WireEvent> {
+        AsyncStream { continuation in
+            let task = Task {
+                var sawFinish = false
+                do {
+                    for try await event in events {
+                        if case .finished = event { sawFinish = true }
+                        continuation.yield(event)
+                    }
+                } catch {
+                    continuation.yield(.finished(.error("\(error)")))
+                    sawFinish = true
+                }
+                if !sawFinish {
+                    continuation.yield(.finished(.complete))
+                }
+                continuation.finish()
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+}
+
+extension Ev {
+    var approximateSize: Int {
+        switch event {
+        case .responseAppend(_, let text, _, _),
+             .responseReplace(_, let text, _, _),
+             .reasoningAppend(_, let text, _, _):
+            return 64 + text.utf8.count
+        case .toolCallAppendArguments(_, _, _, let content, _):
+            return 96 + content.utf8.count
+        case .usage, .finished:
+            return 64
+        }
+    }
+}
