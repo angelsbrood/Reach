@@ -12,6 +12,9 @@ reach-nlnet-v2.md
 *.mobileprovision
 Secrets/
 
+# Spike working material (spike code itself lives on spike/* branches)
+spikes/*/certs/
+
 # Build products and user state
 .build/
 DerivedData/
