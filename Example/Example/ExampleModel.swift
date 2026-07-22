@@ -4,11 +4,13 @@ import Observation
 import ReachIdentity
 import ReachKit
 import ReachTransport
+import ReachWire
 
 /// The Example app links ReachKit and nothing privileged — it stands in
-/// for every third-party app. Phase 1 identity arrives as a provisioning
-/// bundle (`reachd ca issue-client --name example --out …`); the ceremony
-/// replaces that file entirely.
+/// for every third-party app. Identity, in preference order: whatever a
+/// prior enrollment left in the keychain; a hand-provisioned Phase 1
+/// bundle; else the app ASKS — the grant ceremony runs on first send and
+/// the sheet appears on the keeper.
 @Observable @MainActor
 final class ExampleModel {
     enum IdentityState: Equatable {
@@ -33,27 +35,30 @@ final class ExampleModel {
     static let identityLabel = "reach-example"
 
     func bootstrap() async {
-        // Identity: env override first (simulator runs point at the host
-        // filesystem), then the app's Documents directory.
+        // Identity: a prior enrollment's keychain items first, then the
+        // env override (simulator runs point at the host filesystem), then
+        // the app's Documents directory.
+        if await ReachEnrollment.ensureRegistered(label: Self.identityLabel) {
+            identityState = .registered(cluster: "enrolled")
+        }
+
         let candidates: [URL] = [
             ProcessInfo.processInfo.environment["REACH_IDENTITY"].map { URL(fileURLWithPath: $0) },
             FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?
                 .appendingPathComponent("reach-identity.json"),
         ].compactMap { $0 }
 
-        for url in candidates where FileManager.default.fileExists(atPath: url.path) {
-            do {
-                let bundle = try ProvisionedIdentity.load(from: url)
-                _ = try await ReachIdentityRegistry.shared.register(label: Self.identityLabel, provisioned: bundle)
-                identityState = .registered(cluster: bundle.clusterName)
-                break
-            } catch {
-                identityState = .failed("\(error)")
+        if case .missing = identityState {
+            for url in candidates where FileManager.default.fileExists(atPath: url.path) {
+                do {
+                    let bundle = try ProvisionedIdentity.load(from: url)
+                    _ = try await ReachIdentityRegistry.shared.register(label: Self.identityLabel, provisioned: bundle)
+                    identityState = .registered(cluster: bundle.clusterName)
+                    break
+                } catch {
+                    identityState = .failed("\(error)")
+                }
             }
-        }
-
-        if ProcessInfo.processInfo.environment["REACH_AUTOSEND"] == "1", case .registered = identityState {
-            send()
         }
 
         let browser = ClusterBrowser()
@@ -64,34 +69,47 @@ final class ExampleModel {
                 await MainActor.run { self?.clusters = found }
             }
         }
+
+        // Identity is no longer a precondition — an unregistered autosend
+        // walks through the grant ceremony like any first send.
+        if ProcessInfo.processInfo.environment["REACH_AUTOSEND"] == "1" {
+            send()
+        }
     }
 
     func send() {
-        guard case .registered = identityState else {
-            status = "No identity: issue one with `reachd ca issue-client --name example` and place it at Documents/reach-identity.json (or set REACH_IDENTITY)."
-            return
-        }
-        // Prefer a discovered cluster (dialed as a Bonjour service, resolved
-        // by the system) unless the operator typed a specific host.
-        let service = host == "127.0.0.1" ? clusters.first?.name : nil
-        let key = "\(service ?? host)|\(modelID)"
-        if session == nil || sessionKey != key {
-            let configuration = ReachExecutor.Configuration(
-                serviceName: service,
-                host: host,
-                modelID: modelID,
-                identityLabel: Self.identityLabel
-            )
-            session = LanguageModelSession(model: ReachLanguageModel(configuration: configuration))
-            sessionKey = key
-        }
-        guard let session, !session.isResponding else { return }
-
+        guard !isStreaming else { return }
         let text = prompt
         output = ""
-        status = "streaming…"
+        status = ""
         isStreaming = true
         Task {
+            defer { isStreaming = false }
+            // No identity is not a dead end: the app asks, the keeper's
+            // sheet rules, and the send continues with the granted cert.
+            do {
+                try await ensureIdentity()
+            } catch {
+                status = "no grant: \(error)"
+                print("[example] enrollment failed: \(error)")
+                return
+            }
+            // Prefer a discovered cluster (dialed as a Bonjour service,
+            // resolved by the system) unless the operator typed a host.
+            let service = host == "127.0.0.1" ? clusters.first?.name : nil
+            let key = "\(service ?? host)|\(modelID)"
+            if session == nil || sessionKey != key {
+                let configuration = ReachExecutor.Configuration(
+                    serviceName: service,
+                    host: host,
+                    modelID: modelID,
+                    identityLabel: Self.identityLabel
+                )
+                session = LanguageModelSession(model: ReachLanguageModel(configuration: configuration))
+                sessionKey = key
+            }
+            guard let session, !session.isResponding else { return }
+            status = "streaming…"
             do {
                 let stream = session.streamResponse(to: text)
                 for try await snapshot in stream {
@@ -103,7 +121,39 @@ final class ExampleModel {
                 self.status = "failed: \(error)"
                 print("[example] failed: \(error)")
             }
-            self.isStreaming = false
+        }
+    }
+
+    /// The app half of the grant ceremony, run at most once: reload what a
+    /// prior enrollment stored, else knock at the discovered cluster's
+    /// grant door and wait for the keeper's ruling.
+    private func ensureIdentity() async throws {
+        if case .registered = identityState { return }
+        if await ReachEnrollment.ensureRegistered(label: Self.identityLabel) {
+            identityState = .registered(cluster: "enrolled")
+            return
+        }
+        // Give discovery a breath — a send can land before the first
+        // browse result does.
+        for _ in 0..<20 where clusters.isEmpty {
+            try await Task.sleep(for: .milliseconds(250))
+        }
+        guard let cluster = clusters.first, let caHash = cluster.txt[Wire.txtCAHashKey] else {
+            throw ExampleError.noGrantDoor
+        }
+        status = "asking your keeper for access…"
+        try await ReachEnrollment.enroll(
+            clusterName: cluster.name,
+            caHashBase64URL: caHash,
+            identityLabel: Self.identityLabel
+        )
+        identityState = .registered(cluster: cluster.name)
+    }
+
+    enum ExampleError: LocalizedError {
+        case noGrantDoor
+        var errorDescription: String? {
+            "No cluster advertising a grant door was found — is reachd serving?"
         }
     }
 }

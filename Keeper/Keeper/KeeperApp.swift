@@ -3,6 +3,7 @@ import SwiftUI
 @main
 struct KeeperApp: App {
     @State private var tunnel = TunnelManager()
+    @State private var console = GrantConsole()
 
     var body: some Scene {
         WindowGroup {
@@ -11,6 +12,8 @@ struct KeeperApp: App {
                     VStack(alignment: .leading, spacing: 24) {
                         CeremonyView(tunnel: tunnel)
                         Divider()
+                        GrantConsoleView(console: console)
+                        Divider()
                         TunnelView(manager: tunnel)
                     }
                     .padding()
@@ -18,6 +21,7 @@ struct KeeperApp: App {
                 .navigationTitle("Keeper")
             }
             .task { await tunnel.bootstrap() }
+            .task { console.start() }
         }
     }
 }

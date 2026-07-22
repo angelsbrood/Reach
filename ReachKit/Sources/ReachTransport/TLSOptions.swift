@@ -19,7 +19,8 @@ public enum TLSBuilder {
         alpn: String,
         identity: SecIdentity,
         clientTrustRoots: [SecCertificate],
-        presentedChain: [SecCertificate] = []
+        presentedChain: [SecCertificate] = [],
+        idleMilliseconds: Int = 30_000
     ) -> NWProtocolQUIC.Options {
         let options = NWProtocolQUIC.Options(alpn: [alpn])
         let sec = options.securityProtocolOptions
@@ -33,7 +34,7 @@ public enum TLSBuilder {
             sec_protocol_options_set_peer_authentication_required(sec, true)
             installVerifyBlock(sec, roots: clientTrustRoots, verifyingClient: true)
         }
-        tune(options)
+        tune(options, idleMilliseconds: idleMilliseconds)
         return options
     }
 
@@ -58,11 +59,15 @@ public enum TLSBuilder {
 
     /// Client options for the enrollment channel: no client identity yet;
     /// the server is verified by locating, in its presented chain, a
-    /// certificate whose DER hashes to `caHashPin` (carried by the QR read
-    /// off the operator's own screen), then anchoring evaluation to it.
+    /// certificate whose DER hashes to `caHashPin` — carried by the QR read
+    /// off the operator's own screen (device ceremony) or by the cluster's
+    /// TXT record (app ceremony, the provenance-TOFU seam) — then anchoring
+    /// evaluation to it. Idle runs long: a parked app request sits quiet
+    /// for up to the grant window.
     public static func enrollClientOptions(
         alpn: String,
-        caHashPin: Data
+        caHashPin: Data,
+        idleMilliseconds: Int = 180_000
     ) -> NWProtocolQUIC.Options {
         let options = NWProtocolQUIC.Options(alpn: [alpn])
         let sec = options.securityProtocolOptions
@@ -90,7 +95,7 @@ public enum TLSBuilder {
             var error: CFError?
             complete(SecTrustEvaluateWithError(trust, &error))
         }, tlsQueue)
-        tune(options)
+        tune(options, idleMilliseconds: idleMilliseconds)
         return options
     }
 
@@ -110,8 +115,8 @@ public enum TLSBuilder {
         }, tlsQueue)
     }
 
-    private static func tune(_ options: NWProtocolQUIC.Options) {
-        options.idleTimeout = 30_000
+    private static func tune(_ options: NWProtocolQUIC.Options, idleMilliseconds: Int = 30_000) {
+        options.idleTimeout = idleMilliseconds
         options.direction = .bidirectional
     }
 }

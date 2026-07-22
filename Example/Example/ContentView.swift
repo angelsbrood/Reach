@@ -49,8 +49,8 @@ struct ContentView: View {
             Label("Paired with \(cluster)", systemImage: "checkmark.seal")
                 .foregroundStyle(.green)
         case .missing:
-            Label("No identity — issue one with reachd ca issue-client", systemImage: "exclamationmark.triangle")
-                .foregroundStyle(.orange)
+            Label("Not paired yet — the first send asks your keeper", systemImage: "hand.raised")
+                .foregroundStyle(.secondary)
         case .failed(let message):
             Label("Identity failed: \(message)", systemImage: "xmark.seal")
                 .foregroundStyle(.red)

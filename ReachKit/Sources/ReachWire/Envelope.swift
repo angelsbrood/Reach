@@ -29,6 +29,11 @@ public enum FrameType: UInt8, Codable, Sendable, CaseIterable {
     case enrollCertRequest = 32
     case enrollGrant = 33
     case enrollComplete = 34
+
+    // App enrollment (same channel; authorized by a grant ruling, not a token).
+    case appEnrollBegin = 35
+    case appEnrollCertRequest = 36
+    case appEnrollGrant = 37
 }
 
 /// A frame that can ride the wire. Bodies are JSON for v0; the envelope is

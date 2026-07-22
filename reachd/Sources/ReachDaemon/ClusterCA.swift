@@ -104,10 +104,11 @@ public struct ClusterCA: Sendable {
         return try issue(commonName: commonName, days: days, extensions: extensions)
     }
 
-    /// Issues a clientAuth leaf for a key the device minted and proved
-    /// possession of — the ceremony's issuance path. The private key never
-    /// leaves the device.
-    public func issueDevice(
+    /// Issues a clientAuth leaf for a key the client minted and proved
+    /// possession of — the ceremony's issuance path, for devices
+    /// (`reach://device/…`) and granted apps (`reach://app/…`) alike. The
+    /// private key never leaves the enrolling side.
+    public func issueClientLeaf(
         publicKeyX963: Data,
         commonName: String,
         uri: String,

@@ -1,3 +1,4 @@
+import Crypto
 import Foundation
 import Network
 import ReachIdentity
@@ -17,9 +18,10 @@ public enum DaemonInfo {
 }
 
 /// The daemon: QUIC listener with mutual TLS, Bonjour advertisement, and
-/// the slot behind it. Phase 1 grant model: any certificate issued by the
-/// cluster CA may open sessions (per-app grants arrive with the ceremony,
-/// which also binds sessions to the peer certificate).
+/// the slot behind it. Grant model: any certificate issued by the cluster
+/// CA may open sessions — the grant governs ISSUANCE (the keeper's sheet
+/// stands between an app and its certificate); revocation and the ledger
+/// are funded scope (M2).
 public final class Daemon: Sendable {
     public struct ListenerIdentity: @unchecked Sendable {
         public let identity: SecIdentity
@@ -31,17 +33,37 @@ public final class Daemon: Sendable {
         }
     }
 
+    /// The grant organ, when this daemon rules per-app access: the desk
+    /// where requests park, and the registry that says which peer
+    /// certificate is the admin device.
+    public struct GrantWiring: Sendable {
+        public let desk: GrantDesk
+        public let devices: DeviceRegistry
+
+        public init(desk: GrantDesk, devices: DeviceRegistry) {
+            self.desk = desk
+            self.devices = devices
+        }
+    }
+
     /// Starts the ceremony's listener: server-auth-only TLS (clients have
     /// no certificate yet), the issuing chain presented so the QR's CA-hash
-    /// pin can verify it.
-    public func startEnrollment(service: EnrollmentService) throws {
+    /// pin — or the TXT-carried pin an app discovered — can verify it.
+    public func startEnrollment(service: EnrollmentService, advertise: Bool = true) throws {
         let options = TLSBuilder.serverOptions(
             alpn: Wire.enrollALPN,
             identity: tls.identity,
             clientTrustRoots: [],
-            presentedChain: [tls.caCertificate]
+            presentedChain: [tls.caCertificate],
+            // A parked app request idles for up to the grant window; QUIC's
+            // effective idle timeout is the min of both ends, so the server
+            // must stretch too.
+            idleMilliseconds: 180_000
         )
         let listener = try QUICListener(port: config.enrollPort, parameters: .reachQUIC(options: options))
+        if advertise {
+            listener.advertise(name: config.clusterName, type: Wire.bonjourEnrollService)
+        }
         let accept = Task {
             do {
                 for try await tunnel in listener.tunnels {
@@ -62,18 +84,21 @@ public final class Daemon: Sendable {
     private let filling: any SlotFilling
     private let registry: SessionRegistry
     private let tls: ListenerIdentity
+    private let grants: GrantWiring?
     private let state = StateBox()
 
     public init(
         config: DaemonConfig,
         filling: any SlotFilling,
         identity: ListenerIdentity,
-        registry: SessionRegistry = SessionRegistry()
+        registry: SessionRegistry = SessionRegistry(),
+        grants: GrantWiring? = nil
     ) {
         self.config = config
         self.filling = filling
         self.registry = registry
         self.tls = identity
+        self.grants = grants
     }
 
     /// Starts listening (and advertising, unless disabled for tests).
@@ -85,9 +110,13 @@ public final class Daemon: Sendable {
         )
         let listener = try QUICListener(port: config.port, parameters: .reachQUIC(options: options))
         if advertise {
+            // The CA-hash pin rides the TXT record: an identity-less app
+            // reads it here and holds the enrollment channel to it.
+            let caHash = Wire.base64URL(Data(SHA256.hash(data: IdentityStore.der(of: tls.caCertificate))))
             listener.advertise(name: config.clusterName, txt: [
                 "v": "\(Wire.version)",
                 "model": filling.modelID,
+                Wire.txtCAHashKey: caHash,
             ])
         }
         let accept = Task { [weak self] in
@@ -159,6 +188,11 @@ public final class Daemon: Sendable {
             cluster: config.clusterName,
             models: [ModelDescriptor(id: filling.modelID, displayName: filling.displayName, capabilities: filling.capabilities)]
         ))
+        // The admin device, once this stream proves it is one; grant events
+        // ride back on this same stream while the loop keeps consuming.
+        var admin: DeviceRegistry.Device?
+        var forwarder: Task<Void, Never>?
+        defer { forwarder?.cancel() }
         while let raw = try await iterator.next() {
             switch raw.type {
             case .sessionOpen:
@@ -173,6 +207,32 @@ public final class Daemon: Sendable {
                 } catch {
                     try await stream.send(ErrorFrame(code: "resume-rejected", message: "\(error)"))
                 }
+            case .grantSubscribe:
+                _ = try raw.decode(GrantSubscribe.self)
+                guard let grants, let device = await adminDevice(on: stream, grants: grants) else {
+                    try await stream.send(ErrorFrame(code: "grant-denied", message: "admin device certificate required"))
+                    continue
+                }
+                admin = device
+                forwarder?.cancel()
+                let events = await grants.desk.subscribe()
+                forwarder = Task {
+                    for await event in events {
+                        try? await stream.send(event)
+                    }
+                }
+            case .grantRule:
+                let rule = try raw.decode(GrantRule.self)
+                if admin == nil, let grants {
+                    admin = await adminDevice(on: stream, grants: grants)
+                }
+                guard let grants, let device = admin else {
+                    try await stream.send(ErrorFrame(code: "grant-denied", message: "admin device certificate required"))
+                    continue
+                }
+                if await !grants.desk.rule(requestID: rule.requestID, allow: rule.allow, ruler: device.id) {
+                    try await stream.send(ErrorFrame(code: "grant-unknown", message: "no pending request \(rule.requestID)"))
+                }
             case .ping:
                 let ping = try raw.decode(Ping.self)
                 try await stream.send(Pong(nonce: ping.nonce))
@@ -180,6 +240,18 @@ public final class Daemon: Sendable {
                 try await stream.send(ErrorFrame(code: "unexpected-frame", message: "\(raw.type) on control stream"))
             }
         }
+    }
+
+    /// The peer is an admin device iff its leaf's SAN URI names an active
+    /// enrolled device holding the admin grant.
+    private func adminDevice(on stream: ReachTransport.QUICStream, grants: GrantWiring) async -> DeviceRegistry.Device? {
+        guard let der = stream.peerCertificateDER(),
+              let uri = PeerIdentity.uri(fromDER: der),
+              let id = PeerIdentity.deviceID(fromURI: uri),
+              let device = await grants.devices.device(id: id),
+              device.admin, device.active
+        else { return nil }
+        return device
     }
 
     private func generationLoop(

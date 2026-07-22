@@ -38,4 +38,17 @@ public actor ReachIdentityRegistry {
     public func material(for label: String) -> Material? {
         materials[label]
     }
+
+    /// Reassembles material a prior enrollment left in the keychain — the
+    /// identity under `label`, the pinned CA under `label + ".ca"` — and
+    /// registers it. Nil when either half is absent.
+    @discardableResult
+    public func registerFromKeychain(label: String) -> Material? {
+        guard let identity = try? KeychainIdentity.find(label: label),
+              let ca = try? KeychainIdentity.findCertificate(label: label + ".ca")
+        else { return nil }
+        let material = Material(identity: identity, caCertificate: ca)
+        materials[label] = material
+        return material
+    }
 }

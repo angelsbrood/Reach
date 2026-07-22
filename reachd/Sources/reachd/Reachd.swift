@@ -52,10 +52,15 @@ struct Serve: AsyncParsableCommand {
         let caCert = try IdentityStore.certificate(fromDER: ca.certificateDER())
 
         let filling = MLXFilling(modelID: config.modelID)
+        // One device registry and one grant desk, shared between the organ
+        // that parks app requests and the organ that lets keepers rule them.
+        let devices = DeviceRegistry()
+        let desk = GrantDesk()
         let daemon = Daemon(
             config: config,
             filling: filling,
-            identity: Daemon.ListenerIdentity(identity: identity, caCertificate: caCert)
+            identity: Daemon.ListenerIdentity(identity: identity, caCertificate: caCert),
+            grants: Daemon.GrantWiring(desk: desk, devices: devices)
         )
         try await daemon.start(advertise: !noAdvertise)
         let meshEndpoint = config.meshEndpoint
@@ -64,11 +69,13 @@ struct Serve: AsyncParsableCommand {
         let enrollment = EnrollmentService(
             ca: ca,
             tokens: TokenStore(),
-            devices: DeviceRegistry(),
-            wgHost: wgHost
+            devices: devices,
+            wgHost: wgHost,
+            desk: desk
         )
-        try daemon.startEnrollment(service: enrollment)
+        try daemon.startEnrollment(service: enrollment, advertise: !noAdvertise)
         print("[reachd] enrollment listening on :\(config.enrollPort), mesh endpoint \(meshEndpoint)")
+        print("[reachd] grant desk open — app approvals surface on the keeper")
         print("[reachd] \(config.clusterName) serving \(config.modelID) on :\(config.port) (\(addresses.map { $0.map(String.init).joined(separator: ".") }.joined(separator: ", ")))")
 
         let prewarm = Task {

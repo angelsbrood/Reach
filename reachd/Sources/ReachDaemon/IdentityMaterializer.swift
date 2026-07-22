@@ -1,6 +1,8 @@
+import Crypto
 import Foundation
 import ReachIdentity
 import Security
+import X509
 
 /// Turns issued key+cert material into a `SecIdentity`. The keychain is
 /// the production path; when the process lacks keychain access
@@ -8,18 +10,33 @@ import Security
 /// openssl-assembled PKCS#12, which `SecPKCS12Import` accepts everywhere.
 public enum IdentityMaterializer {
     public static func materialize(_ issued: ClusterCA.Issued, label: String) throws -> SecIdentity {
+        try materialize(
+            certificateDER: try issued.certificateDER(),
+            privateKey: issued.privateKey,
+            label: label
+        )
+    }
+
+    /// The client-held-key variant: certificate as issued over the wire,
+    /// key as the enrolling side minted it (tests standing in for keepers
+    /// and apps use this; on devices the ceremony stores into the keychain
+    /// directly).
+    public static func materialize(certificateDER: Data, privateKey: P256.Signing.PrivateKey, label: String) throws -> SecIdentity {
         do {
             return try KeychainIdentity.store(
-                privateKeyX963: issued.privateKeyX963,
-                certificateDER: try issued.certificateDER(),
+                privateKeyX963: privateKey.x963Representation,
+                certificateDER: certificateDER,
                 label: label
             )
         } catch IdentityError.keychainAddFailed(let status) where status == errSecMissingEntitlement {
-            return try viaPKCS12(issued)
+            return try viaPKCS12(
+                keyPEM: privateKey.pemRepresentation,
+                certPEM: try Certificate(derEncoded: Array(certificateDER)).serializeAsPEM().pemString
+            )
         }
     }
 
-    private static func viaPKCS12(_ issued: ClusterCA.Issued) throws -> SecIdentity {
+    private static func viaPKCS12(keyPEM: String, certPEM: String) throws -> SecIdentity {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("reach-id-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -27,8 +44,8 @@ public enum IdentityMaterializer {
         let keyURL = dir.appendingPathComponent("key.pem")
         let certURL = dir.appendingPathComponent("cert.pem")
         let p12URL = dir.appendingPathComponent("identity.p12")
-        try issued.privateKey.pemRepresentation.write(to: keyURL, atomically: true, encoding: .utf8)
-        try issued.certificate.serializeAsPEM().pemString.write(to: certURL, atomically: true, encoding: .utf8)
+        try keyPEM.write(to: keyURL, atomically: true, encoding: .utf8)
+        try certPEM.write(to: certURL, atomically: true, encoding: .utf8)
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/openssl")

@@ -156,14 +156,21 @@ public struct GrantSubscribe: WireFrame, Equatable {
 public struct GrantEvent: WireFrame, Equatable {
     public static let frameType = FrameType.grantEvent
     public var requestID: UUID
+    /// Observed provenance of the request (remote address, upgraded to the
+    /// enrolled device when the registry can bind it) — shown on the
+    /// sheet as context, never treated as proof.
     public var deviceID: String
     public var bundleID: String
+    /// What the app calls itself — sheet copy, same trust class as the
+    /// bundle identity (TOFU until App Attest, the named stub).
+    public var displayName: String
     public var appKeyFingerprint: String
 
-    public init(requestID: UUID, deviceID: String, bundleID: String, appKeyFingerprint: String) {
+    public init(requestID: UUID, deviceID: String, bundleID: String, displayName: String, appKeyFingerprint: String) {
         self.requestID = requestID
         self.deviceID = deviceID
         self.bundleID = bundleID
+        self.displayName = displayName
         self.appKeyFingerprint = appKeyFingerprint
     }
 }
@@ -313,5 +320,50 @@ public struct EnrollComplete: WireFrame, Equatable {
 
     public init(ok: Bool) {
         self.ok = ok
+    }
+}
+
+// MARK: - App enrollment (the grant sheet's wire half)
+
+/// An app asking to use the cluster. No token: authorization is a human
+/// ruling on the keeper, delivered while this stream waits parked.
+public struct AppEnrollBegin: WireFrame, Equatable {
+    public static let frameType = FrameType.appEnrollBegin
+    public var bundleID: String
+    public var displayName: String
+
+    public init(bundleID: String, displayName: String) {
+        self.bundleID = bundleID
+        self.displayName = displayName
+    }
+}
+
+/// The app's key and its proof of possession over `nonce ‖ appPubX963`.
+/// One key only — apps do not join the mesh; they ride the device's.
+public struct AppEnrollCertRequest: WireFrame, Equatable {
+    public static let frameType = FrameType.appEnrollCertRequest
+    /// P-256 public key, X9.63. Software-backed in v0 (the named stub);
+    /// Secure Enclave app keys are funded scope.
+    public var appPubX963: Data
+    public var popSig: Data
+
+    public init(appPubX963: Data, popSig: Data) {
+        self.appPubX963 = appPubX963
+        self.popSig = popSig
+    }
+}
+
+/// The ruled grant: an app-scoped certificate and the issuing CA. The URI
+/// SAN reads `reach://app/<device>/<bundleID>`, where `<device>` is the
+/// RULING device — the authority the grant hangs from, which in v0 IS the
+/// binding (attestation stubbed as local approval, per the named stubs).
+public struct AppEnrollGrant: WireFrame, Equatable {
+    public static let frameType = FrameType.appEnrollGrant
+    public var appCertDER: Data
+    public var caCertDER: Data
+
+    public init(appCertDER: Data, caCertDER: Data) {
+        self.appCertDER = appCertDER
+        self.caCertDER = caCertDER
     }
 }

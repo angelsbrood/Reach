@@ -5,6 +5,7 @@
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_reach._udp</string>
+		<string>_reach-enroll._udp</string>
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Example discovers and streams from your own Reach cluster on this network.</string>

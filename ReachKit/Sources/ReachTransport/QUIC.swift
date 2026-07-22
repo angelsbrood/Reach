@@ -67,8 +67,14 @@ public final class QUICStream: Sendable {
             }
             connection.start(queue: transportQueue)
             transportQueue.asyncAfter(deadline: .now() + timeout) {
-                box.resume(.failure(TransportError.connectionFailed("stream open timeout")))
-                connection.cancel()
+                // Only a true timeout tears the connection down — a stream
+                // that opened in time lives past this timer. (Found live:
+                // the unconditional cancel here killed any stream older
+                // than its own open-timeout; generations masked it behind
+                // re-attach, the parked enrollment exposed it.)
+                if box.resume(.failure(TransportError.connectionFailed("stream open timeout"))) {
+                    connection.cancel()
+                }
             }
         }
     }
@@ -126,6 +132,12 @@ public final class QUICStream: Sendable {
 
     public func cancel() {
         connection.cancel()
+    }
+
+    /// The remote address as the transport saw it — observed provenance
+    /// for the grant sheet, nothing more.
+    public func remoteEndpointDescription() -> String? {
+        connection.currentPath?.remoteEndpoint.map { "\($0)" }
     }
 
     /// DER of the peer's leaf certificate, when the stream rode a
@@ -200,7 +212,8 @@ public final class QUICDialer: Sendable {
     }
 }
 
-/// Continuation guarded against double resume.
+/// Continuation guarded against double resume. `resume` reports whether
+/// this call was the one that resumed — late timers key off it.
 final class ResumeOnce<T: Sendable>: @unchecked Sendable {
     private var continuation: CheckedContinuation<T, Error>?
     private let lock = NSLock()
@@ -209,11 +222,14 @@ final class ResumeOnce<T: Sendable>: @unchecked Sendable {
         self.continuation = continuation
     }
 
-    func resume(_ result: Result<T, Error>) {
+    @discardableResult
+    func resume(_ result: Result<T, Error>) -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        continuation?.resume(with: result)
-        continuation = nil
+        guard let continuation else { return false }
+        continuation.resume(with: result)
+        self.continuation = nil
+        return true
     }
 }
 
@@ -252,14 +268,14 @@ public final class QUICListener: Sendable {
     }
 
     /// Attach a Bonjour advertisement to this listener.
-    public func advertise(name: String, txt: [String: String] = [:]) {
+    public func advertise(name: String, type: String = Wire.bonjourService, txt: [String: String] = [:]) {
         var record = NWTXTRecord()
         for (key, value) in txt {
             record[key] = value
         }
         listener.service = NWListener.Service(
             name: name,
-            type: Wire.bonjourService,
+            type: type,
             domain: nil,
             txtRecord: record.data
         )

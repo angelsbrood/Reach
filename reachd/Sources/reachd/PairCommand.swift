@@ -24,6 +24,9 @@ struct Pair: AsyncParsableCommand {
         var name: String
         var addrs: [String]
         var port: UInt16
+        /// The session listener — the keeper's console dials it later with
+        /// the device certificate this ceremony issues.
+        var sport: UInt16
         var caHash: Data
         var token: String
     }
@@ -50,6 +53,7 @@ struct Pair: AsyncParsableCommand {
             name: config.clusterName,
             addrs: addrs,
             port: config.enrollPort,
+            sport: config.port,
             caHash: Data(SHA256.hash(data: try ca.certificateDER())),
             token: token
         )

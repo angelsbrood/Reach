@@ -15,6 +15,9 @@ enum EnrollmentClient {
         var name: String
         var addrs: [String]
         var port: UInt16
+        /// Session listener; absent on QRs minted before the console
+        /// existed, so the well-known default fills in.
+        var sport: UInt16?
         var caHash: Data
         var token: String
     }
@@ -111,6 +114,15 @@ enum EnrollmentClient {
         }
         _ = try DeviceKey.installCertificate(grant.deviceCertDER)
         try await stream.send(EnrollComplete(ok: true))
+
+        // The cluster's calling card, held for the grant console: where the
+        // session door is, and the CA everything verifies against.
+        ClusterRecord(
+            name: payload.name,
+            addrs: payload.addrs,
+            sessionPort: payload.sport ?? 47337,
+            caCertDER: grant.caCertDER
+        ).save()
 
         let config = """
         [Interface]

@@ -103,7 +103,7 @@ private func roundTrip<F: WireFrame>(_ frame: F) throws -> F {
     }
 
     @Test func grantFramesRoundTrip() throws {
-        let event = GrantEvent(requestID: UUID(), deviceID: "d", bundleID: "b", appKeyFingerprint: "f")
+        let event = GrantEvent(requestID: UUID(), deviceID: "d", bundleID: "b", displayName: "App", appKeyFingerprint: "f")
         #expect(try roundTrip(event) == event)
         let rule = GrantRule(requestID: UUID(), allow: true)
         #expect(try roundTrip(rule) == rule)
@@ -128,6 +128,20 @@ private func roundTrip<F: WireFrame>(_ frame: F) throws -> F {
                 keepaliveSeconds: 25
             )
         )
+        #expect(try roundTrip(grant) == grant)
+    }
+
+    @Test func appEnrollFramesRoundTrip() throws {
+        let begin = AppEnrollBegin(bundleID: "systems.reach.example", displayName: "Example")
+        #expect(try roundTrip(begin) == begin)
+
+        let request = AppEnrollCertRequest(
+            appPubX963: Data([4, 1, 2, 3]),
+            popSig: Data([9, 9])
+        )
+        #expect(try roundTrip(request) == request)
+
+        let grant = AppEnrollGrant(appCertDER: Data([6, 6]), caCertDER: Data([7]))
         #expect(try roundTrip(grant) == grant)
     }
 }

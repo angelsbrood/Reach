@@ -44,6 +44,35 @@ public enum KeychainIdentity {
         return try find(label: label)
     }
 
+    /// Stores a certificate alone — the cluster CA an app pinned at its
+    /// enrollment, held so the pin survives relaunch.
+    public static func storeCertificate(der: Data, label: String) throws {
+        let certificate = try IdentityStore.certificate(fromDER: der)
+        let add: [String: Any] = [
+            kSecClass as String: kSecClassCertificate,
+            kSecValueRef as String: certificate,
+            kSecAttrLabel as String: label,
+        ]
+        let status = SecItemAdd(add as CFDictionary, nil)
+        guard status == errSecSuccess || status == errSecDuplicateItem else {
+            throw IdentityError.keychainAddFailed(status)
+        }
+    }
+
+    public static func findCertificate(label: String) throws -> SecCertificate {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassCertificate,
+            kSecAttrLabel as String: label,
+            kSecReturnRef as String: true,
+        ]
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        guard status == errSecSuccess, let item else {
+            throw IdentityError.identityNotFound(status)
+        }
+        return (item as! SecCertificate)
+    }
+
     public static func find(label: String) throws -> SecIdentity {
         let query: [String: Any] = [
             kSecClass as String: kSecClassIdentity,

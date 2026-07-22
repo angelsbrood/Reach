@@ -13,8 +13,9 @@ import X509
 /// design — the phone authenticates the daemon via the CA-hash pin from
 /// the QR; the daemon authenticates the phone via the one-time token. One
 /// proof-of-possession signature binds the device key and the WireGuard
-/// key in a single gesture.
-public actor EnrollmentService {
+/// key in a single gesture. Stateless by construction — every mutable
+/// organ it touches (registry, desk, host) is its own actor.
+public struct EnrollmentService: Sendable {
     public struct Provisioned: Sendable {
         public let deviceID: UUID
         public let name: String
@@ -26,89 +27,189 @@ public actor EnrollmentService {
     private let tokens: TokenStore
     private let devices: DeviceRegistry
     private let wgHost: WireGuardHost
+    private let desk: GrantDesk
 
-    public init(ca: ClusterCA, tokens: TokenStore, devices: DeviceRegistry, wgHost: WireGuardHost) {
+    public init(ca: ClusterCA, tokens: TokenStore, devices: DeviceRegistry, wgHost: WireGuardHost, desk: GrantDesk = GrantDesk()) {
         self.ca = ca
         self.tokens = tokens
         self.devices = devices
         self.wgHost = wgHost
+        self.desk = desk
     }
 
-    /// Serves one enrollment stream to completion.
+    /// Serves one enrollment stream to completion. The first frame decides
+    /// which ceremony this is: a device (token-authorized) or an app
+    /// (grant-authorized, parked for the keeper's ruling).
     public func serve(stream: ReachTransport.QUICStream) async {
         var iterator = stream.frames.makeAsyncIterator()
         do {
-            guard let beginRaw = try await iterator.next(), beginRaw.type == .enrollBegin else {
-                try await stream.send(ErrorFrame(code: "enroll-sequence", message: "expected EnrollBegin"))
+            guard let first = try await iterator.next() else { return }
+            switch first.type {
+            case .enrollBegin:
+                try await serveDevice(begin: try first.decode(EnrollBegin.self), stream: stream, iterator: &iterator)
+            case .appEnrollBegin:
+                try await serveApp(begin: try first.decode(AppEnrollBegin.self), stream: stream, iterator: &iterator)
+            default:
+                try await stream.send(ErrorFrame(code: "enroll-sequence", message: "expected EnrollBegin or AppEnrollBegin"))
                 stream.cancel()
-                return
             }
-            let begin = try beginRaw.decode(EnrollBegin.self)
-            guard tokens.consume(begin.token) else {
-                try await stream.send(ErrorFrame(code: "enroll-token", message: "invalid or expired token"))
-                stream.cancel()
-                return
-            }
+        } catch {
+            Log.error("enrollment stream failed: \(error)")
+            stream.cancel()
+        }
+    }
 
-            var nonce = Data(count: 32)
-            nonce.withUnsafeMutableBytes { _ = SecRandomCopyBytes(kSecRandomDefault, 32, $0.baseAddress!) }
-            try await stream.send(EnrollChallenge(nonce: nonce))
+    private func serveDevice(
+        begin: EnrollBegin,
+        stream: ReachTransport.QUICStream,
+        iterator: inout AsyncThrowingStream<RawFrame, Error>.AsyncIterator
+    ) async throws {
+        guard tokens.consume(begin.token) else {
+            try await stream.send(ErrorFrame(code: "enroll-token", message: "invalid or expired token"))
+            stream.cancel()
+            return
+        }
 
-            guard let requestRaw = try await iterator.next(), requestRaw.type == .enrollCertRequest else {
-                try await stream.send(ErrorFrame(code: "enroll-sequence", message: "expected EnrollCertRequest"))
-                stream.cancel()
-                return
-            }
-            let request = try requestRaw.decode(EnrollCertRequest.self)
+        var nonce = Data(count: 32)
+        nonce.withUnsafeMutableBytes { _ = SecRandomCopyBytes(kSecRandomDefault, 32, $0.baseAddress!) }
+        try await stream.send(EnrollChallenge(nonce: nonce))
 
-            // Proof of possession over nonce ‖ devicePub ‖ wgPub with the
-            // device key — "one QR, two keys," literally.
-            let signed = nonce + request.devicePubDER + request.wgPubKey
-            guard
-                let publicKey = try? P256.Signing.PublicKey(x963Representation: request.devicePubDER),
-                let signature = try? P256.Signing.ECDSASignature(derRepresentation: request.popSig),
-                publicKey.isValidSignature(signature, for: signed),
-                request.wgPubKey.count == 32
-            else {
-                try await stream.send(ErrorFrame(code: "enroll-pop", message: "proof of possession failed"))
-                stream.cancel()
-                return
-            }
+        guard let requestRaw = try await iterator.next(), requestRaw.type == .enrollCertRequest else {
+            try await stream.send(ErrorFrame(code: "enroll-sequence", message: "expected EnrollCertRequest"))
+            stream.cancel()
+            return
+        }
+        let request = try requestRaw.decode(EnrollCertRequest.self)
 
-            let record = try await devices.enroll(name: begin.deviceName, devicePubX963: request.devicePubDER, wgPub: request.wgPubKey)
-            let certificate = try ca.issueDevice(
-                publicKeyX963: request.devicePubDER,
-                commonName: begin.deviceName,
-                uri: "reach://device/\(record.id.uuidString.lowercased())"
+        // Proof of possession over nonce ‖ devicePub ‖ wgPub with the
+        // device key — "one QR, two keys," literally.
+        let signed = nonce + request.devicePubDER + request.wgPubKey
+        guard
+            let publicKey = try? P256.Signing.PublicKey(x963Representation: request.devicePubDER),
+            let signature = try? P256.Signing.ECDSASignature(derRepresentation: request.popSig),
+            publicKey.isValidSignature(signature, for: signed),
+            request.wgPubKey.count == 32
+        else {
+            try await stream.send(ErrorFrame(code: "enroll-pop", message: "proof of possession failed"))
+            stream.cancel()
+            return
+        }
+
+        let record = try await devices.enroll(name: begin.deviceName, devicePubX963: request.devicePubDER, wgPub: request.wgPubKey)
+        let certificate = try ca.issueClientLeaf(
+            publicKeyX963: request.devicePubDER,
+            commonName: begin.deviceName,
+            uri: "reach://device/\(record.id.uuidString.lowercased())"
+        )
+        var serializer = DER.Serializer()
+        try serializer.serialize(certificate)
+
+        try await wgHost.addPeer(publicKey: request.wgPubKey, allowedIP: record.assignedIP)
+        try await stream.send(EnrollGrant(
+            deviceCertDER: Data(serializer.serializedBytes),
+            caCertDER: try ca.certificateDER(),
+            wg: WGProvision(
+                assignedIP: "\(record.assignedIP)/24",
+                serverPublicKey: wgHost.serverPublicKey,
+                endpoint: wgHost.pinnedEndpoint,
+                allowedIPs: ["\(wgHost.serverMeshIP)/32"],
+                keepaliveSeconds: 25
+            )
+        ))
+
+        guard let completeRaw = try await iterator.next(), completeRaw.type == .enrollComplete else {
+            stream.cancel()
+            return
+        }
+        _ = try completeRaw.decode(EnrollComplete.self)
+        await devices.activate(record.id)
+        Log.info("device enrolled: \(begin.deviceName) → \(record.assignedIP)\(record.admin ? " (admin)" : "")")
+        stream.finishSending()
+    }
+
+    /// The app half: prove the key, then wait — the stream stays parked
+    /// while the request rides the desk to the keeper. TOFU on both sides
+    /// here (the app pinned the CA hash from discovery; the daemon takes
+    /// the bundle identity at its word) is the named App-Attest stub: the
+    /// binding in v0 is the human ruling the sheet.
+    private func serveApp(
+        begin: AppEnrollBegin,
+        stream: ReachTransport.QUICStream,
+        iterator: inout AsyncThrowingStream<RawFrame, Error>.AsyncIterator
+    ) async throws {
+        var nonce = Data(count: 32)
+        nonce.withUnsafeMutableBytes { _ = SecRandomCopyBytes(kSecRandomDefault, 32, $0.baseAddress!) }
+        try await stream.send(EnrollChallenge(nonce: nonce))
+
+        guard let requestRaw = try await iterator.next(), requestRaw.type == .appEnrollCertRequest else {
+            try await stream.send(ErrorFrame(code: "enroll-sequence", message: "expected AppEnrollCertRequest"))
+            stream.cancel()
+            return
+        }
+        let request = try requestRaw.decode(AppEnrollCertRequest.self)
+
+        let signed = nonce + request.appPubX963
+        guard
+            let publicKey = try? P256.Signing.PublicKey(x963Representation: request.appPubX963),
+            let signature = try? P256.Signing.ECDSASignature(derRepresentation: request.popSig),
+            publicKey.isValidSignature(signature, for: signed)
+        else {
+            try await stream.send(ErrorFrame(code: "enroll-pop", message: "proof of possession failed"))
+            stream.cancel()
+            return
+        }
+
+        let fingerprint = SHA256.hash(data: request.appPubX963)
+            .map { String(format: "%02x", $0) }.joined()
+        let event = GrantEvent(
+            requestID: UUID(),
+            deviceID: await provenance(of: stream),
+            bundleID: begin.bundleID,
+            displayName: begin.displayName,
+            appKeyFingerprint: fingerprint
+        )
+        Log.info("grant request parked: \(begin.bundleID) (\(fingerprint.prefix(16))…) from \(event.deviceID)")
+
+        switch await desk.park(event) {
+        case .denied:
+            try await stream.send(ErrorFrame(code: "grant-denied", message: "the keeper refused"))
+            stream.cancel()
+        case .timedOut:
+            try await stream.send(ErrorFrame(code: "grant-timeout", message: "no ruling within the window"))
+            stream.cancel()
+        case .allowed(let ruler):
+            let certificate = try ca.issueClientLeaf(
+                publicKeyX963: request.appPubX963,
+                commonName: begin.displayName,
+                uri: "reach://app/\(ruler.uuidString.lowercased())/\(begin.bundleID)"
             )
             var serializer = DER.Serializer()
             try serializer.serialize(certificate)
-
-            try await wgHost.addPeer(publicKey: request.wgPubKey, allowedIP: record.assignedIP)
-            try await stream.send(EnrollGrant(
-                deviceCertDER: Data(serializer.serializedBytes),
-                caCertDER: try ca.certificateDER(),
-                wg: WGProvision(
-                    assignedIP: "\(record.assignedIP)/24",
-                    serverPublicKey: wgHost.serverPublicKey,
-                    endpoint: wgHost.pinnedEndpoint,
-                    allowedIPs: ["\(wgHost.serverMeshIP)/32"],
-                    keepaliveSeconds: 25
-                )
+            try await stream.send(AppEnrollGrant(
+                appCertDER: Data(serializer.serializedBytes),
+                caCertDER: try ca.certificateDER()
             ))
-
             guard let completeRaw = try await iterator.next(), completeRaw.type == .enrollComplete else {
                 stream.cancel()
                 return
             }
             _ = try completeRaw.decode(EnrollComplete.self)
-            await devices.activate(record.id)
-            Log.info("device enrolled: \(begin.deviceName) → \(record.assignedIP)\(record.admin ? " (admin)" : "")")
+            Log.info("app enrolled: \(begin.bundleID), granted under device \(ruler.uuidString.lowercased())")
             stream.finishSending()
-        } catch {
-            Log.error("enrollment stream failed: \(error)")
-            stream.cancel()
         }
+    }
+
+    /// What the daemon actually knows about where a request came from: the
+    /// remote address, upgraded to the enrolled device's name when it is a
+    /// mesh address the registry can bind. Shown on the sheet as observed
+    /// provenance, not proof.
+    private func provenance(of stream: ReachTransport.QUICStream) async -> String {
+        guard let remote = stream.remoteEndpointDescription() else { return "unknown" }
+        for device in await devices.all
+        where remote == device.assignedIP || remote.hasPrefix("\(device.assignedIP):") {
+            return "\(device.name) · \(remote)"
+        }
+        return remote
     }
 }
 
@@ -220,6 +321,10 @@ public actor DeviceRegistry {
             devices[index].active = true
             persist()
         }
+    }
+
+    public func device(id: UUID) -> Device? {
+        devices.first { $0.id == id }
     }
 
     public var all: [Device] { devices }
