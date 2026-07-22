@@ -84,13 +84,15 @@ public actor ReachConnectionHub {
             serverTrustRoots: [material.caCertificate]
         )
         let parameters = NWParameters.reachQUIC(options: options, handover: configuration.multipathHandover)
-        let dialer = QUICDialer(
-            endpoint: .hostPort(
+        let endpoint: NWEndpoint = if let serviceName = configuration.serviceName {
+            .service(name: serviceName, type: Wire.bonjourService, domain: "local.", interface: nil)
+        } else {
+            .hostPort(
                 host: NWEndpoint.Host(configuration.host),
                 port: NWEndpoint.Port(rawValue: configuration.port)!
-            ),
-            parameters: parameters
-        )
+            )
+        }
+        let dialer = QUICDialer(endpoint: endpoint, parameters: parameters)
         entries[configuration] = Entry(dialer: dialer, session: nil)
         return dialer
     }

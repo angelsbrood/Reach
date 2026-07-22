@@ -71,9 +71,13 @@ final class ExampleModel {
             status = "No identity: issue one with `reachd ca issue-client --name example` and place it at Documents/reach-identity.json (or set REACH_IDENTITY)."
             return
         }
-        let key = "\(host)|\(modelID)"
+        // Prefer a discovered cluster (dialed as a Bonjour service, resolved
+        // by the system) unless the operator typed a specific host.
+        let service = host == "127.0.0.1" ? clusters.first?.name : nil
+        let key = "\(service ?? host)|\(modelID)"
         if session == nil || sessionKey != key {
             let configuration = ReachExecutor.Configuration(
+                serviceName: service,
                 host: host,
                 modelID: modelID,
                 identityLabel: Self.identityLabel
@@ -94,8 +98,10 @@ final class ExampleModel {
                     self.output = snapshot.content
                 }
                 self.status = "done"
+                print("[example] done: \(self.output.count) chars — \(self.output.prefix(80))")
             } catch {
                 self.status = "failed: \(error)"
+                print("[example] failed: \(error)")
             }
             self.isStreaming = false
         }

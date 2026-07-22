@@ -32,6 +32,9 @@ public struct ReachExecutor: FoundationModels.LanguageModelExecutor {
     public typealias Model = ReachLanguageModel
 
     public struct Configuration: Hashable, Sendable {
+        /// A Bonjour service name takes precedence over host/port — the
+        /// system resolves it at connect time (the no-configuration path).
+        public var serviceName: String?
         public var host: String
         public var port: UInt16
         public var modelID: String
@@ -41,13 +44,15 @@ public struct ReachExecutor: FoundationModels.LanguageModelExecutor {
         public var connectTimeout: Double
 
         public init(
-            host: String,
+            serviceName: String? = nil,
+            host: String = "127.0.0.1",
             port: UInt16 = 47337,
             modelID: String = "default",
             identityLabel: String = "reach-device",
             multipathHandover: Bool = false,
             connectTimeout: Double = 20
         ) {
+            self.serviceName = serviceName
             self.host = host
             self.port = port
             self.modelID = modelID
