@@ -66,6 +66,35 @@ import Testing
         #expect(session.transcript.count >= 4)
     }
 
+    /// The away fall, loopback edition: a path change mid-generation
+    /// cancels the live stream; the retry loop races every address the
+    /// daemon declared in its HelloAck and re-attaches. The seam must be
+    /// invisible — the streamed text stays byte-identical. (The real
+    /// topology — a LAN dial dying, the mesh answering — is hardware
+    /// acceptance; this proves the client machinery: watcher, race,
+    /// re-attach, replay dedupe.)
+    @Test func generationSurvivesAPathChange() async throws {
+        let (daemon, configuration) = try await startDaemon(port: 47416)
+        defer { Task { await daemon.stop() } }
+
+        let session = LanguageModelSession(
+            model: ReachLanguageModel(configuration: configuration),
+            instructions: "Scripted."
+        )
+        let stream = session.streamResponse(to: "Go.")
+        var final = ""
+        var snapshots = 0
+        for try await snapshot in stream {
+            final = snapshot.content
+            snapshots += 1
+            if snapshots == 2 || snapshots == 4 {
+                // What NWPathMonitor does on an SSID hop.
+                await ReachConnectionHub.shared.notePathPossiblyChanged()
+            }
+        }
+        #expect(final == ScriptedFilling().words.joined())
+    }
+
     @Test func cancellationPropagates() async throws {
         let (daemon, configuration) = try await startDaemon(port: 47415)
         defer { Task { await daemon.stop() } }

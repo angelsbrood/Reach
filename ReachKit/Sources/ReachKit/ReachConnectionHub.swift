@@ -16,6 +16,13 @@ public enum ReachError: Error, Sendable {
 /// tunnel), the daemon session, and stream opening. Sessions outlive
 /// connections — the (sessionID, token) pair survives transport death and
 /// re-attaches generations across path changes.
+///
+/// The hub also owns the away machinery. The daemon's `HelloAck` declares
+/// every address it answers on — the mesh address included — and once the
+/// dialed path dies or the device's network path changes, stream opening
+/// races every candidate and keeps whichever connects first. A session that
+/// began over LAN discovery falls to the mesh without the app ever having
+/// been configured with either address.
 public actor ReachConnectionHub {
     public static let shared = ReachConnectionHub()
 
@@ -26,11 +33,82 @@ public actor ReachConnectionHub {
     }
 
     private struct Entry {
-        let dialer: QUICDialer
+        var dialer: QUICDialer
         var session: SessionHandle?
+        /// Redial candidates the daemon declared in its HelloAck.
+        var candidates: [NWEndpoint] = []
+        /// Set when the path changed or an open failed — the next open
+        /// races candidates instead of trusting the cached dialer.
+        var dirty = false
     }
 
     private var entries: [ReachExecutor.Configuration: Entry] = [:]
+
+    // MARK: - Path changes
+
+    private var pathMonitor: NWPathMonitor?
+    private var sawFirstPath = false
+    private var pathEpoch: UInt64 = 0
+    private var pathWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
+
+    public func currentPathEpoch() -> UInt64 { pathEpoch }
+
+    /// Suspends until the network path changes past the given epoch.
+    /// Executors race this against a live stream so a path change surfaces
+    /// immediately instead of at the QUIC idle timeout.
+    public func pathChanged(after epoch: UInt64) async {
+        guard pathEpoch <= epoch else { return }
+        let id = UUID()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                if pathEpoch > epoch {
+                    continuation.resume()
+                } else {
+                    pathWaiters[id] = continuation
+                }
+            }
+        } onCancel: {
+            Task { await self.dropPathWaiter(id) }
+        }
+    }
+
+    /// What a real interface change does — public so an app that knows its
+    /// environment moved (a scene returning to foreground, a user toggling
+    /// networks) can prod the hub instead of waiting for the monitor.
+    public func notePathPossiblyChanged() {
+        pathEpoch += 1
+        for key in entries.keys { entries[key]?.dirty = true }
+        let waiters = pathWaiters
+        pathWaiters.removeAll()
+        for (_, continuation) in waiters { continuation.resume() }
+    }
+
+    private func dropPathWaiter(_ id: UUID) {
+        pathWaiters.removeValue(forKey: id)?.resume()
+    }
+
+    private func startPathMonitorIfNeeded() {
+        guard pathMonitor == nil else { return }
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { [weak self] _ in
+            guard let self else { return }
+            Task { await self.notePathUpdate() }
+        }
+        monitor.start(queue: DispatchQueue(label: "reach.pathmonitor"))
+        pathMonitor = monitor
+    }
+
+    private func notePathUpdate() {
+        // The monitor reports the current path immediately on start; only
+        // what comes after that is a change.
+        guard sawFirstPath else {
+            sawFirstPath = true
+            return
+        }
+        notePathPossiblyChanged()
+    }
+
+    // MARK: - Sessions and streams
 
     /// The daemon session for a configuration, opening the tunnel and the
     /// control exchange on first use.
@@ -38,8 +116,7 @@ public actor ReachConnectionHub {
         if let session = entries[configuration]?.session {
             return session
         }
-        let dialer = try await dialer(for: configuration)
-        let control = try await dialer.openStream(timeout: configuration.connectTimeout)
+        let control = try await openStream(for: configuration)
         defer { control.cancel() }
         var frames = control.frames.makeAsyncIterator()
         try await control.send(Hello(client: "ReachKit/\(Wire.version)"))
@@ -48,7 +125,8 @@ public actor ReachConnectionHub {
             let error = try ackRaw.decode(ErrorFrame.self)
             throw ReachError.sessionRejected("\(error.code): \(error.message)")
         }
-        _ = try ackRaw.decode(HelloAck.self)
+        let ack = try ackRaw.decode(HelloAck.self)
+        noteCandidates(from: ack, for: configuration)
         try await control.send(SessionOpen(modelID: configuration.modelID))
         guard let openedRaw = try await frames.next() else { throw ReachError.transport("no session response") }
         if openedRaw.type == .errorFrame {
@@ -62,8 +140,7 @@ public actor ReachConnectionHub {
     }
 
     public func openGenerationStream(for configuration: ReachExecutor.Configuration) async throws -> ReachTransport.QUICStream {
-        let dialer = try await dialer(for: configuration)
-        return try await dialer.openStream(timeout: configuration.connectTimeout)
+        try await openStream(for: configuration)
     }
 
     /// Drops the session (not the material) — the next use opens fresh.
@@ -71,20 +148,107 @@ public actor ReachConnectionHub {
         entries[configuration]?.session = nil
     }
 
-    private func dialer(for configuration: ReachExecutor.Configuration) async throws -> QUICDialer {
-        if let entry = entries[configuration] {
-            return entry.dialer
+    private func noteCandidates(from ack: HelloAck, for configuration: ReachExecutor.Configuration) {
+        guard let addrs = ack.addrs, let port = ack.port,
+              let nwPort = NWEndpoint.Port(rawValue: port) else { return }
+        var seen: Set<NWEndpoint> = [primaryEndpoint(for: configuration)]
+        var candidates: [NWEndpoint] = []
+        for addr in addrs {
+            let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(addr), port: nwPort)
+            if seen.insert(endpoint).inserted {
+                candidates.append(endpoint)
+            }
         }
+        entries[configuration]?.candidates = candidates
+    }
+
+    private func openStream(for configuration: ReachExecutor.Configuration) async throws -> ReachTransport.QUICStream {
+        let entry = try await ensureEntry(for: configuration)
+        if !entry.dirty {
+            do {
+                return try await entry.dialer.openStream(timeout: configuration.connectTimeout)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                // The cached path just failed — fall through to the race.
+            }
+        }
+        return try await racedStream(for: configuration)
+    }
+
+    /// Dials every known address at once and keeps the first stream that
+    /// opens; its dialer becomes the cached one. Losers are cancelled (the
+    /// transport tears a cancelled open down promptly), and a second late
+    /// success is surplus — one tunnel is the contract.
+    private func racedStream(for configuration: ReachExecutor.Configuration) async throws -> ReachTransport.QUICStream {
         guard let material = await ReachIdentityRegistry.shared.material(for: configuration.identityLabel) else {
             throw ReachError.identityNotRegistered(configuration.identityLabel)
         }
+        var endpoints = [primaryEndpoint(for: configuration)]
+        for candidate in entries[configuration]?.candidates ?? [] where !endpoints.contains(candidate) {
+            endpoints.append(candidate)
+        }
+        let dialers = endpoints.map { endpoint in
+            let options = TLSBuilder.clientOptions(
+                alpn: Wire.alpn,
+                identity: material.identity,
+                serverTrustRoots: [material.caCertificate]
+            )
+            let parameters = NWParameters.reachQUIC(options: options, handover: configuration.multipathHandover)
+            return QUICDialer(endpoint: endpoint, parameters: parameters)
+        }
+        let timeout = configuration.connectTimeout
+        let winner: (Int, ReachTransport.QUICStream)? = await withTaskGroup(
+            of: (Int, ReachTransport.QUICStream)?.self
+        ) { group in
+            for (index, dialer) in dialers.enumerated() {
+                group.addTask {
+                    guard let stream = try? await dialer.openStream(timeout: timeout) else { return nil }
+                    return (index, stream)
+                }
+            }
+            var won: (Int, ReachTransport.QUICStream)?
+            while let result = await group.next() {
+                if let (index, stream) = result {
+                    if won == nil {
+                        won = (index, stream)
+                        group.cancelAll()
+                    } else {
+                        stream.cancel()
+                    }
+                }
+            }
+            return won
+        }
+        guard let (index, stream) = winner else {
+            entries[configuration]?.dirty = true
+            throw ReachError.transport("no reachable cluster address (\(endpoints.count) dialed)")
+        }
+        entries[configuration]?.dialer = dialers[index]
+        entries[configuration]?.dirty = false
+        return stream
+    }
+
+    private func ensureEntry(for configuration: ReachExecutor.Configuration) async throws -> Entry {
+        if let entry = entries[configuration] { return entry }
+        guard let material = await ReachIdentityRegistry.shared.material(for: configuration.identityLabel) else {
+            throw ReachError.identityNotRegistered(configuration.identityLabel)
+        }
+        startPathMonitorIfNeeded()
         let options = TLSBuilder.clientOptions(
             alpn: Wire.alpn,
             identity: material.identity,
             serverTrustRoots: [material.caCertificate]
         )
         let parameters = NWParameters.reachQUIC(options: options, handover: configuration.multipathHandover)
-        let endpoint: NWEndpoint = if let serviceName = configuration.serviceName {
+        let dialer = QUICDialer(endpoint: primaryEndpoint(for: configuration), parameters: parameters)
+        let entry = Entry(dialer: dialer, session: nil)
+        entries[configuration] = entry
+        return entry
+    }
+
+    private func primaryEndpoint(for configuration: ReachExecutor.Configuration) -> NWEndpoint {
+        if let serviceName = configuration.serviceName {
             .service(name: serviceName, type: Wire.bonjourService, domain: "local.", interface: nil)
         } else {
             .hostPort(
@@ -92,8 +256,5 @@ public actor ReachConnectionHub {
                 port: NWEndpoint.Port(rawValue: configuration.port)!
             )
         }
-        let dialer = QUICDialer(endpoint: endpoint, parameters: parameters)
-        entries[configuration] = Entry(dialer: dialer, session: nil)
-        return dialer
     }
 }

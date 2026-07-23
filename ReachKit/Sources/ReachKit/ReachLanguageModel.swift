@@ -79,7 +79,10 @@ public struct ReachExecutor: FoundationModels.LanguageModelExecutor {
 
         var lastReceived: UInt64?
         var unacked = 0
-        let reconnectDeadline = ContinuousClock.now + .seconds(120)
+        // Slides forward on every received event: the retry budget is
+        // measured from the last sign of life, matching the daemon's
+        // residency window, not from when the generation began.
+        var reconnectDeadline = ContinuousClock.now + .seconds(120)
         var backoff: Duration = .milliseconds(250)
         // A generation that never started can be re-begun against a fresh
         // session; once tokens are flowing, only re-attach is safe.
@@ -87,8 +90,21 @@ public struct ReachExecutor: FoundationModels.LanguageModelExecutor {
 
         while true {
             do {
+                // Epoch read precedes the open: a path change that lands
+                // mid-dial still trips the watcher rather than being missed.
+                let epoch = await ReachConnectionHub.shared.currentPathEpoch()
                 let stream = try await ReachConnectionHub.shared.openGenerationStream(for: configuration)
                 defer { stream.cancel() }
+                // A path change (an SSID hop, Wi-Fi loss) cancels the live
+                // stream so the retry loop re-dials now — the hub then races
+                // every address the daemon declared, the mesh included.
+                // Without this, a dead path surfaces only at the QUIC idle
+                // timeout.
+                let watcher = Task {
+                    await ReachConnectionHub.shared.pathChanged(after: epoch)
+                    stream.cancel()
+                }
+                defer { watcher.cancel() }
                 if let lastReceived {
                     try await stream.send(GenerateReattach(
                         sessionID: session.sessionID,
@@ -109,6 +125,7 @@ public struct ReachExecutor: FoundationModels.LanguageModelExecutor {
                         let ev = try raw.decode(Ev.self)
                         if let lastReceived, ev.seq <= lastReceived { continue }   // replay dupes
                         lastReceived = ev.seq
+                        reconnectDeadline = ContinuousClock.now + .seconds(120)
                         unacked += 1
                         if unacked >= 16 {
                             try? await stream.send(EvAck(seq: ev.seq))

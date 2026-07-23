@@ -51,31 +51,38 @@ public final class QUICStream: Sendable {
         connection: NWConnection,
         timeout: Double
     ) async throws -> QUICStream {
-        try await withCheckedThrowingContinuation { continuation in
-            let box = ResumeOnce(continuation)
-            connection.stateUpdateHandler = { state in
-                switch state {
-                case .ready:
-                    box.resume(.success(QUICStream(connection: connection, started: true)))
-                case .failed(let error):
-                    box.resume(.failure(TransportError.connectionFailed("\(error)")))
-                case .cancelled:
-                    box.resume(.failure(TransportError.streamClosed))
-                default:
-                    break
+        // Cancelling the opening task cancels the connection — racing
+        // dialers depend on losers tearing down promptly, not at their
+        // open-timeout. ResumeOnce keeps the cancel/timer/state races safe.
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let box = ResumeOnce(continuation)
+                connection.stateUpdateHandler = { state in
+                    switch state {
+                    case .ready:
+                        box.resume(.success(QUICStream(connection: connection, started: true)))
+                    case .failed(let error):
+                        box.resume(.failure(TransportError.connectionFailed("\(error)")))
+                    case .cancelled:
+                        box.resume(.failure(TransportError.streamClosed))
+                    default:
+                        break
+                    }
+                }
+                connection.start(queue: transportQueue)
+                transportQueue.asyncAfter(deadline: .now() + timeout) {
+                    // Only a true timeout tears the connection down — a stream
+                    // that opened in time lives past this timer. (Found live:
+                    // the unconditional cancel here killed any stream older
+                    // than its own open-timeout; generations masked it behind
+                    // re-attach, the parked enrollment exposed it.)
+                    if box.resume(.failure(TransportError.connectionFailed("stream open timeout"))) {
+                        connection.cancel()
+                    }
                 }
             }
-            connection.start(queue: transportQueue)
-            transportQueue.asyncAfter(deadline: .now() + timeout) {
-                // Only a true timeout tears the connection down — a stream
-                // that opened in time lives past this timer. (Found live:
-                // the unconditional cancel here killed any stream older
-                // than its own open-timeout; generations masked it behind
-                // re-attach, the parked enrollment exposed it.)
-                if box.resume(.failure(TransportError.connectionFailed("stream open timeout"))) {
-                    connection.cancel()
-                }
-            }
+        } onCancel: {
+            connection.cancel()
         }
     }
 

@@ -111,7 +111,13 @@ final class ExampleModel {
             guard let session, !session.isResponding else { return }
             status = "streaming…"
             do {
-                let stream = session.streamResponse(to: text)
+                // Demo pacing: long stories must stream long — the request
+                // carries the ceiling and the daemon honors it (its own
+                // fallback stays a bounded 512).
+                let stream = session.streamResponse(
+                    to: text,
+                    options: GenerationOptions(maximumResponseTokens: 4096)
+                )
                 for try await snapshot in stream {
                     self.output = snapshot.content
                 }

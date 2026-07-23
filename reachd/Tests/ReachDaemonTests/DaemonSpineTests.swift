@@ -176,7 +176,11 @@ struct ScriptedFilling: SlotFilling {
         let control = try await dialer.openStream(timeout: 45)
         var controlFrames = control.frames.makeAsyncIterator()
         try await control.send(Hello(client: "spine-test"))
-        _ = try await controlFrames.next()!.decode(HelloAck.self)
+        let ack = try await controlFrames.next()!.decode(HelloAck.self)
+        // The daemon declares every address it answers on — the away fall's
+        // redial candidates.
+        #expect(ack.addrs?.isEmpty == false)
+        #expect(ack.port == 47413)
         try await control.send(SessionOpen(modelID: "scripted"))
         let opened = try await controlFrames.next()!.decode(SessionOpened.self)
 

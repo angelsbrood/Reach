@@ -88,6 +88,23 @@ private func roundTrip<F: WireFrame>(_ frame: F) throws -> F {
         #expect(back == ack)
     }
 
+    @Test func helloAckCarriesDialCandidates() throws {
+        let full = HelloAck(
+            cluster: "studio",
+            models: [ModelDescriptor(id: "gemma-3-1b", displayName: "Gemma 3 1B", capabilities: [])],
+            addrs: ["192.168.8.104", "10.86.0.1"],
+            port: 47337
+        )
+        #expect(try roundTrip(full) == full)
+
+        // Older daemons omit the fields entirely; absent keys decode nil.
+        let legacy = HelloAck(cluster: "studio", models: [])
+        let decoded = try roundTrip(legacy)
+        #expect(decoded == legacy)
+        #expect(decoded.addrs == nil)
+        #expect(decoded.port == nil)
+    }
+
     @Test func sessionFramesRoundTrip() throws {
         let opened = SessionOpened(sessionID: UUID(), token: "tok", capabilities: ["text"])
         #expect(try roundTrip(opened) == opened)

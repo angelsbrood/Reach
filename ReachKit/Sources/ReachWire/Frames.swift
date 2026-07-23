@@ -31,11 +31,27 @@ public struct HelloAck: WireFrame, Equatable {
     public var version: UInt8
     public var cluster: String
     public var models: [ModelDescriptor]
+    /// Every IPv4 address the daemon answers on — the mesh address included.
+    /// A client whose dialed path has died re-dials these as candidates; the
+    /// list arrives over the authenticated control stream, so trusting it
+    /// adds nothing beyond what mTLS already granted. Optional on the wire:
+    /// absent from older daemons.
+    public var addrs: [String]?
+    /// The session port those addresses answer on.
+    public var port: UInt16?
 
-    public init(version: UInt8 = Wire.version, cluster: String, models: [ModelDescriptor]) {
+    public init(
+        version: UInt8 = Wire.version,
+        cluster: String,
+        models: [ModelDescriptor],
+        addrs: [String]? = nil,
+        port: UInt16? = nil
+    ) {
         self.version = version
         self.cluster = cluster
         self.models = models
+        self.addrs = addrs
+        self.port = port
     }
 }
 

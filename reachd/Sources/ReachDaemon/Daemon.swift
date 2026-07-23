@@ -186,7 +186,9 @@ public final class Daemon: Sendable {
     ) async throws {
         try await stream.send(HelloAck(
             cluster: config.clusterName,
-            models: [ModelDescriptor(id: filling.modelID, displayName: filling.displayName, capabilities: filling.capabilities)]
+            models: [ModelDescriptor(id: filling.modelID, displayName: filling.displayName, capabilities: filling.capabilities)],
+            addrs: LocalAddresses.ipv4().map { $0.map(String.init).joined(separator: ".") },
+            port: config.port
         ))
         // The admin device, once this stream proves it is one; grant events
         // ride back on this same stream while the loop keeps consuming.
