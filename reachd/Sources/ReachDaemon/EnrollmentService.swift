@@ -171,8 +171,13 @@ public struct EnrollmentService: Sendable {
         Log.info("grant request parked: \(begin.bundleID) (\(fingerprint.prefix(16))…) from \(event.deviceID)")
 
         switch await desk.park(event) {
+        case .superseded:
+            // A newer knock (the app came back on a fresh stream) carries
+            // the ceremony now; this stream just goes away.
+            stream.cancel()
         case .denied:
             try await stream.send(ErrorFrame(code: "grant-denied", message: "the keeper refused"))
+            await desk.collected(fingerprint)
             stream.cancel()
         case .timedOut:
             try await stream.send(ErrorFrame(code: "grant-timeout", message: "no ruling within the window"))
@@ -194,6 +199,9 @@ public struct EnrollmentService: Sendable {
                 return
             }
             _ = try completeRaw.decode(EnrollComplete.self)
+            // Only a confirmed delivery clears the held verdict — anything
+            // short of EnrollComplete leaves it for the app's next knock.
+            await desk.collected(fingerprint)
             Log.info("app enrolled: \(begin.bundleID), granted under device \(ruler.uuidString.lowercased())")
             stream.finishSending()
         }
@@ -293,10 +301,13 @@ public actor DeviceRegistry {
     }
 
     public func enroll(name: String, devicePubX963: Data, wgPub: Data) throws -> Device {
-        // Re-enrollment of a known wg key keeps its address.
-        if let existing = devices.firstIndex(where: { $0.wgPub == wgPub }) {
+        // The Secure Enclave key IS the device: a re-pair arrives with the
+        // same device key and a fresh wg key, and keeps its identity —
+        // id, address, and the admin grant. (The wg key can never match
+        // across scans; it is minted per ceremony and never persisted.)
+        if let existing = devices.firstIndex(where: { $0.devicePubX963 == devicePubX963 }) {
             devices[existing].name = name
-            devices[existing].devicePubX963 = devicePubX963
+            devices[existing].wgPub = wgPub
             persist()
             return devices[existing]
         }
@@ -388,14 +399,21 @@ public actor WireGuardHost {
         pinnedEndpoint = endpoint
     }
 
-    /// Appends the peer if its key is new; idempotent otherwise. Returns
-    /// whether the config changed (the operator then applies it).
+    /// Installs the peer: idempotent when the key is already present, and
+    /// a re-paired device's fresh key REPLACES the stale block holding its
+    /// address (two peers must never claim one /32). Returns whether the
+    /// config changed (the operator then applies it).
     @discardableResult
     public func addPeer(publicKey: Data, allowedIP: String) throws -> Bool {
         let base64 = publicKey.base64EncodedString()
-        var text = (try? String(contentsOf: confURL, encoding: .utf8)) ?? ""
+        let text = (try? String(contentsOf: confURL, encoding: .utf8)) ?? ""
         guard !text.contains(base64) else { return false }
-        text += """
+        var chunks = text.components(separatedBy: "[Peer]")
+        let head = chunks.removeFirst()
+        let kept = chunks.filter { !$0.contains("AllowedIPs = \(allowedIP)/32") }
+        var out = head + kept.map { "[Peer]" + $0 }.joined()
+        if !out.hasSuffix("\n") { out += "\n" }
+        out += """
 
         [Peer]
         # enrolled \(ISO8601DateFormatter().string(from: Date()))
@@ -403,8 +421,8 @@ public actor WireGuardHost {
         AllowedIPs = \(allowedIP)/32
 
         """
-        try text.write(to: confURL, atomically: true, encoding: .utf8)
-        Log.info("wg peer appended — apply with: sudo /opt/homebrew/bin/wg-quick down reach0 && sudo /opt/homebrew/bin/wg-quick up reach0")
+        try out.write(to: confURL, atomically: true, encoding: .utf8)
+        Log.info("wg peer installed — apply with: sudo /opt/homebrew/bin/wg-quick down reach0 && sudo /opt/homebrew/bin/wg-quick up reach0")
         return true
     }
 }

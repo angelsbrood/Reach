@@ -2,50 +2,94 @@ import Foundation
 import ReachWire
 import X509
 
-/// Where app requests wait for a human. `park` suspends the enrollment
-/// stream until an admin rules the request over the keeper's authenticated
-/// control stream, or the window closes. Events fan out to every live
-/// subscriber and replay to late ones — the keeper may open after the app
-/// knocks.
+/// Where app requests wait for a human — keyed by the app KEY, not the
+/// stream, because the asking app is usually suspended while the human
+/// rules (same phone: opening the keeper backgrounds the app and iOS
+/// tears its parked connection down). Ask and collect are separable: a
+/// ruled-but-undelivered verdict is held, and a re-knock with the same
+/// key collects it. Events fan out to every live subscriber and replay
+/// to late ones.
 public actor GrantDesk {
     public enum Verdict: Sendable, Equatable {
         case allowed(rulerDeviceID: UUID)
         case denied
         case timedOut
+        /// A newer knock for the same key took over this park — close
+        /// quietly; the newer stream carries the outcome.
+        case superseded
     }
 
     private struct Pending {
         let event: GrantEvent
+        let ticket: UUID
         let continuation: CheckedContinuation<Verdict, Never>
     }
 
     private let window: Duration
-    private var pending: [UUID: Pending] = [:]
+    private let holdWindow: TimeInterval
+    /// Keyed by app-key fingerprint — the stable name of an asking app.
+    private var pending: [String: Pending] = [:]
+    /// Ruled but not yet delivered (the asker's stream died first).
+    private var ruled: [String: (verdict: Verdict, at: Date)] = [:]
+    /// requestID → fingerprint, so a ruling can land after the park expired.
+    private var requestIndex: [UUID: String] = [:]
     private var subscribers: [UUID: AsyncStream<GrantEvent>.Continuation] = [:]
 
-    public init(window: Duration = .seconds(120)) {
+    public init(window: Duration = .seconds(120), holdWindow: TimeInterval = 600) {
         self.window = window
+        self.holdWindow = holdWindow
     }
 
-    /// Parks a request; resumes with the ruling or a timeout.
+    /// Parks a knock; resumes with the ruling, a held verdict from an
+    /// earlier knock, a timeout, or supersession by a newer knock.
     public func park(_ event: GrantEvent) async -> Verdict {
-        for subscriber in subscribers.values {
-            subscriber.yield(event)
+        let fingerprint = event.appKeyFingerprint
+        // Collect first: the human may have ruled while the asker was away.
+        if let held = ruled[fingerprint] {
+            if Date().timeIntervalSince(held.at) < holdWindow {
+                return held.verdict
+            }
+            ruled[fingerprint] = nil
         }
-        let requestID = event.requestID
+        // A re-knock keeps the first knock's requestID — keepers dedupe on
+        // it — and does not re-announce.
+        let event = pending[fingerprint]?.event ?? event
+        if pending[fingerprint] == nil {
+            for subscriber in subscribers.values {
+                subscriber.yield(event)
+            }
+        }
+        requestIndex[event.requestID] = fingerprint
+        let ticket = UUID()
         return await withCheckedContinuation { continuation in
-            pending[requestID] = Pending(event: event, continuation: continuation)
+            if let previous = pending[fingerprint] {
+                previous.continuation.resume(returning: .superseded)
+            }
+            pending[fingerprint] = Pending(event: event, ticket: ticket, continuation: continuation)
             Task {
                 try? await Task.sleep(for: window)
-                self.expire(requestID)
+                self.expire(fingerprint, ticket)
             }
         }
     }
 
+    /// Records the ruling and resumes the parked knock when one is live.
+    /// The verdict is held either way — delivery is the asker's problem,
+    /// and `collected` clears it once the grant lands.
     public func rule(requestID: UUID, allow: Bool, ruler: UUID) -> Bool {
-        guard let entry = pending.removeValue(forKey: requestID) else { return false }
-        entry.continuation.resume(returning: allow ? .allowed(rulerDeviceID: ruler) : .denied)
+        guard let fingerprint = requestIndex[requestID] else { return false }
+        let verdict: Verdict = allow ? .allowed(rulerDeviceID: ruler) : .denied
+        ruled[fingerprint] = (verdict, Date())
+        if let entry = pending.removeValue(forKey: fingerprint) {
+            entry.continuation.resume(returning: verdict)
+        }
         return true
+    }
+
+    /// The verdict reached its app; forget it.
+    public func collected(_ fingerprint: String) {
+        ruled[fingerprint] = nil
+        requestIndex = requestIndex.filter { $0.value != fingerprint }
     }
 
     /// A keeper's live view: currently pending requests replay first, then
@@ -67,8 +111,11 @@ public actor GrantDesk {
         subscribers[id] = nil
     }
 
-    private func expire(_ requestID: UUID) {
-        guard let entry = pending.removeValue(forKey: requestID) else { return }
+    private func expire(_ fingerprint: String, _ ticket: UUID) {
+        // Only the timer that belongs to the CURRENT park may expire it —
+        // a re-knock re-arms, and the old timer must miss.
+        guard let entry = pending[fingerprint], entry.ticket == ticket else { return }
+        pending[fingerprint] = nil
         entry.continuation.resume(returning: .timedOut)
     }
 }

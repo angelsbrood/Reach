@@ -34,6 +34,11 @@ public enum ReachEnrollment {
     /// Runs the ceremony against a discovered cluster and registers the
     /// granted identity under `label`. Suspends for as long as the request
     /// stays parked — surface that state in UI ("asking your keeper…").
+    ///
+    /// The knock retries: on a one-phone cluster the asker is SUSPENDED
+    /// while the human rules (opening the keeper backgrounds this app and
+    /// its parked stream dies), so the ceremony must survive coming back —
+    /// the same key re-knocks and collects the verdict the desk held.
     @discardableResult
     public static func enroll(
         clusterName: String,
@@ -57,6 +62,43 @@ public enum ReachEnrollment {
             endpoint: .service(name: clusterName, type: Wire.bonjourEnrollService, domain: "local.", interface: nil),
             parameters: .reachQUIC(options: options)
         )
+        // One key for the whole ceremony — it IS the request's name at the
+        // desk across every knock.
+        let key = P256.Signing.PrivateKey()
+
+        // Attempts, not wall time: while this app is suspended no attempts
+        // burn, so a long visit to the keeper costs nothing.
+        var attemptsLeft = 40
+        while true {
+            do {
+                return try await attempt(
+                    dialer: dialer, pin: pin, key: key,
+                    bundle: bundle, name: name,
+                    identityLabel: identityLabel, connectTimeout: connectTimeout
+                )
+            } catch let error as ReachEnrollmentError {
+                if case .refused = error { throw error }   // a verdict, not a failure
+                attemptsLeft -= 1
+                guard attemptsLeft > 0 else { throw error }
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                attemptsLeft -= 1
+                guard attemptsLeft > 0 else { throw error }
+            }
+            try? await Task.sleep(for: .milliseconds(1500))
+        }
+    }
+
+    private static func attempt(
+        dialer: QUICDialer,
+        pin: Data,
+        key: P256.Signing.PrivateKey,
+        bundle: String,
+        name: String,
+        identityLabel: String,
+        connectTimeout: Double
+    ) async throws -> ReachIdentityRegistry.Material {
         let stream = try await dialer.openStream(timeout: connectTimeout)
         defer { stream.cancel() }
         var frames = stream.frames.makeAsyncIterator()
@@ -71,7 +113,6 @@ public enum ReachEnrollment {
         }
         let challenge = try challengeRaw.decode(EnrollChallenge.self)
 
-        let key = P256.Signing.PrivateKey()
         let pub = key.publicKey.x963Representation
         let popSig = try key.signature(for: challenge.nonce + pub).derRepresentation
         try await stream.send(AppEnrollCertRequest(appPubX963: pub, popSig: popSig))
@@ -91,6 +132,11 @@ public enum ReachEnrollment {
         guard Data(SHA256.hash(data: grant.caCertDER)) == pin else {
             throw ReachEnrollmentError.sequence("granted CA does not match the pinned hash")
         }
+        // A fresh grant REPLACES whatever an earlier provisioning left
+        // under this label — keychain items outlive app installs, and a
+        // stale identity beside a granted one makes lookup a coin toss.
+        KeychainIdentity.remove(label: identityLabel)
+        KeychainIdentity.remove(label: identityLabel + ".ca")
         let identity = try KeychainIdentity.store(
             privateKeyX963: key.x963Representation,
             certificateDER: grant.appCertDER,

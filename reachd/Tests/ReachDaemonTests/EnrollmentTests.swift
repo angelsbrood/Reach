@@ -90,9 +90,9 @@ enum EnrollOutcome {
         _ fixture: Fixture,
         token: String,
         name: String,
-        breakPoP: Bool = false
+        breakPoP: Bool = false,
+        deviceKey: P256.Signing.PrivateKey = P256.Signing.PrivateKey()
     ) async throws -> EnrollOutcome {
-        let deviceKey = P256.Signing.PrivateKey()
         let wgKey = Curve25519.KeyAgreement.PrivateKey()
 
         let stream = try await fixture.dialer.openStream(timeout: 45)
@@ -181,5 +181,50 @@ enum EnrollOutcome {
             return
         }
         #expect(popError.code == "enroll-pop")
+    }
+
+    /// Re-pairing is the demo-day path: the same Secure Enclave key comes
+    /// back with a fresh wg key, and must keep its identity — id, mesh
+    /// address, and the admin grant — while the host config swaps the
+    /// stale peer block for the new key.
+    @Test func rePairKeepsIdentityAndReplacesPeer() async throws {
+        let fixture = try makeFixture(port: 47432)
+        defer { fixture.cleanup() }
+
+        let deviceKey = P256.Signing.PrivateKey()
+        let first = try await enroll(fixture, token: fixture.tokens.mint(), name: "keeper-phone", deviceKey: deviceKey)
+        guard case .granted(let firstGrant) = first else {
+            Issue.record("first enrollment failed")
+            return
+        }
+        let firstPeer = firstGrant.wg.serverPublicKey   // (server key, constant)
+        _ = firstPeer
+
+        let devices = DeviceRegistry(directory: fixture.stateDir)
+        let original = try #require(await devices.all.first)
+        #expect(original.admin)
+
+        let again = try await enroll(fixture, token: fixture.tokens.mint(), name: "keeper-phone-renamed", deviceKey: deviceKey)
+        guard case .granted(let secondGrant) = again else {
+            Issue.record("re-pair was refused")
+            return
+        }
+
+        // Same device, same address, admin intact — and only one record.
+        let after = DeviceRegistry(directory: fixture.stateDir)
+        let records = await after.all
+        #expect(records.count == 1)
+        let record = try #require(records.first)
+        #expect(record.id == original.id)
+        #expect(record.assignedIP == original.assignedIP)
+        #expect(record.admin)
+        #expect(record.name == "keeper-phone-renamed")
+        #expect(secondGrant.wg.assignedIP == firstGrant.wg.assignedIP)
+
+        // The conf holds exactly one peer for the address — the new key.
+        let conf = try String(contentsOfFile: fixture.confPath, encoding: .utf8)
+        #expect(conf.components(separatedBy: "AllowedIPs = \(record.assignedIP)/32").count == 2)
+        #expect(conf.contains(record.wgPub.base64EncodedString()))
+        #expect(record.wgPub != original.wgPub)
     }
 }

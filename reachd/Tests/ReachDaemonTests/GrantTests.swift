@@ -113,9 +113,13 @@ import X509
     }
 
     /// The app ceremony: begins, proves the key, and stays parked until
-    /// ruled or timed out.
-    private func appEnroll(_ fixture: Fixture, bundleID: String, name: String) async throws -> AppOutcome {
-        let appKey = P256.Signing.PrivateKey()
+    /// ruled or timed out. Pass `appKey` to re-knock as the same app.
+    private func appEnroll(
+        _ fixture: Fixture,
+        bundleID: String,
+        name: String,
+        appKey: P256.Signing.PrivateKey = P256.Signing.PrivateKey()
+    ) async throws -> AppOutcome {
         let stream = try await fixture.enrollDialer.openStream(timeout: 45)
         defer { stream.cancel() }
         var frames = stream.frames.makeAsyncIterator()
@@ -284,5 +288,59 @@ import X509
             return
         }
         #expect(error.code == "grant-timeout")
+    }
+
+    /// The one-phone reality: the asker is suspended while the human
+    /// rules, so its parked stream is dead when the Allow lands. The desk
+    /// holds the verdict; the same key re-knocks and collects it.
+    @Test func verdictSurvivesTheAskersStreamDeath() async throws {
+        let fixture = try await makeFixture(sessionPort: 47446, enrollPort: 47447)
+        defer { fixture.cleanup() }
+
+        let keeper = try await enrollDevice(fixture, name: "keeper-phone")
+        var (control, controlFrames) = try await openControl(fixture, identity: keeper.identity)
+        defer { control.cancel() }
+        try await control.send(GrantSubscribe())
+
+        // The app knocks, parks — and its transport dies (backgrounded).
+        let appKey = P256.Signing.PrivateKey()
+        let firstKnock = Task {
+            try await appEnroll(fixture, bundleID: "systems.reach.suspended", name: "Suspended", appKey: appKey)
+        }
+        let event = try (try #require(try await controlFrames.next())).decode(GrantEvent.self)
+        firstKnock.cancel()   // kills the parked stream client-side
+        _ = try? await firstKnock.value
+        try await Task.sleep(for: .milliseconds(200))
+
+        // The ruling lands with no live asker.
+        try await control.send(GrantRule(requestID: event.requestID, allow: true))
+        try await Task.sleep(for: .milliseconds(200))
+
+        // The app returns as the SAME key and collects the held verdict.
+        let outcome = try await appEnroll(fixture, bundleID: "systems.reach.suspended", name: "Suspended", appKey: appKey)
+        guard case .granted(let grant, _) = outcome else {
+            Issue.record("held verdict was not collectable: \(outcome)")
+            return
+        }
+        let leaf = try Certificate(derEncoded: Array(grant.appCertDER))
+        let uri = try leaf.extensions.subjectAlternativeNames?.compactMap { name -> String? in
+            if case .uniformResourceIdentifier(let value) = name { return value }
+            return nil
+        }.first
+        #expect(uri?.hasSuffix("/systems.reach.suspended") == true)
+
+        // And the desk forgot it after delivery: a fresh knock by the same
+        // key parks again (new event on the keeper's stream) rather than
+        // silently re-collecting a spent grant.
+        let reKnock = Task {
+            try await appEnroll(fixture, bundleID: "systems.reach.suspended", name: "Suspended", appKey: appKey)
+        }
+        let second = try (try #require(try await controlFrames.next())).decode(GrantEvent.self)
+        #expect(second.bundleID == "systems.reach.suspended")
+        try await control.send(GrantRule(requestID: second.requestID, allow: false))
+        guard case .refused = try await reKnock.value else {
+            Issue.record("post-collection knock did not park freshly")
+            return
+        }
     }
 }
