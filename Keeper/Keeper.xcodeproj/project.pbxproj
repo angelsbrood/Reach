@@ -190,7 +190,7 @@
 			mainGroup = BB0000000000000000000001;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
-				BB0000000000000000000300 /* XCLocalSwiftPackageReference "/Users/nellymoon/Library/Caches/reach-vendor/wireguard-apple" */,
+				BB0000000000000000000300 /* XCLocalSwiftPackageReference "vendor/wireguard-apple" */,
 				BB0000000000000000000301 /* XCLocalSwiftPackageReference "../ReachKit" */,
 			);
 			preferredProjectObjectVersion = 90;
@@ -225,7 +225,7 @@
 			shellPath = /bin/sh;
 			shellScript = (
 				"export PATH=\"$PATH:/opt/homebrew/bin:/usr/local/bin\"",
-				"cd \"/Users/nellymoon/Library/Caches/reach-vendor/wireguard-apple/Sources/WireGuardKitGo\" && /usr/bin/make",
+				"cd \"$SRCROOT/vendor/wireguard-apple/Sources/WireGuardKitGo\" && /usr/bin/make",
 				"",
 			);
 		};
@@ -439,9 +439,9 @@
 /* End XCConfigurationList section */
 
 /* Begin XCLocalSwiftPackageReference section */
-		BB0000000000000000000300 /* XCLocalSwiftPackageReference "/Users/nellymoon/Library/Caches/reach-vendor/wireguard-apple" */ = {
+		BB0000000000000000000300 /* XCLocalSwiftPackageReference "vendor/wireguard-apple" */ = {
 			isa = XCLocalSwiftPackageReference;
-			relativePath = "/Users/nellymoon/Library/Caches/reach-vendor/wireguard-apple";
+			relativePath = vendor/wireguard-apple;
 		};
 		BB0000000000000000000301 /* XCLocalSwiftPackageReference "../ReachKit" */ = {
 			isa = XCLocalSwiftPackageReference;

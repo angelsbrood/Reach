@@ -25,6 +25,17 @@ and per-app; every session is inspectable; there is no account anywhere.
 - `Example/` — a sample app that links ReachKit and nothing privileged
 - `docs/` — wire protocol, ceremony, spike verdicts
 
+## Building
+
+The keeper's packet-tunnel extension links a patched WireGuardKit, carried
+as a submodule under `Keeper/vendor/`, so clone recursively:
+
+    git clone --recursive https://github.com/angelsbrood/Reach
+
+An existing clone catches up with `git submodule update --init`. The patches
+are two lines — a tools-version floor and one explicit include — and the
+fork's commit says why each exists.
+
 ## Status
 
 Pre-filing build, and further along than the spine it started as. Three

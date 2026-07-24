@@ -1,0 +1,4 @@
+[submodule "Keeper/vendor/wireguard-apple"]
+	path = Keeper/vendor/wireguard-apple
+	url = https://github.com/angelsbrood/wireguard-apple
+	branch = reach
