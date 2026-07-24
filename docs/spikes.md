@@ -10,7 +10,7 @@ the decision. Kill criteria come from the pre-filing plan.
 | S1b | Behavior of the QUIC connection across a Wi-Fi → cellular interface transition (migration vs re-attach) | **PASS** (2026-07-22) — re-attach at the mesh address *is* the transition; migration has nothing to migrate to; `.handover` off |
 | S2 | Development-signed packet-tunnel extension carrying WireGuardKit traffic on device | **PASS** (2026-07-22) — kill fired on the personal team, reversed same day by program enrollment; embedded tunnel verified end to end |
 | S3 | Headscale as a supervised subprocess with programmatic pre-auth key minting | **PASS** (2026-07-21) |
-| S5 | Does a road the user already owns — their own tailnet — work as a Reach candidate without code? | **PASS by construction** (2026-07-24) — already declared, already raced; no code lands |
+| S5 | Does a road the user already owns — their own tailnet — work as a Reach candidate without code? | **PASS** (2026-07-24) — by construction, then confirmed on hardware: the session fell to the tailnet with the Reach tunnel down, and the mesh sat idle |
 
 ## S4 — the provider slot is real (2026-07-21)
 
@@ -236,10 +236,35 @@ VPN interop stays where it was scoped: M3.
   Off-box it is refused immediately and costs one failed dial in a race
   that was already parallel.
 
-**What remains is confirmation, not dependency.** The hardware run — Mac
-Tailscale split-tunnel, phone on the tailnet with the Reach tunnel down,
-hop mid-generation, and the Mac's WireGuard counters staying still to prove
-which road carried it — exercises machinery already proven on hardware with
-the mesh candidate in S1b. It is scheduled behind the router work that
-gates every rehearsal; a failure there would be a finding about Tailscale's
-routing, not about whether Reach declares and races the address.
+### Confirmed on hardware the same day (2026-07-24)
+
+Tailscale was brought up on the Mac (split-tunnel, no exit node) and the
+daemon restarted. It announced itself without being asked to:
+
+    [reachd] Reach Cluster serving gemma-3-1b on :47337
+             (127.0.0.1, 192.168.8.104, 10.86.0.1, 100.66.143.31)
+
+— loopback, LAN, first-party mesh, and tailnet, in one list, from one
+`getifaddrs` walk that knows nothing about any of those categories.
+
+On the phone, enabling Tailscale takes the single iOS VPN slot and drops
+the Reach tunnel, which is what makes the test honest: the first-party
+mesh is *unavailable*, so only the tailnet can carry. A generation was
+started on the LAN and the phone was moved to a foreign network
+mid-stream. It completed.
+
+Which road carried it, evidenced both ways. Positively: the tailnet peer
+showed `active; relay "sfo", tx 299660 rx 79460` — 293 KiB pushed from the
+Mac, the size of the generation. Negatively: the WireGuard peer's last
+handshake was 4 m 36 s old, and WireGuard rekeys every 120 s whenever it
+has anything to send, so a handshake that stale is proof the mesh sat idle
+straight through the run.
+
+The relay is worth dwelling on. The Mac sits behind a travel router,
+behind a building router, behind a router-level VPN; direct traversal
+failed and Tailscale fell back to its own DERP relay in San Francisco.
+Reach neither knew nor cared. It dialed 100.66.143.31 because that address
+had been declared over an authenticated control stream, and the road
+worked out how to be a road. Reach ships no relay by design; a road that
+brings its own is that road's business. **Reach always brings a road,
+gladly uses yours, and the session never learns which one it took.**
