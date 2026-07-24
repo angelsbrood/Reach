@@ -7,9 +7,10 @@ the decision. Kill criteria come from the pre-filing plan.
 |---|---|---|
 | S4 | Does `LanguageModelSession` accept a third-party `LanguageModel`/executor at runtime, and does an MLX filling stream behind the slot? | **PASS** (2026-07-21) |
 | S1a | QUIC with mutual TLS between provisioned certificates (client-cert challenge + CA pin), loopback | **PASS** (2026-07-21) |
-| S1b | Behavior of the QUIC connection across a Wi-Fi → cellular interface transition (migration vs re-attach) | **PARTIAL PASS** (2026-07-21) — re-attach verified on device; migration leg deferred to the mesh by construction |
+| S1b | Behavior of the QUIC connection across a Wi-Fi → cellular interface transition (migration vs re-attach) | **PASS** (2026-07-22) — re-attach at the mesh address *is* the transition; migration has nothing to migrate to; `.handover` off |
 | S2 | Development-signed packet-tunnel extension carrying WireGuardKit traffic on device | **PASS** (2026-07-22) — kill fired on the personal team, reversed same day by program enrollment; embedded tunnel verified end to end |
 | S3 | Headscale as a supervised subprocess with programmatic pre-auth key minting | **PASS** (2026-07-21) |
+| S5 | Does a road the user already owns — their own tailnet — work as a Reach candidate without code? | **PASS by construction** (2026-07-24) — already declared, already raced; no code lands |
 
 ## S4 — the provider slot is real (2026-07-21)
 
@@ -68,7 +69,7 @@ Transport rulings for the spine:
   negative tests (and any client-side "am I in?" logic) must probe the data
   plane, not trust `.ready`.
 
-## S1b — the re-attach guard rail holds on hardware (2026-07-21, partial)
+## S1b — re-attach is the transition (2026-07-21 partial, ruled 2026-07-22)
 
 On an iPhone 17 Pro Max (iOS 27) streaming a long generation from the Mac
 over the studio LAN: Wi-Fi switched off mid-stream for ~5 s, then back on.
@@ -86,6 +87,48 @@ mesh provides; the final S1b ruling (and any use of `.handover`
 multipath) lands with S2 and the away leg, tested against the mesh IP.
 Until then, session-layer re-attach is not just the guaranteed path — it
 is the only well-defined one, and it is verified.
+
+### The ruling (2026-07-22) — the away leg answered it by construction
+
+The away leg ran in-building against a travel router we govern: the phone
+streaming a generation on our own SSID, then hopping mid-stream to the
+building's, so the daemon's LAN address went unroutable exactly as it does
+at the door. The session froze for seconds, fell to the mesh address
+through the router's WAN port map, and completed; the tunnel's counters
+moved with it (47 KiB in, 78 KiB out), so the generation itself rode
+WireGuard rather than merely handshaking over it.
+
+**Migration is not the transition, and cannot be.** QUIC migration
+preserves the *destination* address and changes only the client's local
+path — but the walk-out is precisely the event that makes the destination
+unroutable. There is nothing to migrate *to*. Re-attaching at the mesh
+address **is** the transition, and it is the only form the transition can
+take. The corollary is the good news: once a session rides 10.86.0.1,
+WireGuard's own endpoint roaming absorbs every later path change beneath
+QUIC, which never sees them — an on-mesh session is path-agnostic by
+construction. `.handover` multipath is therefore off everywhere, and the
+planned A/B against it is deleted rather than deferred: it would compare a
+working mechanism against an inapplicable one.
+
+What made the fall possible is a wire change, not a transport trick. The
+daemon's `HelloAck` now declares every address it answers on, the mesh
+address among them, over the already-authenticated control stream — so the
+list is exactly as trusted as the session carrying it, and trusting it adds
+nothing mutual TLS had not already granted. The client keeps those
+addresses as dial candidates; on path death or path change it races all of
+them and keeps whichever connects first. An `NWPathMonitor` cancels the
+live stream the moment the path moves, so the re-dial starts in
+milliseconds instead of at the 30 s idle timeout, and `QUICStream.open`
+honors cancellation so the race's losers die promptly. A session that began
+over Bonjour discovery on the LAN ends up on the mesh without the app ever
+having been told either address exists.
+
+The first attempt failed informatively and is worth recording: WireGuard
+ingress was already proven — a handshake and 680 bytes arrived through the
+port map — but the *session* never followed, because the client dialed the
+cluster by its Bonjour service name, which resolves to nothing on a foreign
+network. Reachability was never the missing piece; knowing where else to
+knock was.
 
 ## S2 — the entitlement gate, refused then granted; the embedded tunnel holds (2026-07-22)
 
@@ -147,3 +190,56 @@ Per the mesh ruling, S3's outcome affects only the fallback control-plane
 path (official Tailscale client + pre-auth key) and the funded multi-device
 ledger; the demo's primary away path is a static WireGuard peer provisioned
 through the ceremony.
+
+## S5 — a road the user already owns (2026-07-24, code side)
+
+**The question.** Reach ships a mesh so that a civilian always has a road.
+But many people already run one — a tailnet, most commonly — and the
+honest test of the architecture is whether Reach can *use* theirs without
+being taught about it. Concretely: with Tailscale carrying the phone (iOS
+grants exactly one VPN slot, so the Reach tunnel is down) and the Mac on
+the same tailnet, does a session that began on the LAN survive the hop by
+falling to the Mac's 100.x address?
+
+**Verdict: yes, by construction. No code lands.** Three existing pieces
+compose into the answer, none of which were written with tailnets in mind:
+
+- `LocalAddresses.ipv4()` enumerates every `AF_INET` interface the host
+  holds and filters nothing but a duplicate loopback. Tunnel interfaces are
+  interfaces: the mesh's own 10.86.0.1 appears there today, which is why
+  the away leg works at all, and a tailnet's 100.x appears the same way the
+  moment it is up.
+- `HelloAck` carries that list, and the hub turns each address into a dial
+  candidate; the race dials them all and keeps the first that connects.
+  Nothing ranks or prefers — the race is the arbiter.
+- The verify block pins the cluster's CA with a nil host, so *any* address
+  presenting the cluster's chain **is** the cluster. A certificate issued
+  for LAN addresses authenticates a mesh dial, and would authenticate a
+  tailnet dial identically.
+
+So the pre-authorized escape hatch — a trivial interface-inclusion
+predicate, which would also have governed which addresses the server
+certificate honestly claims — is not needed and is not written. Systematic
+VPN interop stays where it was scoped: M3.
+
+**Boundaries, stated rather than discovered.**
+
+- Candidates are learned when a session opens. A road that appears
+  *mid-session* is picked up at the next session open, not retroactively.
+- A cold start away from home has no learned candidates at all: discovery
+  is mDNS, which does not cross a foreign network, and nothing is persisted
+  between launches. The demo's shape — a session begun at home, walked out
+  of the door — never meets this, but a shipped product would; candidate
+  persistence is named M3 work, not a defect discovered late.
+- Loopback is declared to every peer and is meaningless to all of them
+  except a client on the same host (a simulator, where it is exactly right).
+  Off-box it is refused immediately and costs one failed dial in a race
+  that was already parallel.
+
+**What remains is confirmation, not dependency.** The hardware run — Mac
+Tailscale split-tunnel, phone on the tailnet with the Reach tunnel down,
+hop mid-generation, and the Mac's WireGuard counters staying still to prove
+which road carried it — exercises machinery already proven on hardware with
+the mesh candidate in S1b. It is scheduled behind the router work that
+gates every rehearsal; a failure there would be a finding about Tailscale's
+routing, not about whether Reach declares and races the address.

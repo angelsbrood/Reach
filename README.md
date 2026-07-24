@@ -27,9 +27,14 @@ and per-app; every session is inspectable; there is no account anywhere.
 
 ## Status
 
-Pre-filing build. The LAN profile (discovery → QUIC/mTLS → a
-`LanguageModelSession` streaming from the host) is the current spine; the
-pairing ceremony and the away path over the mesh follow.
+Pre-filing build, and further along than the spine it started as. Three
+things have each been accepted on hardware: the LAN profile (discovery →
+QUIC/mTLS → a `LanguageModelSession` streaming from the host); the pairing
+ceremony in both halves — a device's identity and its mesh membership from
+one QR, then a per-app grant a human rules on the keeper; and the away
+path, where a session survives leaving the network it began on and falls to
+the mesh without the app having been configured with either address. What
+remains is the demo itself, recorded behind a public uplink.
 
 ## License
 
