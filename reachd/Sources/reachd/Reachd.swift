@@ -8,7 +8,7 @@ struct Reachd: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "reachd",
         abstract: "The Reach serving daemon: a slot host fronting self-hosted open weights with the Foundation Models framework's native semantics.",
-        subcommands: [Serve.self, Pair.self, Status.self, CA.self, Selftest.self]
+        subcommands: [Serve.self, Pair.self, Status.self, Doctor.self, CA.self, Selftest.self]
     )
 }
 
@@ -24,11 +24,18 @@ struct Serve: AsyncParsableCommand {
     var noAdvertise = false
 
     func run() async throws {
-        var config = DaemonConfig.load()
+        // A config read successfully is left exactly as the operator wrote it.
+        // Write only to materialize a first run, or to record a --model
+        // override — rewriting on every start is how a typo gets erased before
+        // anyone can see it.
+        let isFirstRun = !DaemonConfig.exists()
+        var config = try DaemonConfig.load()
         if let model {
             config.modelID = model
         }
-        try? config.save()
+        if isFirstRun || model != nil {
+            try config.save()
+        }
 
         // The identity organ: CA auto-initializes on first serve; the
         // server leaf is issued fresh per start for the current addresses.
@@ -63,9 +70,8 @@ struct Serve: AsyncParsableCommand {
             grants: Daemon.GrantWiring(desk: desk, devices: devices)
         )
         try await daemon.start(advertise: !noAdvertise)
-        let meshEndpoint = config.meshEndpoint
-            ?? "\(addresses.dropFirst().first.map { $0.map(String.init).joined(separator: ".") } ?? "127.0.0.1"):51820"
-        let wgHost = try WireGuardHost(endpoint: meshEndpoint)
+        let mesh = MeshEndpoint.resolve(config: config, addresses: addresses)
+        let wgHost = try WireGuardHost(endpoint: mesh.endpoint)
         let enrollment = EnrollmentService(
             ca: ca,
             tokens: TokenStore(),
@@ -74,7 +80,7 @@ struct Serve: AsyncParsableCommand {
             desk: desk
         )
         try daemon.startEnrollment(service: enrollment, advertise: !noAdvertise)
-        print("[reachd] enrollment listening on :\(config.enrollPort), mesh endpoint \(meshEndpoint)")
+        print("[reachd] enrollment listening on :\(config.enrollPort), \(mesh.summary)")
         print("[reachd] grant desk open — app approvals surface on the keeper")
         print("[reachd] \(config.clusterName) serving \(config.modelID) on :\(config.port) (\(addresses.map { $0.map(String.init).joined(separator: ".") }.joined(separator: ", ")))")
 
@@ -100,8 +106,14 @@ struct Status: AsyncParsableCommand {
     )
 
     func run() async throws {
-        let config = DaemonConfig.load()
-        print("reachd \(DaemonInfo.version) — cluster \"\(config.clusterName)\", model \(config.modelID), port \(config.port)")
+        // Status reports; it does not refuse. A broken config is exactly the
+        // thing you ran status to find out about.
+        do {
+            let config = try DaemonConfig.load()
+            print("reachd \(DaemonInfo.version) — cluster \"\(config.clusterName)\", model \(config.modelID), port \(config.port)")
+        } catch {
+            print("reachd \(DaemonInfo.version) — config unreadable:\n\(error)")
+        }
         print("state: \(DaemonInfo.stateDirectory.path)")
     }
 }

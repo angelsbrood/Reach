@@ -10,9 +10,16 @@ public enum DaemonInfo {
     public static let version = "0.0.1"
     public static let wireVersion = Wire.version
 
-    /// Runtime state root; never inside the repository.
+    /// Runtime state root; never inside the repository. `REACH_STATE_DIR`
+    /// overrides it — the only way to exercise the daemon end to end against
+    /// throwaway state rather than the operator's real keys, since
+    /// `applicationSupportDirectory` resolves the home directory from the
+    /// password database and ignores `HOME`.
     public static var stateDirectory: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        if let override = ProcessInfo.processInfo.environment["REACH_STATE_DIR"], !override.isEmpty {
+            return URL(fileURLWithPath: override, isDirectory: true)
+        }
+        return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Reach", isDirectory: true)
     }
 }

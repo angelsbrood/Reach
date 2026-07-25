@@ -32,8 +32,11 @@ struct Pair: AsyncParsableCommand {
     }
 
     func run() async throws {
-        var config = DaemonConfig.load()
-        try? config.save()   // persists a fresh clusterID on first use
+        let isFirstRun = !DaemonConfig.exists()
+        let config = try DaemonConfig.load()
+        if isFirstRun {
+            try config.save()   // persists the freshly minted clusterID
+        }
 
         let caDirectory = DaemonInfo.stateDirectory.appendingPathComponent("ca", isDirectory: true)
         let ca: ClusterCA
