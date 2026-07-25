@@ -71,7 +71,18 @@ struct Serve: AsyncParsableCommand {
         )
         try await daemon.start(advertise: !noAdvertise)
         let mesh = MeshEndpoint.resolve(config: config, addresses: addresses)
-        let wgHost = try WireGuardHost(endpoint: mesh.endpoint)
+        // The startup line reports what the endpoint is now; the grant reads
+        // it again when it grants. Re-pinning meshEndpoint — which is what
+        // arriving at a venue means — must reach the next phone paired
+        // without a restart, because nothing in the ceremony would show that
+        // it hadn't: the QR carries no endpoint, and on the LAN a stale one
+        // works perfectly right up until the walk-out.
+        let wgHost = try WireGuardHost {
+            MeshEndpoint.resolve(
+                config: try DaemonConfig.load(),
+                addresses: LocalAddresses.ipv4()
+            ).endpoint
+        }
         let enrollment = EnrollmentService(
             ca: ca,
             tokens: TokenStore(),

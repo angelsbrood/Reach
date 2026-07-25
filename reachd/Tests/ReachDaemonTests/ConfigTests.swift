@@ -157,3 +157,60 @@ import Testing
         #expect(MeshEndpoint.classify("192.168.4.999") == nil)
     }
 }
+
+/// The endpoint a device is told to dial is read when it is granted, not when
+/// the daemon started. Arriving at a venue means re-pinning `meshEndpoint`, and
+/// a value cached at process start would send the next phone to the last
+/// venue's address — which works perfectly on the LAN and fails only at the
+/// far end of the walk-out.
+@Suite struct MeshEndpointFreshnessTests {
+    private func temporaryDirectory() throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("reach-endpoint-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }
+
+    private func host(reading directory: URL) throws -> WireGuardHost {
+        try WireGuardHost(
+            keysDirectory: directory.appendingPathComponent("wg", isDirectory: true),
+            confPath: directory.appendingPathComponent("reach0.conf").path,
+            endpoint: {
+                MeshEndpoint.resolve(
+                    config: try DaemonConfig.load(from: directory),
+                    addresses: [[192, 168, 8, 104]]
+                ).endpoint
+            }
+        )
+    }
+
+    @Test func theEndpointFollowsTheFileNotTheProcess() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        var config = DaemonConfig()
+        config.meshEndpoint = "192.168.4.94:51820"
+        try config.save(to: directory)
+
+        let wgHost = try host(reading: directory)
+        #expect(try wgHost.currentEndpoint() == "192.168.4.94:51820")
+
+        // The venue changes. Nothing restarts.
+        config.meshEndpoint = "203.0.113.7:51820"
+        try config.save(to: directory)
+        #expect(try wgHost.currentEndpoint() == "203.0.113.7:51820")
+    }
+
+    @Test func aBrokenConfigRefusesToNameAnEndpointAtAll() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let wgHost = try host(reading: directory)
+        // Absent is a first run: derivation answers, and says it guessed.
+        #expect(try wgHost.currentEndpoint() == "192.168.8.104:51820")
+
+        try Data(#"{ "meshEndpoint" : 203.0.113.7:51820 }"#.utf8)
+            .write(to: directory.appendingPathComponent("config.json"))
+        #expect(throws: ConfigError.self) { try wgHost.currentEndpoint() }
+    }
+}

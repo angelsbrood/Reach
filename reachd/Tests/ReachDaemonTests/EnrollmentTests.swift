@@ -28,7 +28,15 @@ enum EnrollOutcome {
         let cleanup: @Sendable () -> Void
     }
 
-    private func makeFixture(port: UInt16) throws -> Fixture {
+    private let fixedEndpoint: @Sendable () throws -> String = { "192.0.2.1:51820" }
+
+    /// `endpoint` defaults to a fixed value; the venue tests hand it a
+    /// resolver that reads the state directory's config, which is what the
+    /// daemon does.
+    private func makeFixture(
+        port: UInt16,
+        endpoint: (@Sendable (URL) -> @Sendable () throws -> String)? = nil
+    ) throws -> Fixture {
         let stateDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("reach-enroll-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: stateDir, withIntermediateDirectories: true)
@@ -44,7 +52,7 @@ enum EnrollOutcome {
         let wgHost = try WireGuardHost(
             keysDirectory: stateDir.appendingPathComponent("wg", isDirectory: true),
             confPath: confPath,
-            endpoint: "192.0.2.1:51820"
+            endpoint: endpoint.map { $0(stateDir) } ?? fixedEndpoint
         )
         let service = EnrollmentService(
             ca: ca,
@@ -226,5 +234,78 @@ enum EnrollOutcome {
         #expect(conf.components(separatedBy: "AllowedIPs = \(record.assignedIP)/32").count == 2)
         #expect(conf.contains(record.wgPub.base64EncodedString()))
         #expect(record.wgPub != original.wgPub)
+    }
+
+    /// Arriving at a venue is exactly this: re-pin `meshEndpoint`, re-pair the
+    /// phone. If the grant carried a value cached when the daemon started, the
+    /// second phone would be handed the first venue's address — and would work
+    /// perfectly on the LAN right up until it walked out the door.
+    @Test func aRePinReachesTheNextPhoneWithoutARestart() async throws {
+        let fixture = try makeFixture(port: 47433) { stateDir in
+            {
+                MeshEndpoint.resolve(
+                    config: try DaemonConfig.load(from: stateDir),
+                    addresses: [[192, 168, 8, 104]]
+                ).endpoint
+            }
+        }
+        defer { fixture.cleanup() }
+
+        var config = DaemonConfig()
+        config.meshEndpoint = "192.168.4.94:51820"
+        try config.save(to: fixture.stateDir)
+
+        let home = try await enroll(fixture, token: fixture.tokens.mint(), name: "phone-at-home")
+        guard case .granted(let homeGrant) = home else {
+            Issue.record("first enrollment failed: \(home)")
+            return
+        }
+        #expect(homeGrant.wg.endpoint == "192.168.4.94:51820")
+
+        // The venue. The daemon keeps running.
+        config.meshEndpoint = "203.0.113.7:51820"
+        try config.save(to: fixture.stateDir)
+
+        let away = try await enroll(fixture, token: fixture.tokens.mint(), name: "phone-at-venue")
+        guard case .granted(let awayGrant) = away else {
+            Issue.record("second enrollment failed: \(away)")
+            return
+        }
+        #expect(awayGrant.wg.endpoint == "203.0.113.7:51820")
+    }
+
+    /// A config the daemon cannot read is a daemon that cannot say where its
+    /// mesh is. Granting anyway would issue a certificate and append a peer
+    /// for a device that can never arrive — so it refuses first, and leaves
+    /// nothing behind to clean up.
+    @Test func anUnreadableEndpointRefusesBeforeAnythingIsMinted() async throws {
+        let fixture = try makeFixture(port: 47434) { stateDir in
+            {
+                MeshEndpoint.resolve(
+                    config: try DaemonConfig.load(from: stateDir),
+                    addresses: [[192, 168, 8, 104]]
+                ).endpoint
+            }
+        }
+        defer { fixture.cleanup() }
+
+        try Data(#"{ "meshEndpoint" : 203.0.113.7:51820 }"#.utf8)
+            .write(to: fixture.stateDir.appendingPathComponent("config.json"))
+
+        let outcome = try await enroll(fixture, token: fixture.tokens.mint(), name: "phone-at-a-typo")
+        guard case .refused(let error) = outcome else {
+            Issue.record("a grant was issued against a config that will not parse")
+            return
+        }
+        #expect(error.code == "enroll-endpoint")
+        // The refusal names the file, so the fix is one line away rather than
+        // a debugging session at a venue.
+        #expect(error.message.contains("config.json"))
+
+        // Nothing half-enrolled: no device record, and no peer block.
+        let devices = await DeviceRegistry(directory: fixture.stateDir).all
+        #expect(devices.isEmpty)
+        let conf = (try? String(contentsOfFile: fixture.confPath, encoding: .utf8)) ?? ""
+        #expect(!conf.contains("10.86.0.2/32"))
     }
 }

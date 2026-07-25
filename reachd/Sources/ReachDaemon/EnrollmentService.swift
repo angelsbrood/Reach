@@ -70,6 +70,20 @@ public struct EnrollmentService: Sendable {
             return
         }
 
+        // Where this device will be told to find the mesh, settled before
+        // anything is minted. A grant nobody can act on is worse than a
+        // refusal, and refusing here leaves no half-enrolled device, no
+        // issued certificate and no peer block behind.
+        let endpoint: String
+        do {
+            endpoint = try wgHost.currentEndpoint()
+        } catch {
+            Log.error("enrollment refused — no mesh endpoint: \(error)")
+            try await stream.send(ErrorFrame(code: "enroll-endpoint", message: "\(error)"))
+            stream.cancel()
+            return
+        }
+
         var nonce = Data(count: 32)
         nonce.withUnsafeMutableBytes { _ = SecRandomCopyBytes(kSecRandomDefault, 32, $0.baseAddress!) }
         try await stream.send(EnrollChallenge(nonce: nonce))
@@ -111,7 +125,7 @@ public struct EnrollmentService: Sendable {
             wg: WGProvision(
                 assignedIP: "\(record.assignedIP)/24",
                 serverPublicKey: wgHost.serverPublicKey,
-                endpoint: wgHost.pinnedEndpoint,
+                endpoint: endpoint,
                 allowedIPs: ["\(wgHost.serverMeshIP)/32"],
                 keepaliveSeconds: 25
             )
@@ -123,7 +137,10 @@ public struct EnrollmentService: Sendable {
         }
         _ = try completeRaw.decode(EnrollComplete.self)
         await devices.activate(record.id)
-        Log.info("device enrolled: \(begin.deviceName) → \(record.assignedIP)\(record.admin ? " (admin)" : "")")
+        // The endpoint is logged because it is the one thing in the grant
+        // that cannot be re-derived later: the phone carries it into its
+        // tunnel config, and this line is the record of what it was told.
+        Log.info("device enrolled: \(begin.deviceName) → \(record.assignedIP)\(record.admin ? " (admin)" : ""), mesh endpoint \(endpoint)")
         stream.finishSending()
     }
 
@@ -357,14 +374,26 @@ public actor DeviceRegistry {
 public actor WireGuardHost {
     public nonisolated let serverPublicKey: Data
     public nonisolated let serverMeshIP = "10.86.0.1"
-    public nonisolated let pinnedEndpoint: String
+
+    /// Where a device is told to find the mesh — read at the moment of
+    /// granting, never remembered. The operator can re-pin `meshEndpoint`
+    /// between two enrollments (which is exactly what moving to a venue
+    /// is), and a value cached at process start would hand the next phone
+    /// the last venue's address: invisible on the LAN, and fatal the one
+    /// time it matters. It is read once per pairing, so there is nothing
+    /// to cache but the mistake.
+    private nonisolated let endpointResolver: @Sendable () throws -> String
 
     private let confURL: URL
+
+    public nonisolated func currentEndpoint() throws -> String {
+        try endpointResolver()
+    }
 
     public init(
         keysDirectory: URL = DaemonInfo.stateDirectory.appendingPathComponent("wg", isDirectory: true),
         confPath: String = "/opt/homebrew/etc/wireguard/reach0.conf",
-        endpoint: String
+        endpoint: @escaping @Sendable () throws -> String
     ) throws {
         confURL = URL(fileURLWithPath: confPath)
         let fm = FileManager.default
@@ -396,7 +425,17 @@ public actor WireGuardHost {
             throw CAError.stateMissing("server.pub")
         }
         serverPublicKey = pub
-        pinnedEndpoint = endpoint
+        endpointResolver = endpoint
+    }
+
+    /// A fixed endpoint — for tests and for any caller that genuinely has
+    /// one value for the host's whole life.
+    public init(
+        keysDirectory: URL = DaemonInfo.stateDirectory.appendingPathComponent("wg", isDirectory: true),
+        confPath: String = "/opt/homebrew/etc/wireguard/reach0.conf",
+        endpoint: String
+    ) throws {
+        try self.init(keysDirectory: keysDirectory, confPath: confPath, endpoint: { endpoint })
     }
 
     /// Installs the peer: idempotent when the key is already present, and
