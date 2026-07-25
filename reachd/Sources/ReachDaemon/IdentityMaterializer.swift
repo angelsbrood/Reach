@@ -9,6 +9,14 @@ import X509
 /// (errSecMissingEntitlement — CI/harness sandboxes), falls back to an
 /// openssl-assembled PKCS#12, which `SecPKCS12Import` accepts everywhere.
 public enum IdentityMaterializer {
+    /// Materializing an identity is several Security-framework calls in a
+    /// row — a keychain add, or an openssl subprocess and a PKCS#12 import —
+    /// and they do not tolerate being interleaved with another
+    /// materialization. Locking only the import was not enough: the failure
+    /// still surfaced as `errSecSuccess` with nothing imported, just more
+    /// rarely. The whole composition is the unit that has to be atomic.
+    private static let lock = NSLock()
+
     public static func materialize(_ issued: ClusterCA.Issued, label: String) throws -> SecIdentity {
         try materialize(
             certificateDER: try issued.certificateDER(),
@@ -22,6 +30,8 @@ public enum IdentityMaterializer {
     /// and apps use this; on devices the ceremony stores into the keychain
     /// directly).
     public static func materialize(certificateDER: Data, privateKey: P256.Signing.PrivateKey, label: String) throws -> SecIdentity {
+        lock.lock()
+        defer { lock.unlock() }
         do {
             return try KeychainIdentity.store(
                 privateKeyX963: privateKey.x963Representation,
