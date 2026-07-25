@@ -23,7 +23,8 @@ and per-app; every session is inspectable; there is no account anywhere.
 - `Keeper/` — the companion app prototype: the ceremony, the tunnel, the
   grant sheet
 - `Example/` — a sample app that links ReachKit and nothing privileged
-- `docs/` — wire protocol, ceremony, spike verdicts
+- `docs/` — [the wire](docs/wire.md), [the ceremony](docs/ceremony.md), [the
+  demo](docs/demo.md), and [spike verdicts](docs/spikes.md)
 
 ## Building
 
