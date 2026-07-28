@@ -55,37 +55,48 @@ enum EnrollmentClient {
         let wgKey = Curve25519.KeyAgreement.PrivateKey()
 
         let options = TLSBuilder.enrollClientOptions(alpn: Wire.enrollALPN, caHashPin: payload.caHash)
+        // Only the DIAL may be retried on another address. The QR carries
+        // every address the host answers on, and trying them in turn is the
+        // right way to find the one this phone can reach — but the moment
+        // EnrollBegin leaves, the host has spent the one-time token, and
+        // whatever comes back is a verdict about this pairing rather than a
+        // fact about this address. Retrying past that point re-presents a
+        // dead token to the next address, and its "this QR is spent" answer
+        // then overwrites the reason the host actually gave: the operator
+        // reads a complaint about the QR and never learns about the config,
+        // the proof of possession, or the CA hash that did not match.
         var lastError: Error = EnrollError.sequence("no address reachable")
         for addr in payload.addrs {
+            let stream: ReachTransport.QUICStream
             do {
-                let dialer = QUICDialer(
+                stream = try await QUICDialer(
                     endpoint: .hostPort(host: NWEndpoint.Host(addr), port: NWEndpoint.Port(rawValue: payload.port)!),
                     parameters: .reachQUIC(options: options)
-                )
-                return try await run(
-                    dialer: dialer,
-                    payload: payload,
-                    deviceName: deviceName,
-                    deviceKey: deviceKey,
-                    devicePub: devicePub,
-                    wgKey: wgKey
-                )
+                ).openStream(timeout: 20)
             } catch {
                 lastError = error
+                continue
             }
+            return try await run(
+                stream: stream,
+                payload: payload,
+                deviceName: deviceName,
+                deviceKey: deviceKey,
+                devicePub: devicePub,
+                wgKey: wgKey
+            )
         }
         throw lastError
     }
 
     private static func run(
-        dialer: QUICDialer,
+        stream: ReachTransport.QUICStream,
         payload: QRPayload,
         deviceName: String,
         deviceKey: SecKey,
         devicePub: Data,
         wgKey: Curve25519.KeyAgreement.PrivateKey
     ) async throws -> Outcome {
-        let stream = try await dialer.openStream(timeout: 20)
         defer { stream.cancel() }
         var frames = stream.frames.makeAsyncIterator()
 
