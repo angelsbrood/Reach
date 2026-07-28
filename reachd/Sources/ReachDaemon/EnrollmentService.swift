@@ -64,8 +64,22 @@ public struct EnrollmentService: Sendable {
         stream: ReachTransport.QUICStream,
         iterator: inout AsyncThrowingStream<RawFrame, Error>.AsyncIterator
     ) async throws {
+        // Consumed on presentation, deliberately: the check and the removal
+        // have to stay one synchronous step, because TokenStore is a file
+        // read-modify-write with no lock, and holding the token open across
+        // the round trip below would let two devices enrol on one QR.
+        //
+        // The cost of that is real and belongs here rather than in a puzzled
+        // operator: every refusal past this line spends the QR, so a fixed
+        // fault is retried against a token that no longer exists. Say which
+        // it is, and say it on both ends — the phone sees the message, and
+        // the Mac's terminal, which said nothing at all before this.
         guard tokens.consume(begin.token) else {
-            try await stream.send(ErrorFrame(code: "enroll-token", message: "invalid or expired token"))
+            Log.error("enrollment refused — this QR is spent or expired; run `reachd pair` for a fresh one")
+            try await stream.send(ErrorFrame(
+                code: "enroll-token",
+                message: "this QR is spent or expired — run `reachd pair` on the host for a fresh one"
+            ))
             stream.cancel()
             return
         }
@@ -73,7 +87,8 @@ public struct EnrollmentService: Sendable {
         // Where this device will be told to find the mesh, settled before
         // anything is minted. A grant nobody can act on is worse than a
         // refusal, and refusing here leaves no half-enrolled device, no
-        // issued certificate and no peer block behind.
+        // issued certificate and no peer block behind — though note the token
+        // above is already spent, so this refusal costs a fresh `reachd pair`.
         let endpoint: String
         do {
             endpoint = try wgHost.currentEndpoint()

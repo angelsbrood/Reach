@@ -292,7 +292,8 @@ enum EnrollOutcome {
         try Data(#"{ "meshEndpoint" : 203.0.113.7:51820 }"#.utf8)
             .write(to: fixture.stateDir.appendingPathComponent("config.json"))
 
-        let outcome = try await enroll(fixture, token: fixture.tokens.mint(), name: "phone-at-a-typo")
+        let token = fixture.tokens.mint()
+        let outcome = try await enroll(fixture, token: token, name: "phone-at-a-typo")
         guard case .refused(let error) = outcome else {
             Issue.record("a grant was issued against a config that will not parse")
             return
@@ -307,5 +308,31 @@ enum EnrollOutcome {
         #expect(devices.isEmpty)
         let conf = (try? String(contentsOfFile: fixture.confPath, encoding: .utf8)) ?? ""
         #expect(!conf.contains("10.86.0.2/32"))
+
+        // …but the QR IS spent, and that is deliberate rather than an
+        // oversight: the token check and its removal have to stay one
+        // synchronous step or two devices could enrol on one QR. Pinned here
+        // so nobody "fixes" the retry by holding the token open across the
+        // round trip. The operator's remedy is a fresh `reachd pair`, which
+        // is what the refusal now says on both ends.
+        #expect(!fixture.tokens.consume(token))
+    }
+
+    @Test func aSpentTokenSaysWhatToDoAboutIt() async throws {
+        let fixture = try makeFixture(port: 47435)
+        defer { fixture.cleanup() }
+
+        let token = fixture.tokens.mint()
+        _ = try await enroll(fixture, token: token, name: "first")
+
+        let replay = try await enroll(fixture, token: token, name: "second")
+        guard case .refused(let error) = replay else {
+            Issue.record("token replay was accepted")
+            return
+        }
+        // "invalid or expired" pointed at the QR's age and left the operator
+        // re-scanning the same dead code. The message names the remedy.
+        #expect(error.code == "enroll-token")
+        #expect(error.message.contains("reachd pair"))
     }
 }
