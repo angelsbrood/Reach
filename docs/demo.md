@@ -63,7 +63,13 @@ Reports the host-side preconditions in one pass: whether the config parses,
 whether the mesh endpoint is **pinned** rather than derived and what kind of
 address it is, whether the mesh interface is actually up, the CA and its pin,
 wg peers, an active admin device, and whether a daemon already holds the ports.
-It exits non-zero if any of that is wrong.
+It exits non-zero on a FAIL. Warnings do not affect the exit code, so read the
+lines rather than the tally — the mesh-endpoint line in particular, which is
+the one that decides whether a phone standing outside can reach this host.
+
+On a cold machine, expect the mesh interface to FAIL and both ports to WARN
+until the two steps below have run. That is the checklist working, not a
+fault.
 
 It cannot see the edge — the port forward lives there, and a forward that was
 configured once is not a forward that is in force. Check the live firewall
@@ -71,9 +77,11 @@ rules before every away rehearsal, not the record of having set them up.
 
 Then, in order:
 
-1. `wg-quick up reach0` — **before** `reachd serve`, because the mesh address
-   only lands in the server certificate's SAN if the interface exists when the
-   certificate is issued.
+1. `wg-quick up reach0` — **before** `reachd serve`, so the mesh address is
+   present in every artifact from the first instant. Nothing breaks if it comes
+   up second: the listener binds by port, verification pins the chain and not
+   the name, and the candidate list the away leg falls to is recomputed for
+   every Hello. The order is cheap insurance, and it stays.
 2. `reachd serve` — confirm the startup line reads `(pinned)`.
 3. A LAN generation, to prove the spine.
 4. The away leg, to prove the fall.

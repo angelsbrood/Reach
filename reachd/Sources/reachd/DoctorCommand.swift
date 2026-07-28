@@ -220,7 +220,7 @@ struct Doctor: AsyncParsableCommand {
                 level: .fail,
                 title: "mesh interface",
                 detail: "no 10.86.0.x address — reach0 is down (\(rendered.joined(separator: ", ")))",
-                action: "sudo wg-quick up reach0, BEFORE reachd serve — the mesh address only lands in the server cert's SAN if it exists at serve time."
+                action: "sudo wg-quick up reach0 (standing order: before reachd serve) — until it exists, the away leg has no mesh candidate to fall to."
             )
         }
         return Finding(
