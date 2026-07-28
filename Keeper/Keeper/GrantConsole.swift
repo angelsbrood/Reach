@@ -56,12 +56,29 @@ final class GrantConsole {
         loop = Task { await run() }
     }
 
+    /// Send first, then say it happened. The card disappearing and the line
+    /// in the log are the keeper's whole account of a ruling, and they were
+    /// written before anything left the phone — so a control stream that had
+    /// dropped (it is nil'd whenever the watch loop returns, and the send was
+    /// a `try?`) produced a sheet that read as ruled while the asking app sat
+    /// parked until its grant window expired. The one place the operator
+    /// looks would have been the one place that could not tell them.
     func rule(_ event: GrantEvent, allow: Bool) {
-        pending.removeAll { $0.requestID == event.requestID }
-        ruledLog.append("\(allow ? "allowed" : "denied") \(event.displayName) (\(event.bundleID))")
-        let control = self.control
-        Task {
-            try? await control?.send(GrantRule(requestID: event.requestID, allow: allow))
+        guard let control else {
+            state = .unavailable("not connected to the cluster — the ruling was not sent")
+            return
+        }
+        Task { [weak self] in
+            do {
+                try await control.send(GrantRule(requestID: event.requestID, allow: allow))
+                guard let self else { return }
+                self.pending.removeAll { $0.requestID == event.requestID }
+                self.ruledLog.append("\(allow ? "allowed" : "denied") \(event.displayName) (\(event.bundleID))")
+            } catch {
+                guard let self else { return }
+                // The card stays, so the ruling can be made again.
+                self.state = .unavailable("the ruling did not reach the cluster — try again")
+            }
         }
     }
 
@@ -76,16 +93,33 @@ final class GrantConsole {
                 state = .connecting
                 try await watch(record)
             } catch is NotAdmin {
-                // The daemon said this device may not rule; that will not
-                // change by retrying.
+                // The daemon said this device may not rule. That will not
+                // change by retrying quickly — but it can change: the admin
+                // flag lives in a device record the host can re-issue, and a
+                // re-pair restores it. Returning here left the loop dead with
+                // `loop` still non-nil, so start() could never restart it and
+                // only relaunching the app recovered — a permanent blank sheet
+                // reported as a statement about authority, which sends the
+                // repair toward the device record rather than the loop.
                 state = .notAdmin
-                return
+                dropConnection()
+                try? await Task.sleep(for: .seconds(30))
+                continue
             } catch {
                 state = .unavailable("cluster unreachable — retrying")
             }
-            control = nil
+            dropConnection()
             try? await Task.sleep(for: .seconds(3))
         }
+    }
+
+    /// A card outliving the stream that delivered it is a button that cannot
+    /// work: rule() has nothing to send on. The desk replays everything still
+    /// parked to each new subscriber, so anything genuinely outstanding comes
+    /// straight back when the watch reconnects.
+    private func dropConnection() {
+        control = nil
+        pending.removeAll()
     }
 
     private struct NotAdmin: Error {}
