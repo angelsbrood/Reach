@@ -107,6 +107,11 @@ final class TunnelManager {
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self, let manager = self.manager else { return }
+                // A status change says how the tunnel is doing, not whether
+                // it installed. Overwriting .failed here erased the only
+                // record that it never did — and the next status notification
+                // always arrives, so the failure could not survive to be read.
+                if case .failed = self.state { return }
                 self.state = .installed(manager.connection.status)
                 self.append("status: \(manager.connection.status.label)")
             }

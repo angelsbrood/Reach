@@ -63,6 +63,16 @@ struct CeremonyView: View {
                 .appendingPathComponent("keeper-wg.conf")
             try outcome.wgQuickConfig.write(to: url, atomically: true, encoding: .utf8)
             await tunnel.install()
+            // "Paired" is a claim about the mesh, not about the certificate,
+            // so it waits until the tunnel is actually installed. install()
+            // reports failure by setting its own state and returning normally
+            // — nothing throws — and the LAN leg never touches wg, so an
+            // uninstalled tunnel stays invisible until the walk-out, which is
+            // the worst possible moment to discover it.
+            guard case .installed = tunnel.state else {
+                phase = .failed("Certificate issued, but the tunnel did not install: \(tunnel.state). The mesh will not carry anything until this is fixed.")
+                return
+            }
             tunnel.start()
             phase = .paired(cluster: outcome.clusterName, meshIP: outcome.assignedIP)
         } catch {
