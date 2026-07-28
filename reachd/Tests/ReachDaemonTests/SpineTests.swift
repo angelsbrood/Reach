@@ -17,6 +17,8 @@ import Testing
         let client = try ca.issueClient(commonName: "spine-app", uri: "reach://device/spine-app")
         let serverIdentity = try IdentityMaterializer.materialize(server, label: "reach-spine2-server-\(UUID())")
         let clientIdentity = try IdentityMaterializer.materialize(client, label: "reach-spine2-client-\(UUID())")
+        IdentityTrash.add(serverIdentity)
+        IdentityTrash.add(clientIdentity)
         let caCert = try IdentityStore.certificate(fromDER: ca.certificateDER())
 
         var config = DaemonConfig()
@@ -46,6 +48,7 @@ import Testing
     }
 
     @Test func sessionStreamsThroughTheDaemon() async throws {
+        defer { IdentityTrash.drain() }
         let (daemon, configuration) = try await startDaemon(port: 47414)
         defer { Task { await daemon.stop() } }
 
@@ -74,6 +77,7 @@ import Testing
     /// acceptance; this proves the client machinery: watcher, race,
     /// re-attach, replay dedupe.)
     @Test func generationSurvivesAPathChange() async throws {
+        defer { IdentityTrash.drain() }
         let (daemon, configuration) = try await startDaemon(port: 47416)
         defer { Task { await daemon.stop() } }
 
@@ -96,6 +100,7 @@ import Testing
     }
 
     @Test func cancellationPropagates() async throws {
+        defer { IdentityTrash.drain() }
         let (daemon, configuration) = try await startDaemon(port: 47415)
         defer { Task { await daemon.stop() } }
 

@@ -37,6 +37,9 @@ import X509
         let caHash = Data(SHA256.hash(data: caDER))
         let server = try ca.issueServer(commonName: "localhost", dnsNames: ["localhost"], ipAddresses: [[127, 0, 0, 1]])
         let serverIdentity = try IdentityMaterializer.materialize(server, label: "reach-grant-server-\(UUID())")
+        // Materialized identities land in the login keychain via
+        // SecPKCS12Import; the fixture owns removing what it made.
+        let serverBox = IdentityBox(serverIdentity)
         let caCert = try IdentityStore.certificate(fromDER: caDER)
 
         let tokens = TokenStore(directory: stateDir)
@@ -71,6 +74,8 @@ import X509
             daemon: daemon, caCert: caCert, sessionPort: sessionPort, enrollDialer: enrollDialer,
             cleanup: {
                 Task { await daemon.stop() }
+                KeychainIdentity.remove(identity: serverBox.identity)
+                IdentityTrash.drain()
                 try? FileManager.default.removeItem(at: stateDir)
             }
         )
@@ -104,6 +109,7 @@ import X509
             privateKey: deviceKey,
             label: "reach-grant-device-\(UUID())"
         )
+        IdentityTrash.add(identity)
         return (grant, identity)
     }
 
@@ -210,6 +216,7 @@ import X509
             privateKey: appKey,
             label: "reach-grant-app-\(UUID())"
         )
+        IdentityTrash.add(appIdentity)
         let options = TLSBuilder.clientOptions(alpn: Wire.alpn, identity: appIdentity, serverTrustRoots: [fixture.caCert])
         let dialer = QUICDialer(
             endpoint: .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: fixture.sessionPort)!),

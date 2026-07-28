@@ -23,6 +23,9 @@ import Testing
         let client = try ca.issueClient(commonName: "mlx-app", uri: "reach://device/mlx-app")
         let serverIdentity = try IdentityMaterializer.materialize(server, label: "reach-mlx-server-\(UUID())")
         let clientIdentity = try IdentityMaterializer.materialize(client, label: "reach-mlx-client-\(UUID())")
+        IdentityTrash.add(serverIdentity)
+        IdentityTrash.add(clientIdentity)
+        defer { IdentityTrash.drain() }
         let caCert = try IdentityStore.certificate(fromDER: ca.certificateDER())
 
         var config = DaemonConfig()

@@ -149,6 +149,9 @@ struct ScriptedFilling: SlotFilling {
         let client = try ca.issueClient(commonName: "spine-client", uri: "reach://device/spine")
         let serverIdentity = try IdentityMaterializer.materialize(server, label: "reach-spine-server-\(UUID())")
         let clientIdentity = try IdentityMaterializer.materialize(client, label: "reach-spine-client-\(UUID())")
+        IdentityTrash.add(serverIdentity)
+        IdentityTrash.add(clientIdentity)
+        defer { IdentityTrash.drain() }
         let caCert = try IdentityStore.certificate(fromDER: ca.certificateDER())
 
         var config = DaemonConfig()

@@ -60,6 +60,39 @@ private func withTimeout<T: Sendable>(
     }
 }
 
+/// `SecIdentity` is a CF type with no Sendable conformance; deleting one is a
+/// single Security call, and this carries it to a teardown closure.
+struct IdentityBox: @unchecked Sendable {
+    let identity: SecIdentity
+    init(_ identity: SecIdentity) { self.identity = identity }
+}
+
+/// Identities materialized in the middle of a test, waiting to be removed.
+///
+/// `SecPKCS12Import` adds to the login keychain as a side effect, so every
+/// identity a test makes outlives the run unless something deletes it — which
+/// nothing did, for as long as this suite has existed. Fixtures own the ones
+/// they create; this holds the ones created mid-test, and fixture teardown
+/// drains it.
+enum IdentityTrash {
+    private static let lock = NSLock()
+    private nonisolated(unsafe) static var held: [IdentityBox] = []
+
+    static func add(_ identity: SecIdentity) {
+        lock.lock()
+        defer { lock.unlock() }
+        held.append(IdentityBox(identity))
+    }
+
+    static func drain() {
+        lock.lock()
+        let boxes = held
+        held.removeAll()
+        lock.unlock()
+        for box in boxes { KeychainIdentity.remove(identity: box.identity) }
+    }
+}
+
 @Suite(.serialized) struct LoopbackTransportTests {
     private struct Fixture {
         let ca: ClusterCA
@@ -69,47 +102,30 @@ private func withTimeout<T: Sendable>(
         let cleanup: @Sendable () -> Void
     }
 
-    /// Builds a `SecIdentity` for an issued leaf. Prefers the production
-    /// path (keychain assembly, as the ceremony uses on device); falls back
-    /// to an openssl-built PKCS#12 when the test process lacks keychain
-    /// access (errSecMissingEntitlement under the CI/harness sandbox —
-    /// `SecPKCS12Import` works there and exercises the same TLS surface).
+    /// Builds a `SecIdentity` for an issued leaf — through the production
+    /// path, deliberately.
+    ///
+    /// This used to be a hand-written copy of `IdentityMaterializer`: the
+    /// same keychain-then-openssl-PKCS#12 composition, spelled out again
+    /// here. That is why `pkcs12ImportFailed(0)` — `errSecSuccess` with an
+    /// empty item list, i.e. two materializations at once — outlived the fix
+    /// for it. The lock added in 0e839e4 serializes the composition inside
+    /// `IdentityMaterializer`, and this copy was not inside it, so the
+    /// duplicate went on racing at roughly one full run in eight.
+    ///
+    /// A test that reimplements the thing it is testing around cannot inherit
+    /// its fixes. Call the real one.
     private func makeIdentity(_ issued: ClusterCA.Issued, label: String) throws -> (SecIdentity, @Sendable () -> Void) {
-        do {
-            let identity = try KeychainIdentity.store(
-                privateKeyX963: issued.privateKeyX963,
-                certificateDER: try issued.certificateDER(),
-                label: label
-            )
-            return (identity, { KeychainIdentity.remove(label: label) })
-        } catch IdentityError.keychainAddFailed(let status) where status == errSecMissingEntitlement {
-            let dir = FileManager.default.temporaryDirectory
-                .appendingPathComponent("reach-id-\(UUID().uuidString)", isDirectory: true)
-            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            let keyURL = dir.appendingPathComponent("key.pem")
-            let certURL = dir.appendingPathComponent("cert.pem")
-            let p12URL = dir.appendingPathComponent("identity.p12")
-            try issued.privateKey.pemRepresentation.write(to: keyURL, atomically: true, encoding: .utf8)
-            try issued.certificate.serializeAsPEM().pemString.write(to: certURL, atomically: true, encoding: .utf8)
-
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/openssl")
-            process.arguments = [
-                "pkcs12", "-export",
-                "-inkey", keyURL.path, "-in", certURL.path,
-                "-out", p12URL.path, "-passout", "pass:reach-test",
-            ]
-            try process.run()
-            process.waitUntilExit()
-            guard process.terminationStatus == 0 else {
-                throw IdentityError.importFailed("openssl pkcs12 exited \(process.terminationStatus)")
-            }
-            let identity = try IdentityStore.identity(
-                fromPKCS12: Data(contentsOf: p12URL),
-                passphrase: "reach-test"
-            )
-            return (identity, { try? FileManager.default.removeItem(at: dir) })
-        }
+        let identity = try IdentityMaterializer.materialize(issued, label: label)
+        // Delete the identity itself, not a label the keychain did not keep.
+        // `SecPKCS12Import` adds to the login keychain as a side effect, so
+        // without this every run leaves its fixtures behind — which is why
+        // this machine's keychain holds thousands of them.
+        //
+        // SecIdentity is a CF type without a Sendable conformance; deleting
+        // is a single Security call and the box carries it to the teardown.
+        let box = IdentityBox(identity)
+        return (identity, { KeychainIdentity.remove(identity: box.identity) })
     }
 
     private func makeFixture() throws -> Fixture {

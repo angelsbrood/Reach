@@ -46,6 +46,9 @@ enum EnrollOutcome {
         let caDER = try ca.certificateDER()
         let server = try ca.issueServer(commonName: "localhost", dnsNames: ["localhost"], ipAddresses: [[127, 0, 0, 1]])
         let serverIdentity = try IdentityMaterializer.materialize(server, label: "reach-enroll-server-\(UUID())")
+        // SecPKCS12Import adds to the login keychain as a side effect, so a
+        // materialized identity has to be removed or it survives the run.
+        let serverBox = IdentityBox(serverIdentity)
         let caCert = try IdentityStore.certificate(fromDER: caDER)
 
         let tokens = TokenStore(directory: stateDir)
@@ -89,6 +92,7 @@ enum EnrollOutcome {
             cleanup: {
                 acceptTask.cancel()
                 listener.cancel()
+                KeychainIdentity.remove(identity: serverBox.identity)
                 try? FileManager.default.removeItem(at: stateDir)
             }
         )
