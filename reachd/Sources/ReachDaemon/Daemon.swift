@@ -296,6 +296,13 @@ public final class Daemon: Sendable {
             try await stream.send(ErrorFrame(code: "reattach-rejected", message: "\(error)"))
             return
         }
+        // Which road the generation came back on. Nothing else records it:
+        // the session is road-agnostic by design, and a walk-out at a venue
+        // whose Wi-Fi reaches past the door can complete without the mesh
+        // ever being used — a take that looks perfect while demonstrating
+        // nothing. A 10.86.0.x here, on the Mac's terminal and in shot, is
+        // the difference between the claim and the evidence for it.
+        Log.info("generation \(frame.genID) re-attached from \(stream.remoteEndpointDescription() ?? "an unnamed path") at seq \(frame.fromSeq)")
         try await pump(events: events, stream: stream, iterator: &iterator, sessionID: frame.sessionID, genID: frame.genID)
     }
 
