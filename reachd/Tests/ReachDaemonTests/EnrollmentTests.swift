@@ -99,7 +99,8 @@ enum EnrollOutcome {
         token: String,
         name: String,
         breakPoP: Bool = false,
-        deviceKey: P256.Signing.PrivateKey = P256.Signing.PrivateKey()
+        deviceKey: P256.Signing.PrivateKey = P256.Signing.PrivateKey(),
+        completeCeremony: Bool = true
     ) async throws -> EnrollOutcome {
         let wgKey = Curve25519.KeyAgreement.PrivateKey()
 
@@ -131,7 +132,16 @@ enum EnrollOutcome {
             return .refused(try grantRaw.decode(ErrorFrame.self))
         }
         let grant = try grantRaw.decode(EnrollGrant.self)
+        // A phone that dies, is backgrounded, or refuses the tunnel between
+        // the grant and the confirmation. The daemon must treat that as a
+        // pairing that did not happen.
+        guard completeCeremony else { return .granted(grant) }
         try await stream.send(EnrollComplete(ok: true))
+        // The peer block is written after EnrollComplete lands, so a test
+        // that reads reach0.conf has to wait for the daemon rather than for
+        // its own send. The daemon closes its send side once it is done, so
+        // draining to the end is the deterministic wait.
+        while (try? await frames.next()) != nil {}
         return .granted(grant)
     }
 
@@ -316,6 +326,68 @@ enum EnrollOutcome {
         // round trip. The operator's remedy is a fresh `reachd pair`, which
         // is what the refusal now says on both ends.
         #expect(!fixture.tokens.consume(token))
+    }
+
+    /// A re-pair evicts the peer holding that /32 — two peers must never claim
+    /// one address. So the eviction has to wait until the device has confirmed
+    /// it holds the grant, or a pairing that fails at the last step leaves the
+    /// phone with neither the new mesh nor the one it walked in with.
+    @Test func aCeremonyAbandonedAfterTheGrantKeepsThePeerItAlreadyHad() async throws {
+        let fixture = try makeFixture(port: 47436)
+        defer { fixture.cleanup() }
+
+        let deviceKey = P256.Signing.PrivateKey()
+        _ = try await enroll(fixture, token: fixture.tokens.mint(), name: "phone", deviceKey: deviceKey)
+
+        let afterFirst = try String(contentsOfFile: fixture.confPath, encoding: .utf8)
+        #expect(afterFirst.contains("10.86.0.2/32"))
+
+        // Same Secure Enclave key, so the daemon treats it as the same device
+        // and the fresh wg key would replace the working block. Abandon after
+        // the grant.
+        _ = try await enroll(
+            fixture,
+            token: fixture.tokens.mint(),
+            name: "phone",
+            deviceKey: deviceKey,
+            completeCeremony: false
+        )
+        try? await Task.sleep(for: .milliseconds(400))
+
+        let afterAbandon = try String(contentsOfFile: fixture.confPath, encoding: .utf8)
+        #expect(afterAbandon == afterFirst, "an abandoned re-pair rewrote the peer block the phone was using")
+    }
+
+    /// The same collapse `DaemonConfig.load` had, in the one other file the
+    /// operator edits by hand: read failure and empty file are not the same
+    /// answer, and treating them alike rewrites the conf without its
+    /// [Interface] — destroying the host's own key line.
+    @Test func anUnreadableWireGuardConfRefusesRatherThanRewritingIt() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("reach-wg-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let confPath = dir.appendingPathComponent("reach0.conf").path
+        let host = try WireGuardHost(
+            keysDirectory: dir.appendingPathComponent("wg", isDirectory: true),
+            confPath: confPath,
+            endpoint: "192.0.2.1:51820"
+        )
+        let before = try String(contentsOfFile: confPath, encoding: .utf8)
+        #expect(before.contains("[Interface]"))
+        #expect(before.contains("PrivateKey"))
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: confPath)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: confPath) }
+
+        await #expect(throws: (any Error).self) {
+            try await host.addPeer(publicKey: Data(repeating: 7, count: 32), allowedIP: "10.86.0.2")
+        }
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: confPath)
+        let after = try String(contentsOfFile: confPath, encoding: .utf8)
+        #expect(after == before, "a conf that could not be read was rewritten anyway")
     }
 
     @Test func aSpentTokenSaysWhatToDoAboutIt() async throws {

@@ -133,7 +133,6 @@ public struct EnrollmentService: Sendable {
         var serializer = DER.Serializer()
         try serializer.serialize(certificate)
 
-        try await wgHost.addPeer(publicKey: request.wgPubKey, allowedIP: record.assignedIP)
         try await stream.send(EnrollGrant(
             deviceCertDER: Data(serializer.serializedBytes),
             caCertDER: try ca.certificateDER(),
@@ -152,6 +151,15 @@ public struct EnrollmentService: Sendable {
         }
         _ = try completeRaw.decode(EnrollComplete.self)
         await devices.activate(record.id)
+        // The peer waits until the device has confirmed it holds the grant.
+        // Admitting it earlier meant a re-pair that failed after the grant
+        // had already evicted the block the phone was using — two peers must
+        // never claim one /32, so installing the new key deletes the old one,
+        // and a device that never completed then has no working mesh and no
+        // way back to the one it had. Nothing in the grant depends on this
+        // having run: it carries the host's public key and the assigned
+        // address, both known well before here.
+        try await wgHost.addPeer(publicKey: request.wgPubKey, allowedIP: record.assignedIP)
         // The endpoint is logged because it is the one thing in the grant
         // that cannot be re-derived later: the phone carries it into its
         // tunnel config, and this line is the record of what it was told.
@@ -460,7 +468,23 @@ public actor WireGuardHost {
     @discardableResult
     public func addPeer(publicKey: Data, allowedIP: String) throws -> Bool {
         let base64 = publicKey.base64EncodedString()
-        let text = (try? String(contentsOf: confURL, encoding: .utf8)) ?? ""
+        // Absent and unreadable are different answers, and collapsing them
+        // was the same mistake `DaemonConfig.load` used to make — left in
+        // place here for the one other file the operator edits by hand. An
+        // unreadable conf read as "" makes the rewrite below emit a bare
+        // [Peer] block with no [Interface], so the host's own key line is
+        // destroyed by a pairing that reports success. Refuse instead, and
+        // name the file; `init` is what creates a missing one, not this.
+        let text: String
+        if FileManager.default.fileExists(atPath: confURL.path) {
+            do {
+                text = try String(contentsOf: confURL, encoding: .utf8)
+            } catch {
+                throw CAError.stateMissing("\(confURL.path) exists but will not read: \(error)")
+            }
+        } else {
+            text = ""
+        }
         guard !text.contains(base64) else { return false }
         var chunks = text.components(separatedBy: "[Peer]")
         let head = chunks.removeFirst()
