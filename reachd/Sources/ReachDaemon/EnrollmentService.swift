@@ -64,10 +64,11 @@ public struct EnrollmentService: Sendable {
         stream: ReachTransport.QUICStream,
         iterator: inout AsyncThrowingStream<RawFrame, Error>.AsyncIterator
     ) async throws {
-        // Consumed on presentation, deliberately: the check and the removal
-        // have to stay one synchronous step, because TokenStore is a file
-        // read-modify-write with no lock, and holding the token open across
-        // the round trip below would let two devices enrol on one QR.
+        // Consumed on presentation, deliberately: holding the token open
+        // across the round trip below would let a second device present it
+        // while the first is still mid-ceremony. What makes the consumption
+        // itself single-use is `unlink`, in TokenStore — this line only has
+        // to be early, not clever.
         //
         // The cost of that is real and belongs here rather than in a puzzled
         // operator: every refusal past this line spends the QR, so a fixed
@@ -264,30 +265,55 @@ public struct EnrollmentService: Sendable {
 /// One-time enrollment tokens, file-backed so `reachd pair` (a separate
 /// process) can mint what `reachd serve` validates. Hashes only; 10-minute
 /// TTL; consumed on first presentation.
+///
+/// **One token is one file, and an exclusive create is what makes it
+/// single-use.**
+///
+/// This used to be one JSON array rewritten in place, guarded by the
+/// argument that the check and the removal were a single synchronous step.
+/// That argument is only half of what the invariant needs: a synchronous
+/// step cannot be interrupted by a *suspension*, but it can be executed by
+/// two threads at the same instant, and it was —
+/// `Daemon.startEnrollment` spawns a fresh `Task` per inbound stream and
+/// `EnrollmentService` is a non-isolated struct, so two ceremonies ran in
+/// parallel against one file. Both read the entry, both found it, both
+/// wrote a copy without it: a lost update, which an atomic write prevents
+/// from tearing the file but cannot prevent. Measured before the change at
+/// **24 double-spends in 24 races**, and the token is the only thing
+/// authenticating a device ceremony — proof-of-possession is over a key
+/// the caller minted seconds earlier, so it says nothing about *which*
+/// device is asking.
+///
+/// **Do not "simplify" this to `unlink` deciding the winner.** That was the
+/// first fix written here and it is wrong on this platform. Raced eight
+/// ways against one path, `unlink` returns 0 — with `errno` untouched — to
+/// *every* caller, not one; measured in Swift and again in plain C, inside
+/// the sandbox and outside it, 23 races of 24. The file does get removed;
+/// what is not true is that the return value identifies who removed it, and
+/// a single-use check needs the second property, not the first.
+/// `open(O_CREAT|O_EXCL)` does have it — exactly one caller gets a
+/// descriptor and the other seven get `EEXIST`, 24 races of 24 — so the
+/// claim marker, not the removal, is the arbiter. Creation is also
+/// cross-process, which this needs: `pair` mints in one process while
+/// `serve` consumes in another, and the old array could resurrect a spent
+/// token when those two interleaved.
 public struct TokenStore: Sendable {
-    private let url: URL
+    private let directory: URL
 
     public init(directory: URL = DaemonInfo.stateDirectory) {
-        url = directory.appendingPathComponent("enroll-tokens.json")
+        self.directory = directory.appendingPathComponent("enroll-tokens", isDirectory: true)
     }
 
-    private struct Entry: Codable {
-        var hash: Data
-        var expires: Date
-    }
-
-    private func load() -> [Entry] {
-        guard let data = try? Data(contentsOf: url),
-              let entries = try? JSONDecoder().decode([Entry].self, from: data) else { return [] }
-        return entries.filter { $0.expires > Date() }
-    }
-
-    private func save(_ entries: [Entry]) {
-        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        if let data = try? JSONEncoder().encode(entries) {
-            try? data.write(to: url, options: [.atomic])
-            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
-        }
+    /// A token's file is named by its own SHA-256, so the name is the
+    /// lookup and no index is needed. base64url, because a filename cannot
+    /// carry `/`.
+    private func url(for token: String) -> URL {
+        let hash = Data(SHA256.hash(data: Data(token.utf8)))
+        let name = hash.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        return directory.appendingPathComponent(name)
     }
 
     public func mint(ttl: TimeInterval = 600) -> String {
@@ -297,19 +323,68 @@ public struct TokenStore: Sendable {
             .replacingOccurrences(of: "+", with: "-")
             .replacingOccurrences(of: "/", with: "_")
             .replacingOccurrences(of: "=", with: "")
-        var entries = load()
-        entries.append(Entry(hash: Data(SHA256.hash(data: Data(token.utf8))), expires: Date().addingTimeInterval(ttl)))
-        save(entries)
+
+        try? FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        sweepExpired()
+
+        let deadline = Date().addingTimeInterval(ttl)
+        let file = url(for: token)
+        if let data = try? JSONEncoder().encode(deadline) {
+            try? data.write(to: file, options: [.atomic])
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+        }
         return token
     }
 
     public func consume(_ token: String) -> Bool {
-        let hash = Data(SHA256.hash(data: Data(token.utf8)))
-        var entries = load()
-        guard let index = entries.firstIndex(where: { $0.hash == hash }) else { return false }
-        entries.remove(at: index)
-        save(entries)
-        return true
+        let file = url(for: token)
+        // No token file is the ordinary "spent or never existed" answer, and
+        // it is checked first so a stranger's guess leaves nothing behind.
+        guard let data = try? Data(contentsOf: file),
+              let deadline = try? JSONDecoder().decode(Date.self, from: data)
+        else { return false }
+
+        // The arbiter. Exactly one caller creates this, in this process or
+        // any other; everyone else gets EEXIST and is not the device this QR
+        // admits. It carries the same deadline as the token so the sweep can
+        // read both kinds without knowing which is which.
+        let claim = URL(fileURLWithPath: file.path + claimSuffix)
+        let fd = open(claim.path, O_CREAT | O_EXCL | O_WRONLY, 0o600)
+        guard fd >= 0 else { return false }
+        _ = data.withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
+        close(fd)
+
+        // Now that the winner is decided, retiring the token is bookkeeping.
+        _ = unlink(file.path)
+        return deadline > Date()
+    }
+
+    private var claimSuffix: String { ".claim" }
+
+    /// Expired tokens and their claim markers are removed when the next
+    /// token is minted. Nothing else sweeps, and nothing needs to: both
+    /// kinds are inert once past their deadline — an absent token refuses
+    /// and a surviving claim refuses — so this is housekeeping rather than
+    /// enforcement. The claim has to outlive the token it retired, or the
+    /// same QR could be presented twice inside its own ten minutes.
+    private func sweepExpired() {
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path) else { return }
+        let now = Date()
+        for name in names {
+            let file = directory.appendingPathComponent(name)
+            guard let data = try? Data(contentsOf: file),
+                  let deadline = try? JSONDecoder().decode(Date.self, from: data),
+                  deadline <= now
+            else { continue }
+            _ = unlink(file.path)
+        }
+        // The array this replaced. Left behind it would read like live
+        // state to the next person who opens the state directory.
+        _ = unlink(directory.deletingLastPathComponent().appendingPathComponent("enroll-tokens.json").path)
     }
 }
 

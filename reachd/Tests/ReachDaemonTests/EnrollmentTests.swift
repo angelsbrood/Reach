@@ -324,12 +324,53 @@ enum EnrollOutcome {
         #expect(!conf.contains("10.86.0.2/32"))
 
         // …but the QR IS spent, and that is deliberate rather than an
-        // oversight: the token check and its removal have to stay one
-        // synchronous step or two devices could enrol on one QR. Pinned here
-        // so nobody "fixes" the retry by holding the token open across the
-        // round trip. The operator's remedy is a fresh `reachd pair`, which
+        // oversight: consuming it late enough to survive a refusal means
+        // holding it open across the round trip, and a second device can
+        // present it in that gap. Pinned here so nobody "fixes" the retry
+        // by moving the consumption after the ceremony. The operator's remedy is a fresh `reachd pair`, which
         // is what the refusal now says on both ends.
         #expect(!fixture.tokens.consume(token))
+    }
+
+    /// …and the sentence above is only half of what one QR needs.
+    ///
+    /// `consume` is one synchronous step, which rules out a *suspension*
+    /// landing between the check and the removal. It does not rule out two
+    /// threads running that step at the same instant, and nothing upstream
+    /// stops them: `EnrollmentService` is a non-isolated struct and
+    /// `Daemon.startEnrollment` spawns a fresh `Task` per inbound stream,
+    /// so two ceremonies execute in parallel on the global executor with
+    /// nothing between them and one file. Both `load()` the same entry,
+    /// both find it, both `save()` a copy without it — a lost update, which
+    /// `.atomic` prevents from tearing the file but cannot prevent.
+    ///
+    /// The token is the *only* thing authenticating a device ceremony:
+    /// proof-of-possession is over a key the caller generated moments
+    /// earlier, so it proves the caller holds its own key and nothing about
+    /// which device it is. A double-spend therefore hands an uninvited
+    /// device a cluster-signed certificate and a mesh peer — and any
+    /// chain-valid certificate may open sessions.
+    @Test func oneQRAdmitsOneDeviceEvenWhenTwoRaceForIt() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("reach-token-race-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let tokens = TokenStore(directory: dir)
+
+        // Repeated because the window is a file read-modify-write: a single
+        // trial that happens to serialize proves nothing either way, and a
+        // rate reported from one sample is the error `0e839e4` records.
+        var doubleSpends = 0
+        for _ in 0..<24 {
+            let token = tokens.mint()
+            let admitted = await withTaskGroup(of: Bool.self) { group in
+                for _ in 0..<8 { group.addTask { tokens.consume(token) } }
+                return await group.reduce(into: 0) { $0 += $1 ? 1 : 0 }
+            }
+            if admitted > 1 { doubleSpends += 1 }
+        }
+        #expect(doubleSpends == 0, "one QR admitted two devices in \(doubleSpends) of 24 races")
     }
 
     /// A re-pair evicts the peer holding that /32 — two peers must never claim
