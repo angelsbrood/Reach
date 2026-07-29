@@ -104,6 +104,66 @@ public struct ClusterCA: Sendable {
         return try issue(commonName: commonName, days: days, extensions: extensions)
     }
 
+    /// The daemon's own listener leaf, minted once and kept beside the CA.
+    ///
+    /// `reachd serve` used to issue this fresh on every start, and the
+    /// reason recorded for that was that the leaf carried "the current
+    /// addresses". It does carry them, and nothing ever reads them: every
+    /// verify block in the tree runs `SecPolicyCreateSSL(_, nil)` — a nil
+    /// host — so SANs are never matched, which is exactly why dialing a mesh
+    /// address against a LAN-SAN certificate works at all (S1b, S5). The
+    /// reissue bought nothing and cost something. `KeychainIdentity.store`
+    /// adds with `SecItemAdd`; fresh material is never a duplicate, so every
+    /// start added a key and a certificate that nothing ever removed. The
+    /// development machine's login keychain held **13 certificates under
+    /// this common name, one per start, all of them from production** — no
+    /// test issues under it.
+    ///
+    /// Identical material presented again *is* a duplicate, which `store`
+    /// already tolerates, so reusing it makes the accumulation stop by
+    /// construction rather than by remembering to clean up after it.
+    /// Rotation survives: the leaf is reissued once it comes within
+    /// `renewWithin` of expiring, and the stored pair is replaced.
+    ///
+    /// The private key lands beside `ca-key.raw`, at the same 0600 in the
+    /// same 0700 directory. That directory already holds the key that signs
+    /// every identity in the cluster, so a listener key is not a new kind of
+    /// secret in a new kind of place.
+    public func serverLeaf(
+        in directory: URL,
+        commonName: String,
+        dnsNames: [String],
+        ipAddresses: [[UInt8]],
+        days: Int = 30,
+        renewWithin: TimeInterval = 24 * 3600,
+        now: Date = Date()
+    ) throws -> Issued {
+        let certURL = directory.appendingPathComponent("server.der")
+        let keyURL = directory.appendingPathComponent("server-key.raw")
+
+        if let certData = try? Data(contentsOf: certURL),
+           let keyData = try? Data(contentsOf: keyURL),
+           let certificate = try? Certificate(derEncoded: Array(certData)),
+           let privateKey = try? P256.Signing.PrivateKey(rawRepresentation: keyData),
+           certificate.notValidAfter.timeIntervalSince(now) > renewWithin
+        {
+            return Issued(certificate: certificate, privateKey: privateKey)
+        }
+
+        let issued = try issueServer(
+            commonName: commonName,
+            dnsNames: dnsNames,
+            ipAddresses: ipAddresses,
+            days: days
+        )
+        let fm = FileManager.default
+        try fm.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        try issued.certificateDER().write(to: certURL, options: [.atomic])
+        try issued.privateKey.rawRepresentation.write(to: keyURL, options: [.atomic, .completeFileProtection])
+        try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: keyURL.path)
+        return issued
+    }
+
     /// Issues a clientAuth leaf for a key the client minted and proved
     /// possession of — the ceremony's issuance path, for devices
     /// (`reach://device/…`) and granted apps (`reach://app/…`) alike. The

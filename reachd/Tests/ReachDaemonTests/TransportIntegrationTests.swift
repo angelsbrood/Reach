@@ -58,6 +58,67 @@ private func withTimeout<T: Sendable>(
         let loaded = try ClusterCA.load(from: dir)
         #expect(try loaded.certificateDER() == ca.certificateDER())
     }
+
+    /// The listener leaf survives a restart instead of being re-minted.
+    ///
+    /// The defect this pins is not visible from the daemon at all: fresh key
+    /// and certificate material on every `reachd serve` is never a duplicate
+    /// to `SecItemAdd`, so each start left one more of each in the login
+    /// keychain, and nothing ever removed them. Measured at 13 certificates
+    /// under the daemon's own common name, all from production starts.
+    /// Reuse is what makes them duplicates, and duplicates are what
+    /// `KeychainIdentity.store` already tolerates.
+    @Test func theListenerLeafIsMintedOnceAndReused() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("reach-serverleaf-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let ca = try ClusterCA.create(commonName: "Reach Leaf CA")
+        try ca.save(to: dir)
+
+        let arguments = (commonName: "reachd", dnsNames: ["localhost"], ipAddresses: [[UInt8]]([[127, 0, 0, 1]]))
+        let first = try ca.serverLeaf(in: dir, commonName: arguments.commonName, dnsNames: arguments.dnsNames, ipAddresses: arguments.ipAddresses)
+        let second = try ca.serverLeaf(in: dir, commonName: arguments.commonName, dnsNames: arguments.dnsNames, ipAddresses: arguments.ipAddresses)
+
+        // Byte-identical on both halves: a different key or a different
+        // serial is a different keychain item, which is the whole defect.
+        #expect(try first.certificateDER() == second.certificateDER())
+        #expect(first.privateKey.rawRepresentation == second.privateKey.rawRepresentation)
+        #expect(first.certificate.serialNumber == second.certificate.serialNumber)
+
+        // The key is a secret and lands with the same guard as the CA's own.
+        let keyMode = try FileManager.default.attributesOfItem(
+            atPath: dir.appendingPathComponent("server-key.raw").path
+        )[.posixPermissions] as? NSNumber
+        #expect(keyMode?.int16Value == 0o600)
+    }
+
+    /// …but rotation is not lost, or a cluster would serve one leaf forever.
+    @Test func aLeafInsideItsRenewalWindowIsReissued() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("reach-serverleaf-renew-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let ca = try ClusterCA.create(commonName: "Reach Renew CA")
+        try ca.save(to: dir)
+
+        let original = try ca.serverLeaf(in: dir, commonName: "reachd", dnsNames: ["localhost"], ipAddresses: [[127, 0, 0, 1]], days: 30)
+        // Stand 29½ days on: inside the one-day renewal window, so the next
+        // start should mint rather than serve a leaf about to expire.
+        let renewed = try ca.serverLeaf(
+            in: dir,
+            commonName: "reachd",
+            dnsNames: ["localhost"],
+            ipAddresses: [[127, 0, 0, 1]],
+            days: 30,
+            now: Date().addingTimeInterval(29.5 * 24 * 3600)
+        )
+        #expect(try original.certificateDER() != renewed.certificateDER())
+
+        // And the replacement is what a later start will load.
+        let afterwards = try ca.serverLeaf(in: dir, commonName: "reachd", dnsNames: ["localhost"], ipAddresses: [[127, 0, 0, 1]], days: 30)
+        #expect(try afterwards.certificateDER() == renewed.certificateDER())
+    }
 }
 
 /// `SecIdentity` is a CF type with no Sendable conformance; deleting one is a

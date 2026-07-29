@@ -38,7 +38,11 @@ struct Serve: AsyncParsableCommand {
         }
 
         // The identity organ: CA auto-initializes on first serve; the
-        // server leaf is issued fresh per start for the current addresses.
+        // server leaf is minted once and kept beside it, reissued only near
+        // expiry. It used to be reissued per start "for the current
+        // addresses" — addresses no verify block reads, since they all run
+        // nil-host — and every start left another key and certificate in the
+        // login keychain. See ClusterCA.serverLeaf.
         let caDirectory = DaemonInfo.stateDirectory.appendingPathComponent("ca", isDirectory: true)
         let ca: ClusterCA
         if let loaded = try? ClusterCA.load(from: caDirectory) {
@@ -49,7 +53,8 @@ struct Serve: AsyncParsableCommand {
             print("[reachd] cluster CA created")
         }
         let addresses = LocalAddresses.ipv4()
-        let server = try ca.issueServer(
+        let server = try ca.serverLeaf(
+            in: caDirectory,
             commonName: "reachd",
             dnsNames: ["localhost"],
             ipAddresses: addresses,
