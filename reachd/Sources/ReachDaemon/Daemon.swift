@@ -137,10 +137,14 @@ public final class Daemon: Sendable {
                 Log.error("listener terminated: \(error)")
             }
         }
-        let sweeper = Task { [registry] in
+        // The desk sweeps on the same tick as the registry. It was left out
+        // when this was written, and being the one organ with nothing on
+        // disk, there was no artifact anywhere that would have shown it.
+        let sweeper = Task { [registry, grants] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(30))
                 await registry.sweep()
+                await grants?.desk.sweep()
             }
         }
         await state.store(accept: accept, sweeper: sweeper)

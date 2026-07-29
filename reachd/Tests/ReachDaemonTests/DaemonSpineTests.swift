@@ -188,6 +188,53 @@ struct ScriptedFilling: SlotFilling {
         #expect(seqs.sorted() == seqs)
     }
 
+    /// The sweep reaped generations and left the session holding them.
+    ///
+    /// Nothing observed this because a `SessionRecord` with an empty
+    /// generations table costs almost nothing and there is no file it shows
+    /// up in — but every `SessionOpen` a daemon ever served left one, for
+    /// the life of the process, including sessions the client abandoned and
+    /// re-opened after a `begin-rejected`. `lastSeen` was already being
+    /// written on open and on every validate; nothing read it.
+    @Test func aSessionWithNothingLeftInItStopsBeingResident() async throws {
+        var limits = SessionRegistry.Limits()
+        limits.idleSessionRetention = .milliseconds(40)
+        let registry = SessionRegistry(limits: limits)
+
+        for _ in 0..<5 { _ = await registry.openSession(modelID: "scripted") }
+        #expect(await registry.residentSessions == 5)
+
+        // Not yet: a session is addressable until it has been idle its whole
+        // window, or a client pausing between generations would lose one.
+        await registry.sweep()
+        #expect(await registry.residentSessions == 5)
+
+        try await Task.sleep(for: .milliseconds(120))
+        await registry.sweep()
+        #expect(await registry.residentSessions == 0)
+    }
+
+    /// …and a session still holding a generation is not swept out from
+    /// under it, however long it has been since anyone said hello.
+    @Test func aSessionStillHoldingAGenerationSurvivesTheSweep() async throws {
+        var limits = SessionRegistry.Limits()
+        limits.idleSessionRetention = .milliseconds(20)
+        limits.completedRetention = .seconds(600)
+        let registry = SessionRegistry(limits: limits)
+        let (sessionID, _) = await registry.openSession(modelID: "scripted")
+
+        let request = WireGenerationRequest(id: UUID(), transcript: Transcript())
+        let filling = ScriptedFilling()
+        let (stream, _) = try await registry.begin(sessionID: sessionID, genID: UUID()) {
+            filling.generate(request)
+        }
+        _ = await drain(stream) { $0.contains { if case .finished = $0.event { return true }; return false } }
+
+        try await Task.sleep(for: .milliseconds(60))
+        await registry.sweep()
+        #expect(await registry.residentSessions == 1)
+    }
+
     @Test func residencyWindowReapsDetachedGenerations() async throws {
         var limits = SessionRegistry.Limits()
         limits.residencyWindow = .milliseconds(60)

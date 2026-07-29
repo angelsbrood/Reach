@@ -32,7 +32,10 @@ public actor GrantDesk {
     /// Ruled but not yet delivered (the asker's stream died first).
     private var ruled: [String: (verdict: Verdict, at: Date)] = [:]
     /// requestID → fingerprint, so a ruling can land after the park expired.
-    private var requestIndex: [UUID: String] = [:]
+    /// Dated, because that is the only thing that can ever retire an entry
+    /// whose knock timed out or was superseded: neither path reaches
+    /// `collected`, so both used to leave one behind permanently.
+    private var requestIndex: [UUID: (fingerprint: String, at: Date)] = [:]
     private var subscribers: [UUID: AsyncStream<GrantEvent>.Continuation] = [:]
 
     public init(window: Duration = .seconds(120), holdWindow: TimeInterval = 600) {
@@ -59,7 +62,7 @@ public actor GrantDesk {
                 subscriber.yield(event)
             }
         }
-        requestIndex[event.requestID] = fingerprint
+        requestIndex[event.requestID] = (fingerprint, Date())
         let ticket = UUID()
         return await withCheckedContinuation { continuation in
             if let previous = pending[fingerprint] {
@@ -77,7 +80,7 @@ public actor GrantDesk {
     /// The verdict is held either way — delivery is the asker's problem,
     /// and `collected` clears it once the grant lands.
     public func rule(requestID: UUID, allow: Bool, ruler: UUID) -> Bool {
-        guard let fingerprint = requestIndex[requestID] else { return false }
+        guard let fingerprint = requestIndex[requestID]?.fingerprint else { return false }
         let verdict: Verdict = allow ? .allowed(rulerDeviceID: ruler) : .denied
         ruled[fingerprint] = (verdict, Date())
         if let entry = pending.removeValue(forKey: fingerprint) {
@@ -89,7 +92,45 @@ public actor GrantDesk {
     /// The verdict reached its app; forget it.
     public func collected(_ fingerprint: String) {
         ruled[fingerprint] = nil
-        requestIndex = requestIndex.filter { $0.value != fingerprint }
+        requestIndex = requestIndex.filter { $0.value.fingerprint != fingerprint }
+    }
+
+    /// Retires what the happy path never returns for; call periodically.
+    ///
+    /// The desk is the only organ in the daemon with no persistence at all,
+    /// which is exactly why nothing ever noticed it growing: there is no
+    /// file to look at. Two tables outlived their own stated window. A
+    /// verdict the human allowed is cleared by `collected`, or lazily by a
+    /// later knock from the same app — and an app that crashed, was
+    /// uninstalled, or simply never came back sends no later knock, so its
+    /// verdict stayed resident for the life of the process. An index entry
+    /// is cleared only by `collected` too, so every knock that timed out or
+    /// was superseded left one.
+    ///
+    /// `holdWindow` is the desk's one retention rule and both tables now
+    /// obey it, which is also what `docs/wire.md` has been claiming all
+    /// along — that a verdict is *held* ten minutes, not kept forever.
+    @discardableResult
+    public func sweep() -> Int {
+        let now = Date()
+        var retired = 0
+        for (fingerprint, held) in ruled where now.timeIntervalSince(held.at) >= holdWindow {
+            ruled[fingerprint] = nil
+            retired += 1
+        }
+        for (requestID, entry) in requestIndex where now.timeIntervalSince(entry.at) >= holdWindow {
+            // A knock still parked keeps its index entry: the keeper can
+            // rule on it, and that ruling has to find its fingerprint.
+            guard pending[entry.fingerprint] == nil else { continue }
+            requestIndex[requestID] = nil
+            retired += 1
+        }
+        return retired
+    }
+
+    /// The sizes of the desk's tables, for tests that watch them not grow.
+    var footprint: (pending: Int, ruled: Int, index: Int) {
+        (pending.count, ruled.count, requestIndex.count)
     }
 
     /// A keeper's live view: currently pending requests replay first, then

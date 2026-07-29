@@ -11,6 +11,14 @@ public actor SessionRegistry {
     public struct Limits: Sendable {
         public var residencyWindow: Duration = .seconds(120)
         public var completedRetention: Duration = .seconds(600)
+        /// How long a session with nothing left in it stays addressable.
+        ///
+        /// Comfortably past `completedRetention`, so a session is only ever
+        /// dropped after its last generation has already aged out. Dropping
+        /// one is recoverable rather than fatal: the client re-opens on
+        /// `begin-rejected` when nothing has streamed yet, which is exactly
+        /// the state an idle session is in.
+        public var idleSessionRetention: Duration = .seconds(900)
         public var bufferCapBytes: Int = 4 * 1024 * 1024
 
         public init() {}
@@ -201,10 +209,24 @@ public actor SessionRegistry {
                     reaped += 1
                 }
             }
-            sessions[sessionID] = session
+            // The generations were being reaped and the session holding them
+            // never was, so every session a daemon ever opened stayed
+            // resident for the life of the process — including ones
+            // abandoned after a `begin-rejected` re-open. `lastSeen` was
+            // written on open and on every validate and read nowhere: a TTL
+            // with no eviction wired to it.
+            if session.generations.isEmpty, now - session.lastSeen > limits.idleSessionRetention {
+                sessions.removeValue(forKey: sessionID)
+            } else {
+                sessions[sessionID] = session
+            }
         }
         return reaped
     }
+
+    /// How many sessions are resident. Nothing in the daemon needs this —
+    /// it exists so a test can watch the table not grow.
+    var residentSessions: Int { sessions.count }
 
     // MARK: Internals
 

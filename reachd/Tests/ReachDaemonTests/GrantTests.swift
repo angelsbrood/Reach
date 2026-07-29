@@ -351,3 +351,79 @@ import X509
         }
     }
 }
+
+/// The desk's own tables, which nothing else in the daemon can observe.
+///
+/// It is the only organ with no persistence — no `devices.json`, no `ca/`,
+/// no conf — so a table growing without bound leaves no artifact anywhere
+/// that a person could notice. These watch the two that did.
+@Suite struct GrantDeskFootprintTests {
+    private func knock(_ fingerprint: String) -> GrantEvent {
+        GrantEvent(
+            requestID: UUID(),
+            deviceID: "127.0.0.1:1",
+            bundleID: "systems.reach.footprint",
+            displayName: "Footprint",
+            appKeyFingerprint: fingerprint
+        )
+    }
+
+    /// An allowed verdict was cleared by `collected`, or lazily by a later
+    /// knock from the same app. An app that crashed or was uninstalled
+    /// sends no later knock, so its verdict stayed for the life of the
+    /// process — while `docs/wire.md` says it is *held* ten minutes.
+    @Test func aVerdictNobodyCollectsDoesNotOutliveItsHoldWindow() async throws {
+        let desk = GrantDesk(window: .seconds(30), holdWindow: 0.05)
+
+        for index in 0..<4 {
+            let event = knock("fingerprint-\(index)")
+            let parked = Task { await desk.park(event) }
+            // Let the park land before ruling on it.
+            try await Task.sleep(for: .milliseconds(20))
+            #expect(await desk.rule(requestID: event.requestID, allow: true, ruler: UUID()))
+            _ = await parked.value
+        }
+
+        var footprint = await desk.footprint
+        #expect(footprint.ruled == 4)
+
+        // Nothing collects — the four apps never come back.
+        try await Task.sleep(for: .milliseconds(120))
+        #expect(await desk.sweep() > 0)
+        footprint = await desk.footprint
+        #expect(footprint.ruled == 0)
+        #expect(footprint.index == 0)
+    }
+
+    /// A knock that times out never reaches `collected`, so its index entry
+    /// had nothing that could ever retire it.
+    @Test func aKnockThatTimesOutDoesNotLeaveAnIndexEntryBehind() async throws {
+        let desk = GrantDesk(window: .milliseconds(30), holdWindow: 0.05)
+
+        for index in 0..<4 {
+            let verdict = await desk.park(knock("timeout-\(index)"))
+            #expect(verdict == .timedOut)
+        }
+        #expect(await desk.footprint.index == 4)
+
+        try await Task.sleep(for: .milliseconds(120))
+        await desk.sweep()
+        #expect(await desk.footprint.index == 0)
+    }
+
+    /// …but a knock still parked keeps its entry, because the keeper can
+    /// still rule on it and that ruling has to find its fingerprint.
+    @Test func aKnockStillWaitingKeepsTheIndexItsRulingNeeds() async throws {
+        let desk = GrantDesk(window: .seconds(30), holdWindow: 0.05)
+        let event = knock("still-waiting")
+        let parked = Task { await desk.park(event) }
+        try await Task.sleep(for: .milliseconds(20))
+
+        try await Task.sleep(for: .milliseconds(80))
+        await desk.sweep()
+        #expect(await desk.footprint.index == 1)
+
+        #expect(await desk.rule(requestID: event.requestID, allow: true, ruler: UUID()))
+        _ = await parked.value
+    }
+}
