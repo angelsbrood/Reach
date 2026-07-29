@@ -415,7 +415,7 @@ public actor WireGuardHost {
 
     public init(
         keysDirectory: URL = DaemonInfo.stateDirectory.appendingPathComponent("wg", isDirectory: true),
-        confPath: String = "/opt/homebrew/etc/wireguard/reach0.conf",
+        confPath: String = HostCheck.defaultWireGuardConf,
         endpoint: @escaping @Sendable () throws -> String
     ) throws {
         confURL = URL(fileURLWithPath: confPath)
@@ -455,7 +455,7 @@ public actor WireGuardHost {
     /// one value for the host's whole life.
     public init(
         keysDirectory: URL = DaemonInfo.stateDirectory.appendingPathComponent("wg", isDirectory: true),
-        confPath: String = "/opt/homebrew/etc/wireguard/reach0.conf",
+        confPath: String = HostCheck.defaultWireGuardConf,
         endpoint: String
     ) throws {
         try self.init(keysDirectory: keysDirectory, confPath: confPath, endpoint: { endpoint })
