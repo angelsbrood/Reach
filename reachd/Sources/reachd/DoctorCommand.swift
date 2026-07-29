@@ -50,7 +50,7 @@ struct Doctor: AsyncParsableCommand {
             Three lines expected — the DNAT plus two NAT-reflection rules.
             """)
 
-        print("\n\(report.count(.pass)) pass, \(report.count(.warn)) warn, \(report.count(.fail)) fail")
+        print("\n\(report.count(.pass)) pass, \(report.count(.warn)) warn, \(report.count(.wait)) waiting, \(report.count(.fail)) fail")
         if !report.isSound {
             throw ExitCode.failure
         }

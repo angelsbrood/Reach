@@ -17,9 +17,26 @@ import ReachWire
 /// could have caught it, because the executable target is one the test target
 /// cannot import. `HostCheck` decides; `doctor` prints.
 public enum HostCheck {
+    /// Four levels, because the exit code was being asked two questions at
+    /// once and could only answer one.
+    ///
+    /// A cold rig used to exit non-zero — the mesh interface is down before
+    /// `wg-quick up`, which is the runbook working, not a fault — while a
+    /// derived endpoint, the silent failure this whole command exists to
+    /// catch, warned and exited zero. So the runbook carried a note telling
+    /// the operator to disregard the tool's own verdict, which is the point
+    /// at which the verdict has stopped being worth printing.
+    ///
+    /// `wait` is the separation: a step that has not been taken yet, where
+    /// taking it fixes this. `fail` is reserved for what starting up will
+    /// not fix. Only `fail` gates the exit status.
     public enum Level: String, Sendable, Equatable {
         case pass = "PASS"
         case warn = "WARN"
+        /// A runbook step has not been run yet, AND running it resolves this.
+        /// Never a permanent condition — if starting the rig would leave the
+        /// finding standing, it is not a `wait`.
+        case wait = "WAIT"
         case fail = "FAIL"
     }
 
@@ -95,12 +112,21 @@ public enum HostCheck {
             ))
         }
 
+        // The ports are probed before they are printed, because whether a
+        // daemon is up changes what a missing mesh interface MEANS. Down with
+        // nothing running is the next step in the runbook; down with a daemon
+        // already serving is a rig that will stream on the LAN and have
+        // nothing to fall to at the walk-out. Same condition, two verdicts,
+        // and the difference is one boolean this function already has.
+        let portFindings = checkPorts(config: config, isHeld: portIsHeld)
+        let daemonUp = portFindings.contains { $0.level == .pass }
+
         findings.append(contentsOf: checkMeshEndpoint(config: config, addresses: addresses))
-        findings.append(checkMeshInterface(addresses))
+        findings.append(checkMeshInterface(addresses, daemonUp: daemonUp))
         findings.append(checkClusterCA(in: stateDirectory))
         findings.append(contentsOf: checkWireGuard(in: stateDirectory, conf: wireGuardConf))
         findings.append(await checkDevices(in: stateDirectory))
-        findings.append(contentsOf: checkPorts(config: config, isHeld: portIsHeld))
+        findings.append(contentsOf: portFindings)
 
         return Report(findings: findings)
     }
@@ -111,7 +137,7 @@ public enum HostCheck {
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: directory.path, isDirectory: &isDirectory), isDirectory.boolValue else {
             return Finding(
-                level: .warn,
+                level: .wait,
                 title: "state directory",
                 detail: "absent",
                 action: "Created on first serve or pair. Nothing to do unless you expected state here."
@@ -215,15 +241,28 @@ public enum HostCheck {
         return findings
     }
 
-    static func checkMeshInterface(_ addresses: [[UInt8]]) -> Finding {
+    /// Note what this actually observes: a `10.86.0.x` address, not an
+    /// interface named reach0. They are the same thing only while the conf's
+    /// `Address` line says so, and that line sits in the `[Interface]` section
+    /// the operator edits by hand. So the wording claims an address, and the
+    /// remediation does not promise more than the check knows.
+    static func checkMeshInterface(_ addresses: [[UInt8]], daemonUp: Bool) -> Finding {
         let rendered = addresses.map(MeshEndpoint.string(from:))
         let meshUp = addresses.contains { Array($0.prefix(3)) == MeshEndpoint.meshPrefix }
         guard meshUp else {
+            guard daemonUp else {
+                return Finding(
+                    level: .wait,
+                    title: "mesh interface",
+                    detail: "no 10.86.0.x address — reach0 is not up yet (\(rendered.joined(separator: ", ")))",
+                    action: "sudo wg-quick up reach0 (standing order: before reachd serve) — until it exists, the away leg has no mesh candidate to fall to."
+                )
+            }
             return Finding(
                 level: .fail,
                 title: "mesh interface",
-                detail: "no 10.86.0.x address — reach0 is down (\(rendered.joined(separator: ", ")))",
-                action: "sudo wg-quick up reach0 (standing order: before reachd serve) — until it exists, the away leg has no mesh candidate to fall to."
+                detail: "no 10.86.0.x address, but a daemon is already serving (\(rendered.joined(separator: ", ")))",
+                action: "This host will stream on the LAN and have nothing to fall to at the walk-out. sudo wg-quick up reach0, then restart the daemon so the mesh address is in every artifact."
             )
         }
         return Finding(
@@ -233,46 +272,90 @@ public enum HostCheck {
         )
     }
 
+    /// "Absent or unreadable" was one `try?` covering two answers that call for
+    /// opposite actions — the same collapse `DaemonConfig.load` and `addPeer`
+    /// each had removed, surviving here in the third place on this path.
+    /// A CA that has not been created yet is the next step; a CA that is
+    /// present and will not load has taken every enrolled device with it, and
+    /// must never be reported as "not started yet".
     static func checkClusterCA(in directory: URL) -> Finding {
         let caDirectory = directory.appendingPathComponent("ca", isDirectory: true)
-        guard let ca = try? ClusterCA.load(from: caDirectory), let der = try? ca.certificateDER() else {
+        do {
+            let der = try ClusterCA.load(from: caDirectory).certificateDER()
+            let pin = Wire.base64URL(Data(SHA256.hash(data: der)))
+            return Finding(level: .pass, title: "cluster CA", detail: "present; pin \(pin)")
+        } catch CAError.stateMissing {
             return Finding(
-                level: .warn,
+                level: .wait,
                 title: "cluster CA",
-                detail: "absent or unreadable",
-                action: "Created on first serve or pair. A CA that vanished invalidates every enrolled device."
+                detail: "absent",
+                action: "Created on first serve or pair."
+            )
+        } catch {
+            return Finding(
+                level: .fail,
+                title: "cluster CA",
+                detail: "present at \(caDirectory.path) but will not load: \(error)",
+                action: "Every enrolled device was issued against this CA — if it is gone, they are all invalid and must re-pair. Restore it from wherever it is kept before starting anything."
             )
         }
-        let pin = Wire.base64URL(Data(SHA256.hash(data: der)))
-        return Finding(level: .pass, title: "cluster CA", detail: "present; pin \(pin)")
     }
 
     static func checkWireGuard(in directory: URL, conf path: String) -> [Finding] {
         var findings: [Finding] = []
         let keys = directory.appendingPathComponent("wg", isDirectory: true).appendingPathComponent("server.pub")
-        if FileManager.default.fileExists(atPath: keys.path) {
+        let hostKeyExists = FileManager.default.fileExists(atPath: keys.path)
+        if hostKeyExists {
             findings.append(Finding(level: .pass, title: "wg host key", detail: "present"))
         } else {
             findings.append(Finding(
-                level: .warn,
+                level: .wait,
                 title: "wg host key",
                 detail: "absent",
                 action: "Minted on first serve. A new key means every enrolled device must re-pair."
             ))
         }
 
+        // The second half of the same collapse: absent and unreadable were one
+        // `try?`, and the absent branch was described as "not readable".
+        //
+        // Absent is only a first run while the host key is absent too. Once
+        // server.pub exists, `serve` will NOT recreate a missing conf —
+        // WireGuardHost writes the skeleton inside the branch that mints the
+        // keypair, so a host that has ever served skips it — and `addPeer`
+        // then reads the missing file as "" and writes out a bare [Peer] with
+        // no [Interface], which wg-quick rejects outright. Calling that "not
+        // started yet" would be the exact error this level exists to remove.
+        guard FileManager.default.fileExists(atPath: path) else {
+            findings.append(
+                hostKeyExists
+                    ? Finding(
+                        level: .fail,
+                        title: "wg config",
+                        detail: "\(path) is missing, but this host already has a wg key",
+                        action: "serve will not recreate it — the skeleton is only written alongside a fresh keypair. Restore the conf, or delete \(directory.appendingPathComponent("wg").path) to re-mint (every enrolled device then has to re-pair)."
+                    )
+                    : Finding(
+                        level: .wait,
+                        title: "wg config",
+                        detail: "\(path) absent",
+                        action: "Written on first serve, alongside the host key."
+                    )
+            )
+            return findings
+        }
         guard let conf = try? String(contentsOfFile: path, encoding: .utf8) else {
             findings.append(Finding(
-                level: .warn,
+                level: .fail,
                 title: "wg config",
-                detail: "\(path) not readable",
-                action: "Written on first serve; wg-quick reads it as root."
+                detail: "\(path) exists but will not read",
+                action: "wg-quick reads it as root; doctor reads it as you. Check the owner and mode — editing it under sudo is how it stops being yours."
             ))
             return findings
         }
         let peers = conf.components(separatedBy: "[Peer]").count - 1
         findings.append(Finding(
-            level: peers > 0 ? .pass : .warn,
+            level: peers > 0 ? .pass : .wait,
             title: "wg config",
             detail: "\(peers) peer\(peers == 1 ? "" : "s") in \(path)",
             action: peers > 0 ? nil : "No device has been admitted. Pair one, then apply with sudo wg-quick down/up reach0."
@@ -284,7 +367,7 @@ public enum HostCheck {
         let devices = await DeviceRegistry(directory: directory).all
         guard !devices.isEmpty else {
             return Finding(
-                level: .warn,
+                level: .wait,
                 title: "enrolled devices",
                 detail: "none",
                 action: "reachd pair, then scan with the keeper. The first device enrolled holds the admin grant."
@@ -307,9 +390,9 @@ public enum HostCheck {
         guard let config else { return [] }
         return [(config.port, "session"), (config.enrollPort, "enrollment")].map { port, role in
             if isHeld(port) {
-                Finding(level: .pass, title: "\(role) port", detail: ":\(port) held — a daemon is running")
+                Finding(level: .pass, title: "\(role) port", detail: ":\(port) held — a process has it")
             } else {
-                Finding(level: .warn, title: "\(role) port", detail: ":\(port) free — no daemon running")
+                Finding(level: .wait, title: "\(role) port", detail: ":\(port) free — no daemon running")
             }
         }
     }
