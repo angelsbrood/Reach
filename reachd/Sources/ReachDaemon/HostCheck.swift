@@ -369,8 +369,23 @@ public enum HostCheck {
         var findings: [Finding] = []
         let keys = directory.appendingPathComponent("wg", isDirectory: true).appendingPathComponent("server.pub")
         let hostKeyExists = FileManager.default.fileExists(atPath: keys.path)
+        // Read as WireGuardHost writes it: base64 of the 32 raw bytes, with
+        // whatever trailing newline the editor left behind.
+        let hostKey: Data? = (try? String(contentsOf: keys, encoding: .utf8))
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .flatMap { Data(base64Encoded: $0) }
+            .flatMap { $0.count == 32 ? $0 : nil }
         if hostKeyExists {
-            findings.append(Finding(level: .pass, title: "wg host key", detail: "present"))
+            findings.append(
+                hostKey == nil
+                    ? Finding(
+                        level: .fail,
+                        title: "wg host key",
+                        detail: "\(keys.path) is present but is not a 32-byte base64 key",
+                        action: "The daemon refuses to start on this. Restore it, or delete the wg/ directory to re-mint — every enrolled device then has to re-pair."
+                    )
+                    : Finding(level: .pass, title: "wg host key", detail: "present")
+            )
         } else {
             findings.append(Finding(
                 level: .wait,
@@ -417,14 +432,94 @@ public enum HostCheck {
             ))
             return findings
         }
-        let peers = conf.components(separatedBy: "[Peer]").count - 1
+        let parsed: WireGuardConf
+        do {
+            parsed = try WireGuardConf.parse(conf)
+        } catch {
+            findings.append(Finding(
+                level: .fail,
+                title: "wg config",
+                detail: "\(path): \(error)",
+                action: "wg-quick will refuse this file, so the mesh will not come up at all."
+            ))
+            return findings
+        }
+
+        let peers = parsed.peerCount
         findings.append(Finding(
             level: peers > 0 ? .pass : .wait,
             title: "wg config",
-            detail: "\(peers) peer\(peers == 1 ? "" : "s") in \(path)",
-            action: peers > 0 ? nil : "No device has been admitted. Pair one, then apply with sudo wg-quick down/up reach0."
+            detail: "\(peers) peer\(peers == 1 ? "" : "s") in \(path) — the file, not the interface",
+            action: peers > 0
+                ? "Whether the running interface carries them needs sudo wg show reach0, which doctor cannot run. The conf reads identically before and after wg-quick down/up."
+                : "No device has been admitted. Pair one, then apply with sudo wg-quick down/up reach0."
         ))
+        findings.append(checkWireGuardIdentity(parsed, hostKey: hostKey, conf: path))
         return findings
+    }
+
+    /// Whether the conf and the state directory agree about who this host is.
+    ///
+    /// They can diverge silently. `WireGuardHost` mints the keypair and writes
+    /// the conf skeleton in the same branch, guarded on `server.pub` being
+    /// absent — so removing the state directory's `wg/` while the conf survives
+    /// gives this host a NEW key while the file still names the old one. wg
+    /// comes up, the daemon serves, every previously enrolled device is
+    /// talking to a key that no longer exists, and nothing else on this list
+    /// looks at both halves.
+    ///
+    /// Nothing here renders the private key. Doctor's output is shot as the
+    /// evidence tail after a take, so the two public keys are the most that
+    /// may appear, truncated.
+    static func checkWireGuardIdentity(_ conf: WireGuardConf, hostKey: Data?, conf path: String) -> Finding {
+        guard conf.hasInterfaceSection else {
+            return Finding(
+                level: .fail,
+                title: "wg identity",
+                detail: "\(path) has no [Interface] section",
+                action: "wg-quick cannot bring up an interface with no key. This is what a conf looks like after a peer was appended to a file that could not be read — restore it, or delete the state directory's wg/ to re-mint (every device re-pairs)."
+            )
+        }
+        guard let privateKey = conf.privateKey, !privateKey.isEmpty else {
+            return Finding(
+                level: .fail,
+                title: "wg identity",
+                detail: "\(path) has an [Interface] with no PrivateKey",
+                action: "The host has no mesh identity to present. Restore the conf, or delete the state directory's wg/ to re-mint."
+            )
+        }
+        guard let raw = Data(base64Encoded: privateKey), raw.count == 32,
+              let derived = try? Curve25519.KeyAgreement.PrivateKey(rawRepresentation: raw).publicKey.rawRepresentation
+        else {
+            return Finding(
+                level: .fail,
+                title: "wg identity",
+                detail: "\(path)'s PrivateKey is not a 32-byte base64 key",
+                action: "wg-quick will refuse it. Restore the conf, or delete the state directory's wg/ to re-mint."
+            )
+        }
+        guard let hostKey else {
+            return Finding(
+                level: .wait,
+                title: "wg identity",
+                detail: "conf carries a key; nothing in the state directory to check it against yet",
+                action: "server.pub is written on first serve."
+            )
+        }
+        let shown = { (key: Data) in String(key.base64EncodedString().prefix(12)) + "…" }
+        guard derived == hostKey else {
+            return Finding(
+                level: .fail,
+                title: "wg identity",
+                detail: "\(path) is a different host than the state directory — conf is \(shown(derived)), server.pub is \(shown(hostKey))",
+                action: "Every enrolled device was given the state directory's key as the one to talk to, so none of them can reach the interface this conf brings up. Whichever is the real host, make the other match it before pairing anything."
+            )
+        }
+        return Finding(
+            level: .pass,
+            title: "wg identity",
+            detail: "conf PrivateKey matches wg/server.pub (\(shown(hostKey)))"
+        )
     }
 
     static func checkDevices(in directory: URL) async -> Finding {

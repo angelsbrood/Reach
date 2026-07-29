@@ -1,3 +1,4 @@
+import Crypto
 import Foundation
 import Testing
 
@@ -219,6 +220,164 @@ import Testing
         #expect(broken.findings.count >= sound.findings.count - 1, "findings must not silently disappear")
         #expect(try finding(broken, "mesh endpoint").detail.contains("not checked"))
         #expect(try finding(broken, "ports").detail.contains("not checked"))
+    }
+
+    // MARK: - The conf and the state directory must agree
+
+    /// Every row here is a conf wg-quick accepts. A parser stricter than the
+    /// thing that actually consumes the file would report a fault in a working
+    /// rig, and a false FAIL that stops a venue is worse than the blindness it
+    /// replaced. The live conf exercises none of these, which is exactly why
+    /// they are tested rather than eyeballed.
+    @Test(arguments: [
+        ("canonical", "[Interface]\nPrivateKey = KEY\nListenPort = 51820\n"),
+        ("lowercased key", "[Interface]\nprivatekey = KEY\n"),
+        ("lowercased section", "[interface]\nPrivateKey = KEY\n"),
+        ("trailing comment", "[Interface]\nPrivateKey = KEY # the host key\n"),
+        ("comment naming a section", "# see [Interface] below\n[Interface]\nPrivateKey = KEY\n"),
+        ("no trailing newline", "[Interface]\nPrivateKey = KEY"),
+        ("CRLF", "[Interface]\r\nPrivateKey = KEY\r\n"),
+        ("wg-quick-only keys", "[Interface]\nPrivateKey = KEY\nPostUp = /bin/true\nTable = off\n"),
+        ("no spaces around =", "[Interface]\nPrivateKey=KEY\n"),
+    ])
+    func theConfParserAcceptsEveryConfWgQuickAccepts(name: String, template: String) throws {
+        // A real 32-byte key: 44 base64 characters ending in one "=" of
+        // padding. A parser that splits on the LAST separator reads this as
+        // empty, which is every conf this rig has ever written.
+        let key = Data(repeating: 7, count: 32).base64EncodedString()
+        #expect(key.hasSuffix("="), "the regression this row exists for needs the padding")
+
+        let parsed = try WireGuardConf.parse(template.replacingOccurrences(of: "KEY", with: key))
+        #expect(parsed.hasInterfaceSection, "\(name): lost the [Interface] section")
+        #expect(parsed.privateKey == key, "\(name): read the key as \(parsed.privateKey ?? "nil")")
+    }
+
+    @Test func aPrivateKeyUnderPeerIsNotTheHostKey() throws {
+        // Section-scoped: any [-headed line closes the section, so a key in a
+        // peer block belongs to the peer and this host has no identity.
+        let key = Data(repeating: 9, count: 32).base64EncodedString()
+        let parsed = try WireGuardConf.parse("[Peer]\nPrivateKey = \(key)\nAllowedIPs = 10.86.0.2/32\n")
+        #expect(!parsed.hasInterfaceSection)
+        #expect(parsed.privateKey == nil)
+        #expect(parsed.peerCount == 1)
+    }
+
+    @Test func aCommentedOutPeerIsNotAPeer() throws {
+        // The old count was a substring split on "[Peer]", so a commented
+        // block counted as an admitted device.
+        let parsed = try WireGuardConf.parse("""
+            [Interface]
+            PrivateKey = \(Data(repeating: 1, count: 32).base64EncodedString())
+
+            # [Peer]
+            # PublicKey = something
+
+            [Peer]
+            PublicKey = \(Data(repeating: 2, count: 32).base64EncodedString())
+            AllowedIPs = 10.86.0.2/32
+            """)
+        #expect(parsed.peerCount == 1)
+    }
+
+    @Test func twoInterfaceSectionsAreRefusedRatherThanGuessedAt() throws {
+        let key = Data(repeating: 3, count: 32).base64EncodedString()
+        #expect(throws: WireGuardConf.Trouble.self) {
+            try WireGuardConf.parse("[Interface]\nPrivateKey = \(key)\n[Interface]\nPrivateKey = \(key)\n")
+        }
+    }
+
+    @Test func theWireGuardIdentityMustAgreeWithTheHostKey() async throws {
+        let directory = try fixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let conf = directory.appendingPathComponent("reach0.conf").path
+
+        // WireGuardHost mints the keypair and writes the skeleton together,
+        // so a fixture built through it agrees with itself by construction.
+        _ = try WireGuardHost(
+            keysDirectory: directory.appendingPathComponent("wg", isDirectory: true),
+            confPath: conf,
+            endpoint: "192.0.2.1:51820"
+        )
+        let agreeing = await report(directory, conf: conf)
+        #expect(try finding(agreeing, "wg identity").level == .pass)
+        #expect(agreeing.isSound)
+
+        // Now the divergence that actually happens: the state directory is
+        // re-minted and the conf is left behind naming the old host.
+        let stale = try String(contentsOfFile: conf, encoding: .utf8)
+        let other = Curve25519.KeyAgreement.PrivateKey().rawRepresentation.base64EncodedString()
+        let confKey = try #require(WireGuardConf.parse(stale).privateKey)
+        try stale.replacingOccurrences(of: confKey, with: other)
+            .write(toFile: conf, atomically: true, encoding: .utf8)
+
+        let diverged = await report(directory, conf: conf)
+        let identity = try finding(diverged, "wg identity")
+        #expect(identity.level == .fail)
+        #expect(!diverged.isSound, "a host whose conf names a different key must not exit zero")
+    }
+
+    @Test func aConfWithNoInterfaceIsAFailure() async throws {
+        // Exactly what addPeer used to write when it read an unreadable conf
+        // as "": a bare peer block, and the host's own key line gone.
+        let directory = try fixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let conf = directory.appendingPathComponent("reach0.conf")
+        try """
+            [Peer]
+            PublicKey = \(Data(repeating: 4, count: 32).base64EncodedString())
+            AllowedIPs = 10.86.0.2/32
+            """.write(to: conf, atomically: true, encoding: .utf8)
+
+        let report = await report(directory, conf: conf.path)
+        let identity = try finding(report, "wg identity")
+        #expect(identity.level == .fail)
+        #expect(identity.detail.contains("no [Interface]"))
+        #expect(!report.isSound)
+    }
+
+    @Test func noFindingEverRendersThePrivateKey() async throws {
+        // doctor's output is filmed as the evidence tail after a take.
+        let directory = try fixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let conf = directory.appendingPathComponent("reach0.conf").path
+        _ = try WireGuardHost(
+            keysDirectory: directory.appendingPathComponent("wg", isDirectory: true),
+            confPath: conf,
+            endpoint: "192.0.2.1:51820"
+        )
+        let secret = try #require(WireGuardConf.parse(String(contentsOfFile: conf, encoding: .utf8)).privateKey)
+
+        // Both the agreeing case and the mismatching one, since the mismatch
+        // is the branch that has keys in hand and something to say about them.
+        for mutate in [false, true] {
+            if mutate {
+                let text = try String(contentsOfFile: conf, encoding: .utf8)
+                let other = Curve25519.KeyAgreement.PrivateKey().rawRepresentation.base64EncodedString()
+                try text.replacingOccurrences(of: secret, with: other)
+                    .write(toFile: conf, atomically: true, encoding: .utf8)
+            }
+            let rendered = await report(directory, conf: conf).findings
+                .map { "\($0.level.rawValue) \($0.title) \($0.detail) \($0.action ?? "")" }
+                .joined(separator: "\n")
+            #expect(!rendered.contains(secret), "a private key reached doctor's output")
+        }
+    }
+
+    @Test func thePeerCountSaysItReadTheFile() async throws {
+        let directory = try fixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let conf = directory.appendingPathComponent("reach0.conf").path
+        let host = try WireGuardHost(
+            keysDirectory: directory.appendingPathComponent("wg", isDirectory: true),
+            confPath: conf,
+            endpoint: "192.0.2.1:51820"
+        )
+        try await host.addPeer(publicKey: Data(repeating: 5, count: 32), allowedIP: "10.86.0.2")
+
+        let wgConfig = try await finding(report(directory, conf: conf), "wg config")
+        #expect(wgConfig.level == .pass)
+        #expect(wgConfig.detail.contains("the file, not the interface"))
+        #expect(wgConfig.action?.contains("wg show reach0") == true)
     }
 
     // MARK: - The tally
