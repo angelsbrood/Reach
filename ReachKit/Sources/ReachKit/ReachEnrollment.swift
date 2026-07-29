@@ -6,10 +6,23 @@ import ReachTransport
 import ReachWire
 import Security
 
-public enum ReachEnrollmentError: Error, Sendable {
+public enum ReachEnrollmentError: Error, Sendable, CustomStringConvertible, LocalizedError {
     case badCAHash
     case refused(code: String, message: String)
     case sequence(String)
+
+    public var description: String {
+        switch self {
+        case .badCAHash:
+            "the cluster presented a certificate authority that does not match the pin discovery advertised — this is not the cluster this app enrolled against"
+        case .refused(let code, let message):
+            "the cluster declined the grant (\(code)): \(message)"
+        case .sequence(let detail):
+            "the enrollment exchange arrived out of order: \(detail)"
+        }
+    }
+
+    public var errorDescription: String? { description }
 }
 
 /// The app half of the grant ceremony: an identity-less app dials the

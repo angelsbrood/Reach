@@ -3,11 +3,26 @@ import Network
 import ReachWire
 import Security
 
-public enum TransportError: Error, Sendable {
+public enum TransportError: Error, Sendable, CustomStringConvertible, LocalizedError {
     case connectionFailed(String)
     case streamClosed
     case sendFailed(String)
     case listenerFailed(String)
+
+    public var description: String {
+        switch self {
+        case .connectionFailed(let detail):
+            "could not open a connection to the cluster: \(detail)"
+        case .streamClosed:
+            "the stream closed before the exchange finished"
+        case .sendFailed(let detail):
+            "the connection dropped mid-send: \(detail)"
+        case .listenerFailed(let detail):
+            "the listener stopped accepting connections: \(detail)"
+        }
+    }
+
+    public var errorDescription: String? { description }
 }
 
 let transportQueue = DispatchQueue(label: "reach.transport.net", qos: .userInitiated)

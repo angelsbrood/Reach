@@ -3,9 +3,25 @@ import Foundation
 import SwiftASN1
 import X509
 
-public enum CAError: Error, Sendable {
+public enum CAError: Error, Sendable, CustomStringConvertible, LocalizedError {
     case stateExists(String)
     case stateMissing(String)
+
+    public var description: String {
+        switch self {
+        case .stateExists(let path):
+            "a cluster CA already exists at \(path); re-initializing would orphan every certificate it has issued"
+        // Two callers outside the CA borrow this case for the wg host key
+        // and the wg conf, and one of them passes a sentence rather than a
+        // path. So the wording has to carry either — worth its own error
+        // type eventually, but a diagnostic that reads correctly today
+        // beats a rename that touches the ceremony.
+        case .stateMissing(let what):
+            "required state is missing or will not read: \(what)"
+        }
+    }
+
+    public var errorDescription: String? { description }
 }
 
 /// The cluster's own certificate authority: one P-256 keypair, self-signed

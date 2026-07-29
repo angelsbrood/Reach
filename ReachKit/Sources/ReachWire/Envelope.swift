@@ -63,11 +63,26 @@ public struct RawFrame: Sendable {
     }
 }
 
-public enum WireError: Error, Sendable {
+public enum WireError: Error, Sendable, CustomStringConvertible, LocalizedError {
     case frameTooLarge(UInt32)
     case unknownFrameType(UInt8)
     case malformedFrame(String)
     case unexpectedFrame(FrameType)
+
+    public var description: String {
+        switch self {
+        case .frameTooLarge(let bytes):
+            "a frame declared \(bytes) bytes, past the 16 MiB cap"
+        case .unknownFrameType(let type):
+            "frame type \(type) is not in this protocol version's vocabulary"
+        case .malformedFrame(let detail):
+            "a frame did not decode: \(detail)"
+        case .unexpectedFrame(let type):
+            "received \(type) where the exchange expected something else"
+        }
+    }
+
+    public var errorDescription: String? { description }
 }
 
 public enum FrameCodec {

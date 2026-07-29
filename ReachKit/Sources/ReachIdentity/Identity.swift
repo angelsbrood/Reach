@@ -1,12 +1,38 @@
 import Foundation
 import Security
 
-public enum IdentityError: Error, Sendable {
+public enum IdentityError: Error, Sendable, CustomStringConvertible, LocalizedError {
     case pkcs12ImportFailed(OSStatus)
     case malformedCertificate
     case importFailed(String)
     case keychainAddFailed(OSStatus)
     case identityNotFound(OSStatus)
+
+    public var description: String {
+        switch self {
+        case .pkcs12ImportFailed(let status):
+            "the PKCS#12 archive would not import: \(Self.name(for: status))"
+        case .malformedCertificate:
+            "the certificate bytes are not a certificate this platform will parse"
+        case .importFailed(let detail):
+            "could not assemble an identity from the issued material: \(detail)"
+        case .keychainAddFailed(let status):
+            "the keychain refused the key or certificate: \(Self.name(for: status))"
+        case .identityNotFound(let status):
+            "no identity is stored under that label: \(Self.name(for: status))"
+        }
+    }
+
+    /// An `OSStatus` printed as a bare number is a number to go and look up.
+    /// `SecCopyErrorMessageString` knows most of them by name.
+    private static func name(for status: OSStatus) -> String {
+        guard let text = SecCopyErrorMessageString(status, nil) as String? else {
+            return "OSStatus \(status)"
+        }
+        return "\(text) (OSStatus \(status))"
+    }
+
+    public var errorDescription: String? { description }
 }
 
 /// One lock for every keychain touch in the process.

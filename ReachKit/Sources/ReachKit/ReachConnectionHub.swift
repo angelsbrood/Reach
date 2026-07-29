@@ -5,11 +5,28 @@ import ReachTransport
 import ReachWire
 import Security
 
-public enum ReachError: Error, Sendable {
+public enum ReachError: Error, Sendable, CustomStringConvertible, LocalizedError {
     case identityNotRegistered(String)
     case sessionRejected(String)
     case remote(code: String, message: String)
     case transport(String)
+
+    public var description: String {
+        switch self {
+        case .identityNotRegistered(let label):
+            "no identity is registered under \"\(label)\" — this app has not been granted access to the cluster yet"
+        case .sessionRejected(let detail):
+            "the cluster refused to open a session: \(detail)"
+        case .remote(let code, let message):
+            // The daemon's own words, and they are the useful half — a
+            // reason that travelled the wire beats a reason invented here.
+            "the cluster refused this (\(code)): \(message)"
+        case .transport(let detail):
+            "could not reach the cluster: \(detail)"
+        }
+    }
+
+    public var errorDescription: String? { description }
 }
 
 /// One hub per executor configuration: the shared `NWParameters` (one QUIC
