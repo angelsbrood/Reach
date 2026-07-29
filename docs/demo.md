@@ -38,6 +38,12 @@ pinned at the ceremony must be the *outer* one. Carrier-grade NAT (a
 that boundary, and a self-hostable relay is the funded answer to it. A user's
 own mesh, which does its own traversal, crosses it today.
 
+Those two share an address range, which is why `reachd doctor` asks a second
+question about anything pinned in `100.64/10`: whether it is an address *this
+host holds*. A lease handed out by a venue's router is CGNAT and the leg is
+impossible there. The same address sitting on this machine is a mesh it has
+already joined, and works — for a phone on that same mesh.
+
 ## Pacing
 
 The door-walk has to land mid-stream, so the generation has to still be running
@@ -62,14 +68,33 @@ reachd doctor
 Reports the host-side preconditions in one pass: whether the config parses,
 whether the mesh endpoint is **pinned** rather than derived and what kind of
 address it is, whether the mesh interface is actually up, the CA and its pin,
+whether the wg config and the host's own key agree about which host this is,
 wg peers, an active admin device, and whether a daemon already holds the ports.
-It exits non-zero on a FAIL. Warnings do not affect the exit code, so read the
-lines rather than the tally — the mesh-endpoint line in particular, which is
-the one that decides whether a phone standing outside can reach this host.
 
-On a cold machine, expect the mesh interface to FAIL and both ports to WARN
-until the two steps below have run. That is the checklist working, not a
-fault.
+Four levels, and the distinction between two of them is the point:
+
+- **WAIT** — a step below has not been run yet, and running it resolves this.
+  A machine that has just booted is mostly WAIT, and that is the checklist
+  working.
+- **FAIL** — something starting up will not fix. Only this affects the exit
+  code, so a non-zero exit means *this host is wrong*, never *this host is
+  cold*.
+- **WARN** — worth knowing, and legitimate. A pinned RFC1918 address warns
+  because two forwards in series is a real venue, not a mistake.
+- **PASS** — checked, and it holds.
+
+Read the mesh-endpoint line regardless of the tally. It is the one that
+decides whether a phone standing outside can reach this host, and it is the
+line the away leg fails on. A host that has a config and no pinned
+`meshEndpoint` FAILs there: it will derive a LAN address, rehearse perfectly,
+and hand the phone something no phone off this network can dial. A machine
+with no config at all only WAITs — nothing has been set up yet, so nothing has
+been left out.
+
+Two things doctor deliberately does not claim. The peer count is peers in the
+*file*; only `sudo wg show reach0` sees what the running interface carries, and
+that needs root. And the mesh check observes a `10.86.0.x` address, not an
+interface by name — those coincide only while the config says so.
 
 It cannot see the edge — the port forward lives there, and a forward that was
 configured once is not a forward that is in force. Check the live firewall
