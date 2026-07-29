@@ -94,12 +94,13 @@ public enum HostCheck {
         // The config gates the endpoint check: with no config there is no
         // pinned endpoint to judge, and saying so beats guessing.
         var config: DaemonConfig?
+        let configExists = DaemonConfig.exists(in: stateDirectory)
         do {
             config = try DaemonConfig.load(from: stateDirectory)
             findings.append(Finding(
                 level: .pass,
                 title: "config.json",
-                detail: DaemonConfig.exists(in: stateDirectory)
+                detail: configExists
                     ? "parses; cluster \"\(config!.clusterName)\", model \(config!.modelID), ports \(config!.port)/\(config!.enrollPort)"
                     : "absent — defaults in use (first run)"
             ))
@@ -121,7 +122,7 @@ public enum HostCheck {
         let portFindings = checkPorts(config: config, isHeld: portIsHeld)
         let daemonUp = portFindings.contains { $0.level == .pass }
 
-        findings.append(contentsOf: checkMeshEndpoint(config: config, addresses: addresses))
+        findings.append(contentsOf: checkMeshEndpoint(config: config, configExists: configExists, addresses: addresses))
         findings.append(checkMeshInterface(addresses, daemonUp: daemonUp))
         findings.append(checkClusterCA(in: stateDirectory))
         findings.append(contentsOf: checkWireGuard(in: stateDirectory, conf: wireGuardConf))
@@ -159,17 +160,58 @@ public enum HostCheck {
         return Finding(level: .pass, title: "state directory", detail: "present, mode 0\(octal)")
     }
 
-    static func checkMeshEndpoint(config: DaemonConfig?, addresses: [[UInt8]]) -> [Finding] {
-        guard let config else { return [] }
+    /// Whether a host is one of this machine's own addresses.
+    ///
+    /// This is the only thing that can tell a carrier-grade NAT lease from a
+    /// tailnet address, and `classify` structurally cannot know it — both are
+    /// 100.64/10, and the difference is entirely whether this host holds it.
+    /// The same question sharpens RFC1918: an address this host owns is one
+    /// forward away from the edge; one it does not is something upstream,
+    /// which means a second forward that has to exist and be checked.
+    static func isOwnAddress(_ host: String, _ addresses: [[UInt8]]) -> Bool {
+        guard let octets = MeshEndpoint.ipv4(host) else { return false }
+        return addresses.contains(octets)
+    }
+
+    static func checkMeshEndpoint(
+        config: DaemonConfig?,
+        configExists: Bool,
+        addresses: [[UInt8]]
+    ) -> [Finding] {
+        // A config that will not parse used to delete this finding and both
+        // port findings from the report — four lines vanishing silently, in
+        // a command whose whole reason for existing is that silence is the
+        // problem. Say that the check did not run.
+        guard let config else {
+            return [Finding(
+                level: .warn,
+                title: "mesh endpoint",
+                detail: "not checked — config.json did not parse",
+                action: "The endpoint lives in that file, so there is nothing to judge until it reads. Fix the config and run doctor again."
+            )]
+        }
         let mesh = MeshEndpoint.resolve(config: config, addresses: addresses)
 
         switch mesh.source {
         case .derived:
+            // Derivation is correct on a machine that has never been
+            // configured — the next serve or pair writes the file. Once a
+            // config exists and simply omits the pin, this host has been set
+            // up and the away leg was left out of it, which is precisely the
+            // failure that reaches a venue looking healthy.
+            guard configExists else {
+                return [Finding(
+                    level: .wait,
+                    title: "mesh endpoint",
+                    detail: "\(mesh.endpoint) — derived; no config.json yet",
+                    action: "Written on first serve or pair. Pin meshEndpoint in it before the away leg matters."
+                )]
+            }
             return [Finding(
-                level: .warn,
+                level: .fail,
                 title: "mesh endpoint",
                 detail: "\(mesh.endpoint) — derived from a local address, not pinned",
-                action: "LAN rehearsals work; the away leg does not. Set meshEndpoint in config.json to the address the phone will dial."
+                action: "LAN rehearsals work; the away leg does not, and it fails looking like a routing fault. Set meshEndpoint in config.json to the address the phone will dial."
             )]
         case .unavailable:
             return [Finding(
@@ -203,19 +245,41 @@ public enum HostCheck {
         case .publicAddress:
             findings.append(Finding(level: .pass, title: "mesh endpoint", detail: "\(mesh.endpoint) pinned, publicly routable"))
         case .privateNetwork:
-            findings.append(Finding(
-                level: .warn,
-                title: "mesh endpoint",
-                detail: "\(mesh.endpoint) pinned, RFC1918",
-                action: "Dialable from cellular only if the edge forwards UDP \(MeshEndpoint.port) to it. Behind a second router, pin that router's public address instead — two forwards in series."
-            ))
+            findings.append(
+                isOwnAddress(host, addresses)
+                    ? Finding(
+                        level: .warn,
+                        title: "mesh endpoint",
+                        detail: "\(mesh.endpoint) pinned, RFC1918 — this host's own address",
+                        action: "One forward: the edge in front of this host must send UDP \(MeshEndpoint.port) here. Dialable from cellular only through it."
+                    )
+                    : Finding(
+                        level: .warn,
+                        title: "mesh endpoint",
+                        detail: "\(mesh.endpoint) pinned, RFC1918 — not an address this host holds",
+                        action: "You are pinning something upstream, so this is two forwards in series: the upstream must send UDP \(MeshEndpoint.port) to the edge, and the edge to this host. Confirm the outer one exists rather than assuming it."
+                    )
+            )
         case .sharedAddressSpace:
-            findings.append(Finding(
-                level: .warn,
-                title: "mesh endpoint",
-                detail: "\(mesh.endpoint) pinned, 100.64/10",
-                action: "Carrier-grade NAT, or a tailnet. A venue's WAN lease in this range cannot carry the away leg; a tailnet address works only if the phone is on the same tailnet."
-            ))
+            // 100.64/10 is carrier-grade NAT and is also where tailnets live.
+            // Whether this host holds the address is the whole difference: a
+            // lease read off a venue's router cannot carry the leg at all,
+            // while an address on this machine is a road it is already on.
+            findings.append(
+                isOwnAddress(host, addresses)
+                    ? Finding(
+                        level: .warn,
+                        title: "mesh endpoint",
+                        detail: "\(mesh.endpoint) pinned, 100.64/10 — this host's own address, so a mesh rather than CGNAT",
+                        action: "Deliberate only if the phone is on that same mesh; it does its own traversal and needs no forward. The first-party road is unused while this is pinned."
+                    )
+                    : Finding(
+                        level: .fail,
+                        title: "mesh endpoint",
+                        detail: "\(mesh.endpoint) pinned, 100.64/10 — carrier-grade NAT",
+                        action: "Nothing outside can dial a CGNAT lease and no forward fixes it. If this is a venue's WAN address, the leg is impossible here — leave. That is a thirty-second abort instead of a three-hour one."
+                    )
+            )
         case .mesh:
             findings.append(Finding(
                 level: .fail,
@@ -387,7 +451,14 @@ public enum HostCheck {
     }
 
     static func checkPorts(config: DaemonConfig?, isHeld: @Sendable (UInt16) -> Bool) -> [Finding] {
-        guard let config else { return [] }
+        guard let config else {
+            return [Finding(
+                level: .warn,
+                title: "ports",
+                detail: "not checked — config.json did not parse",
+                action: "The port numbers live in that file. Fix the config and run doctor again."
+            )]
+        }
         return [(config.port, "session"), (config.enrollPort, "enrollment")].map { port, role in
             if isHeld(port) {
                 Finding(level: .pass, title: "\(role) port", detail: ":\(port) held — a process has it")

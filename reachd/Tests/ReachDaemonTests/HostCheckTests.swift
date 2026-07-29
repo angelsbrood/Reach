@@ -142,6 +142,85 @@ import Testing
         #expect(!report.isSound)
     }
 
+    // MARK: - The endpoint says who can reach this host
+
+    @Test func aFirstRunIsNotAFailureButAConfiguredHostThatForgotThePinIs() async throws {
+        let directory = try fixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        // No config at all: derivation is what the type says it is — correct
+        // for a machine nobody has configured yet.
+        let firstRun = await report(directory)
+        #expect(try finding(firstRun, "mesh endpoint").level == .wait)
+        #expect(firstRun.isSound, "a machine that has never been configured must not exit non-zero")
+
+        // A config exists and omits meshEndpoint. This host HAS been set up,
+        // and the away leg was left out of it — the failure that reaches a
+        // venue looking healthy and presents as a routing fault.
+        try DaemonConfig().save(to: directory)
+        let unpinned = await report(directory)
+        #expect(try finding(unpinned, "mesh endpoint").level == .fail)
+        #expect(!unpinned.isSound)
+    }
+
+    @Test func aCGNATLeaseIsAFailureButThisHostsOwnMeshAddressIsNot() async throws {
+        // Both are 100.64/10 and classify cannot tell them apart. Whether
+        // this host holds the address is the entire difference: a lease read
+        // off a venue's router can never carry the leg; an address on this
+        // machine is a road it is already standing on.
+        let directory = try fixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var config = DaemonConfig()
+        config.meshEndpoint = "100.66.143.31:51820"
+        try config.save(to: directory)
+
+        let ownAddress = await report(directory, addresses: [[100, 66, 143, 31], [10, 86, 0, 1]])
+        #expect(try finding(ownAddress, "mesh endpoint").level == .warn)
+        #expect(ownAddress.isSound)
+
+        let routerLease = await report(directory, addresses: [[192, 168, 8, 104], [10, 86, 0, 1]])
+        #expect(try finding(routerLease, "mesh endpoint").level == .fail)
+        #expect(!routerLease.isSound, "a CGNAT lease cannot carry the away leg and must say so")
+    }
+
+    @Test func anRFC1918PinSaysWhetherItIsThisHostsOwnAddress() async throws {
+        // One forward or two. The runbook makes this call by hand at the
+        // venue; the difference is observable from here.
+        let directory = try fixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var config = DaemonConfig()
+        config.meshEndpoint = "192.168.8.104:51820"
+        try config.save(to: directory)
+
+        let own = try await finding(report(directory, addresses: [[192, 168, 8, 104]]), "mesh endpoint")
+        #expect(own.level == .warn)
+        #expect(own.action?.contains("One forward") == true)
+
+        let upstream = try await finding(report(directory, addresses: [[10, 0, 0, 5]]), "mesh endpoint")
+        #expect(upstream.level == .warn, "RFC1918 stays a warning — two forwards in series is a real venue")
+        #expect(upstream.detail.contains("not an address this host holds"))
+        #expect(upstream.action?.contains("two forwards in series") == true)
+    }
+
+    @Test func aMalformedConfigDoesNotDeleteFindings() async throws {
+        // The endpoint and both ports used to vanish from the report, so an
+        // operator told to read the diff between two runs saw a shorter list
+        // and no statement that anything had been skipped.
+        let directory = try fixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try DaemonConfig().save(to: directory)
+        let sound = await report(directory)
+
+        try Data(#"{ "meshEndpoint" : 192.168.4.94:51820 }"#.utf8)
+            .write(to: directory.appendingPathComponent("config.json"))
+        let broken = await report(directory)
+
+        #expect(try finding(broken, "config.json").level == .fail)
+        #expect(broken.findings.count >= sound.findings.count - 1, "findings must not silently disappear")
+        #expect(try finding(broken, "mesh endpoint").detail.contains("not checked"))
+        #expect(try finding(broken, "ports").detail.contains("not checked"))
+    }
+
     // MARK: - The tally
 
     @Test func theTallyCountsEveryLevel() async throws {
