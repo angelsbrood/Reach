@@ -270,8 +270,9 @@ public final class Daemon: Sendable {
     ) async throws {
         let filling = self.filling
         let events: AsyncStream<Ev>
+        let epoch: UInt64
         do {
-            events = try await registry.begin(
+            (events, epoch) = try await registry.begin(
                 sessionID: begin.sessionID,
                 genID: begin.genID,
                 events: { filling.generate(begin.request) }
@@ -280,7 +281,7 @@ public final class Daemon: Sendable {
             try await stream.send(ErrorFrame(code: "begin-rejected", message: "\(error)"))
             return
         }
-        try await pump(events: events, stream: stream, iterator: &iterator, sessionID: begin.sessionID, genID: begin.genID)
+        try await pump(events: events, stream: stream, iterator: &iterator, sessionID: begin.sessionID, genID: begin.genID, epoch: epoch)
     }
 
     private func reattachLoop(
@@ -289,9 +290,10 @@ public final class Daemon: Sendable {
         frame: GenerateReattach
     ) async throws {
         let events: AsyncStream<Ev>
+        let epoch: UInt64
         do {
             try await registry.validate(sessionID: frame.sessionID, token: frame.token)
-            events = try await registry.attach(sessionID: frame.sessionID, genID: frame.genID, fromSeq: frame.fromSeq)
+            (events, epoch) = try await registry.attach(sessionID: frame.sessionID, genID: frame.genID, fromSeq: frame.fromSeq)
         } catch {
             try await stream.send(ErrorFrame(code: "reattach-rejected", message: "\(error)"))
             return
@@ -303,7 +305,7 @@ public final class Daemon: Sendable {
         // nothing. A 10.86.0.x here, on the Mac's terminal and in shot, is
         // the difference between the claim and the evidence for it.
         Log.info("generation \(frame.genID) re-attached from \(stream.remoteEndpointDescription() ?? "an unnamed path") at seq \(frame.fromSeq)")
-        try await pump(events: events, stream: stream, iterator: &iterator, sessionID: frame.sessionID, genID: frame.genID)
+        try await pump(events: events, stream: stream, iterator: &iterator, sessionID: frame.sessionID, genID: frame.genID, epoch: epoch)
     }
 
     /// Sends seq-stamped events while consuming acks/cancels, detaching the
@@ -313,7 +315,8 @@ public final class Daemon: Sendable {
         stream: ReachTransport.QUICStream,
         iterator: inout AsyncThrowingStream<RawFrame, Error>.AsyncIterator,
         sessionID: UUID,
-        genID: UUID
+        genID: UUID,
+        epoch: UInt64
     ) async throws {
         let registry = self.registry
         let sender = Task {
@@ -329,7 +332,7 @@ public final class Daemon: Sendable {
             if clean {
                 stream.finishSending()
             } else {
-                await registry.detach(sessionID: sessionID, genID: genID)
+                await registry.detach(sessionID: sessionID, genID: genID, epoch: epoch)
             }
         }
         do {
@@ -337,15 +340,15 @@ public final class Daemon: Sendable {
                 switch raw.type {
                 case .evAck:
                     let ack = try raw.decode(EvAck.self)
-                    await registry.ack(sessionID: sessionID, genID: genID, seq: ack.seq)
+                    await registry.ack(sessionID: sessionID, genID: genID, seq: ack.seq, epoch: epoch)
                 case .generateCancel:
-                    await registry.cancel(sessionID: sessionID, genID: genID)
+                    await registry.cancel(sessionID: sessionID, genID: genID, epoch: epoch)
                 default:
                     break
                 }
             }
         } catch {
-            await registry.detach(sessionID: sessionID, genID: genID)
+            await registry.detach(sessionID: sessionID, genID: genID, epoch: epoch)
         }
         _ = await sender.value
     }

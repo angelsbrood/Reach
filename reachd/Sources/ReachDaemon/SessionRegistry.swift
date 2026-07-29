@@ -24,6 +24,16 @@ public actor SessionRegistry {
     }
 
     private struct GenerationRecord {
+        /// Which connection currently owns `live`.
+        ///
+        /// A generation outlives the connections that serve it — that is the
+        /// whole point of residency — so "the transport died" has to mean
+        /// "the transport I was attached to died", not "a transport died".
+        /// Without this, the dead LAN connection's pump, which does not learn
+        /// it is dead until its own idle timeout ~30 s after a walk-out, ends
+        /// the continuation the mesh has been streaming through since.
+        /// Monotonic, so an epoch is never reused.
+        var epoch: UInt64 = 0
         var buffer: [Ev] = []
         var bufferBytes = 0
         var nextSeq: UInt64 = 0
@@ -88,10 +98,13 @@ public actor SessionRegistry {
         sessionID: UUID,
         genID: UUID,
         events: @escaping @Sendable () -> AsyncThrowingStream<WireEvent, Error>
-    ) throws -> AsyncStream<Ev> {
+    ) throws -> (stream: AsyncStream<Ev>, epoch: UInt64) {
         guard sessions[sessionID] != nil else { throw RegistryError.unknownSession }
         if sessions[sessionID]!.generations[genID] != nil {
-            // First-frame-loss idempotency (ruling 4).
+            // First-frame-loss idempotency (ruling 4). This delegates, so it
+            // must forward the epoch attach minted rather than invent one —
+            // a fresh epoch here would leave the caller holding a number that
+            // matches nothing.
             return try attach(sessionID: sessionID, genID: genID, fromSeq: nil)
         }
 
@@ -108,15 +121,16 @@ public actor SessionRegistry {
             }
         }
         sessions[sessionID]!.generations[genID]!.task = task
-        return stream
+        return (stream, record.epoch)
     }
 
     /// Re-attach a live or buffered generation, replaying from `fromSeq`
     /// (exclusive); nil replays everything still buffered.
-    public func attach(sessionID: UUID, genID: UUID, fromSeq: UInt64?) throws -> AsyncStream<Ev> {
+    public func attach(sessionID: UUID, genID: UUID, fromSeq: UInt64?) throws -> (stream: AsyncStream<Ev>, epoch: UInt64) {
         guard var session = sessions[sessionID] else { throw RegistryError.unknownSession }
         guard var record = session.generations[genID] else { throw RegistryError.unknownGeneration }
 
+        record.epoch += 1
         record.live?.finish()
         let (stream, continuation) = AsyncStream<Ev>.makeStream()
         for buffered in record.buffer where fromSeq.map({ buffered.seq > $0 }) ?? true {
@@ -131,13 +145,14 @@ public actor SessionRegistry {
         }
         session.generations[genID] = record
         sessions[sessionID] = session
-        return stream
+        return (stream, record.epoch)
     }
 
     /// Cumulative ack: trim the buffer at and below `seq`.
-    public func ack(sessionID: UUID, genID: UUID, seq: UInt64) {
+    public func ack(sessionID: UUID, genID: UUID, seq: UInt64, epoch: UInt64) {
         guard var session = sessions[sessionID],
-              var record = session.generations[genID] else { return }
+              var record = session.generations[genID],
+              record.epoch == epoch else { return }
         record.buffer.removeAll { $0.seq <= seq }
         record.bufferBytes = record.buffer.reduce(0) { $0 + $1.approximateSize }
         session.generations[genID] = record
@@ -146,9 +161,12 @@ public actor SessionRegistry {
 
     /// The serving connection died: keep the generation running, start the
     /// residency clock.
-    public func detach(sessionID: UUID, genID: UUID) {
+    public func detach(sessionID: UUID, genID: UUID, epoch: UInt64) {
         guard var session = sessions[sessionID],
-              var record = session.generations[genID] else { return }
+              var record = session.generations[genID],
+              // Not mine any more: something newer is attached, and ending
+              // its continuation is exactly the freeze this guard exists for.
+              record.epoch == epoch else { return }
         record.live?.finish()
         record.live = nil
         record.detachedAt = clock.now
@@ -156,9 +174,10 @@ public actor SessionRegistry {
         sessions[sessionID] = session
     }
 
-    public func cancel(sessionID: UUID, genID: UUID) {
+    public func cancel(sessionID: UUID, genID: UUID, epoch: UInt64) {
         guard let session = sessions[sessionID],
-              let record = session.generations[genID] else { return }
+              let record = session.generations[genID],
+              record.epoch == epoch else { return }
         record.task?.cancel()
     }
 

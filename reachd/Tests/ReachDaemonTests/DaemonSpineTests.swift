@@ -55,20 +55,20 @@ struct ScriptedFilling: SlotFilling {
         let filling = ScriptedFilling()
         let genID = UUID()
         let request = WireGenerationRequest(id: UUID(), transcript: Transcript())
-        let first = try await registry.begin(sessionID: sessionID, genID: genID) {
+        let (first, epoch) = try await registry.begin(sessionID: sessionID, genID: genID) {
             filling.generate(request)
         }
 
         // Receive a few, ack 2, then the "connection dies".
         let received = await drain(first) { $0.count >= 4 }
         #expect(received.map { $0.seq } == [0, 1, 2, 3])
-        await registry.ack(sessionID: sessionID, genID: genID, seq: 2)
-        await registry.detach(sessionID: sessionID, genID: genID)
+        await registry.ack(sessionID: sessionID, genID: genID, seq: 2, epoch: epoch)
+        await registry.detach(sessionID: sessionID, genID: genID, epoch: epoch)
 
         try? await Task.sleep(for: .milliseconds(120))
 
         // Re-attach from the last received seq; replay must start at 4.
-        let second = try await registry.attach(sessionID: sessionID, genID: genID, fromSeq: 3)
+        let (second, _) = try await registry.attach(sessionID: sessionID, genID: genID, fromSeq: 3)
         var tail: [Ev] = []
         for await ev in second {
             tail.append(ev)
@@ -84,6 +84,85 @@ struct ScriptedFilling: SlotFilling {
         #expect(text == ScriptedFilling().words.joined())
     }
 
+    /// Does this attachment reach `.finished` before the deadline? A stream
+    /// that has been quietly killed never will, and never ending is the
+    /// symptom — so the wait is bounded and a timeout reads as a failure.
+    private func finishes(_ stream: AsyncStream<Ev>, within: Duration = .seconds(5)) async -> Bool {
+        await withTaskGroup(of: Bool.self) { group in
+            group.addTask {
+                for await ev in stream {
+                    if case .finished = ev.event { return true }
+                }
+                return false
+            }
+            group.addTask {
+                try? await Task.sleep(for: within)
+                return false
+            }
+            let result = await group.next() ?? false
+            group.cancelAll()
+            return result
+        }
+    }
+
+    /// The walk-out's real shape: the client re-attaches over the mesh while
+    /// the dead LAN connection is still blocked on its own receive loop. That
+    /// connection's pump wakes up at the daemon's QUIC idle timeout — about
+    /// 30 s later, because a close cannot be delivered over an interface that
+    /// is gone — and detaches. Keyed only on the generation, that detach ends
+    /// the continuation the MESH is streaming through, and the viewer sees a
+    /// second unexplained freeze half a minute after the door.
+    ///
+    /// Loopback could never have caught it: the close arrives instantly there,
+    /// so the stale pump always detaches BEFORE the re-attach rather than
+    /// after.
+    @Test func aStaleConnectionsLateDetachCannotEndTheLiveOne() async throws {
+        let registry = SessionRegistry()
+        let (sessionID, token) = await registry.openSession(modelID: "scripted")
+        try await registry.validate(sessionID: sessionID, token: token)
+
+        let filling = ScriptedFilling()
+        let genID = UUID()
+        let request = WireGenerationRequest(id: UUID(), transcript: Transcript())
+        let (first, firstEpoch) = try await registry.begin(sessionID: sessionID, genID: genID) {
+            filling.generate(request)
+        }
+        _ = await drain(first) { $0.count >= 2 }
+
+        // The phone comes back over the mesh.
+        let (second, _) = try await registry.attach(sessionID: sessionID, genID: genID, fromSeq: 0)
+
+        // Now the LAN connection finally notices it is dead.
+        await registry.detach(sessionID: sessionID, genID: genID, epoch: firstEpoch)
+
+        // The mesh attachment must still be live and must still finish.
+        // Bounded: without the guard the continuation is ended (or the task
+        // cancelled) and `.finished` never arrives, so an unbounded wait
+        // would hang instead of failing.
+        #expect(await finishes(second), "a stale connection's detach ended the live mesh attachment")
+    }
+
+    /// Same shape, worse consequence: a cancel arriving from the connection
+    /// that already lost the generation would kill it outright.
+    @Test func aStaleConnectionCannotCancelTheLiveGeneration() async throws {
+        let registry = SessionRegistry()
+        let (sessionID, token) = await registry.openSession(modelID: "scripted")
+        try await registry.validate(sessionID: sessionID, token: token)
+
+        let filling = ScriptedFilling()
+        let genID = UUID()
+        let request = WireGenerationRequest(id: UUID(), transcript: Transcript())
+        let (first, firstEpoch) = try await registry.begin(sessionID: sessionID, genID: genID) {
+            filling.generate(request)
+        }
+        _ = await drain(first) { $0.count >= 2 }
+        let (second, _) = try await registry.attach(sessionID: sessionID, genID: genID, fromSeq: 0)
+
+        await registry.cancel(sessionID: sessionID, genID: genID, epoch: firstEpoch)
+
+        #expect(await finishes(second), "a stale connection's cancel killed the live generation")
+    }
+
     @Test func beginIsIdempotentForKnownGeneration() async throws {
         let registry = SessionRegistry()
         let (sessionID, _) = await registry.openSession(modelID: "scripted")
@@ -91,12 +170,12 @@ struct ScriptedFilling: SlotFilling {
         let request = WireGenerationRequest(id: UUID(), transcript: Transcript())
         let filling = ScriptedFilling()
 
-        let first = try await registry.begin(sessionID: sessionID, genID: genID) { filling.generate(request) }
+        let (first, _) = try await registry.begin(sessionID: sessionID, genID: genID) { filling.generate(request) }
         _ = await drain(first) { $0.count >= 2 }
 
         // A duplicated GenerateBegin (first-frame loss) must not start a
         // second generation; it re-attaches from 0.
-        let again = try await registry.begin(sessionID: sessionID, genID: genID) {
+        let (again, _) = try await registry.begin(sessionID: sessionID, genID: genID) {
             Issue.record("second filling start for the same genID")
             return filling.generate(request)
         }
@@ -118,9 +197,9 @@ struct ScriptedFilling: SlotFilling {
         var slow = ScriptedFilling()
         slow.delayMilliseconds = 500
         let request = WireGenerationRequest(id: UUID(), transcript: Transcript())
-        let stream = try await registry.begin(sessionID: sessionID, genID: genID) { [slow] in slow.generate(request) }
+        let (stream, epoch) = try await registry.begin(sessionID: sessionID, genID: genID) { [slow] in slow.generate(request) }
         _ = await drain(stream) { $0.count >= 1 }
-        await registry.detach(sessionID: sessionID, genID: genID)
+        await registry.detach(sessionID: sessionID, genID: genID, epoch: epoch)
 
         try? await Task.sleep(for: .milliseconds(150))
         let reaped = await registry.sweep()
