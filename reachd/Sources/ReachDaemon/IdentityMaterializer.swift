@@ -11,11 +11,13 @@ import X509
 public enum IdentityMaterializer {
     /// Materializing an identity is several Security-framework calls in a
     /// row — a keychain add, or an openssl subprocess and a PKCS#12 import —
-    /// and they do not tolerate being interleaved with another
-    /// materialization. Locking only the import was not enough: the failure
-    /// still surfaced as `errSecSuccess` with nothing imported, just more
-    /// rarely. The whole composition is the unit that has to be atomic.
-    private static let lock = NSLock()
+    /// and they do not tolerate being interleaved with anything else touching
+    /// the keychain. This used to hold a lock of its own, which serialized
+    /// materializations against each other and against nothing else: a
+    /// `SecItemDelete` from a teardown, or a lookup, could still land in the
+    /// middle of one. `KeychainLock` is the single lock every entry point in
+    /// `ReachIdentity` takes, so the composition nests inside the same one
+    /// its parts use (recursive, and these are synchronous call chains).
 
     public static func materialize(_ issued: ClusterCA.Issued, label: String) throws -> SecIdentity {
         try materialize(
@@ -30,8 +32,8 @@ public enum IdentityMaterializer {
     /// and apps use this; on devices the ceremony stores into the keychain
     /// directly).
     public static func materialize(certificateDER: Data, privateKey: P256.Signing.PrivateKey, label: String) throws -> SecIdentity {
-        lock.lock()
-        defer { lock.unlock() }
+        KeychainLock.acquire()
+        defer { KeychainLock.release() }
         do {
             return try KeychainIdentity.store(
                 privateKeyX963: privateKey.x963Representation,
@@ -49,7 +51,10 @@ public enum IdentityMaterializer {
     private static func viaPKCS12(keyPEM: String, certPEM: String) throws -> SecIdentity {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("reach-id-\(UUID().uuidString)", isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: dir) }
+        // Kept on failure: the archive IS the evidence, and it was being
+        // deleted on the way out of the one path that could explain this.
+        var succeeded = false
+        defer { if succeeded { try? FileManager.default.removeItem(at: dir) } }
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let keyURL = dir.appendingPathComponent("key.pem")
         let certURL = dir.appendingPathComponent("cert.pem")
@@ -59,6 +64,14 @@ public enum IdentityMaterializer {
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/openssl")
+        // Defaults, deliberately. `/usr/bin/openssl` is LibreSSL 3.3.6, which
+        // writes the certificate bag with pbeWithSHA1And40BitRC2-CBC — old,
+        // and the thing Homebrew's OpenSSL 3 refuses to read, which makes it
+        // a misleading tool for inspecting these archives. Naming modern
+        // ciphers instead (`-certpbe/-keypbe AES-256-CBC -macalg sha256`) was
+        // tried and is WORSE: LibreSSL accepts the flags and emits an archive
+        // whose algorithms it cannot itself name, and macOS then rejects it
+        // outright with -26275 on every run rather than intermittently.
         process.arguments = [
             "pkcs12", "-export",
             "-inkey", keyURL.path, "-in", certURL.path,
@@ -69,9 +82,16 @@ public enum IdentityMaterializer {
         guard process.terminationStatus == 0 else {
             throw IdentityError.importFailed("openssl pkcs12 exited \(process.terminationStatus)")
         }
-        return try IdentityStore.identity(
-            fromPKCS12: Data(contentsOf: p12URL),
-            passphrase: "reach-materialize"
-        )
+        do {
+            let identity = try IdentityStore.identity(
+                fromPKCS12: Data(contentsOf: p12URL),
+                passphrase: "reach-materialize"
+            )
+            succeeded = true
+            return identity
+        } catch {
+            FileHandle.standardError.write(Data("[reach] PKCS#12 import failed; archive kept at \(p12URL.path)\n".utf8))
+            throw error
+        }
     }
 }

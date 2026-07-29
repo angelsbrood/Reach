@@ -9,6 +9,8 @@ public enum KeychainIdentity {
     /// Adds the private key (EC, X9.63 representation) and certificate DER
     /// under `label`, and returns the assembled identity.
     public static func store(privateKeyX963: Data, certificateDER: Data, label: String) throws -> SecIdentity {
+        KeychainLock.acquire()
+        defer { KeychainLock.release() }
         let keyAttributes: [String: Any] = [
             kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
             kSecAttrKeyClass as String: kSecAttrKeyClassPrivate,
@@ -47,6 +49,8 @@ public enum KeychainIdentity {
     /// Stores a certificate alone — the cluster CA an app pinned at its
     /// enrollment, held so the pin survives relaunch.
     public static func storeCertificate(der: Data, label: String) throws {
+        KeychainLock.acquire()
+        defer { KeychainLock.release() }
         let certificate = try IdentityStore.certificate(fromDER: der)
         let add: [String: Any] = [
             kSecClass as String: kSecClassCertificate,
@@ -77,6 +81,8 @@ public enum KeychainIdentity {
     ///
     /// Ask for all of them and check the label here, where checking works.
     private static func first<T>(in itemClass: CFString, label: String) throws -> T {
+        KeychainLock.acquire()
+        defer { KeychainLock.release() }
         let query: [String: Any] = [
             kSecClass as String: itemClass,
             kSecAttrLabel as String: label,
@@ -110,6 +116,8 @@ public enum KeychainIdentity {
     /// the way out or it accumulates — which it has been doing, unnoticed,
     /// for as long as the suite has existed.
     public static func remove(identity: SecIdentity) {
+        KeychainLock.acquire()
+        defer { KeychainLock.release() }
         SecItemDelete([
             kSecClass as String: kSecClassIdentity,
             kSecValueRef as String: identity,
@@ -146,6 +154,8 @@ public enum KeychainIdentity {
     /// free to ignore.
     public static func remove(label: String) {
         guard !label.isEmpty else { return }
+        KeychainLock.acquire()
+        defer { KeychainLock.release() }
         for itemClass in [kSecClassIdentity, kSecClassCertificate, kSecClassKey] {
             let query: [String: Any] = [
                 kSecClass as String: itemClass,
