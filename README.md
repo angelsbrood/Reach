@@ -50,4 +50,9 @@ remains is the demo itself, recorded behind a public uplink.
 
 ## License
 
-Apache-2.0.
+Apache-2.0. Copyright 2026 Cassie Spiral.
+
+Third-party code is carried under its own terms and marked as such: the
+patched WireGuardKit submodule under `Keeper/vendor/`, and the two
+wg-quick parser files copied into `Keeper/PacketTunnel/`, are WireGuard
+LLC's under the MIT license and keep their SPDX headers.
