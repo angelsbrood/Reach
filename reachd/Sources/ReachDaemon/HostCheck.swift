@@ -125,8 +125,9 @@ public enum HostCheck {
         findings.append(contentsOf: checkMeshEndpoint(config: config, configExists: configExists, addresses: addresses))
         findings.append(checkMeshInterface(addresses, daemonUp: daemonUp))
         findings.append(checkClusterCA(in: stateDirectory))
-        findings.append(contentsOf: checkWireGuard(in: stateDirectory, conf: wireGuardConf))
-        findings.append(await checkDevices(in: stateDirectory))
+        let wireGuard = checkWireGuard(in: stateDirectory, conf: wireGuardConf)
+        findings.append(contentsOf: wireGuard.findings)
+        findings.append(await checkDevices(in: stateDirectory, peersInConf: wireGuard.peers))
         findings.append(contentsOf: portFindings)
 
         return Report(findings: findings)
@@ -365,7 +366,7 @@ public enum HostCheck {
         }
     }
 
-    static func checkWireGuard(in directory: URL, conf path: String) -> [Finding] {
+    static func checkWireGuard(in directory: URL, conf path: String) -> (findings: [Finding], peers: Int?) {
         var findings: [Finding] = []
         let keys = directory.appendingPathComponent("wg", isDirectory: true).appendingPathComponent("server.pub")
         let hostKeyExists = FileManager.default.fileExists(atPath: keys.path)
@@ -421,7 +422,7 @@ public enum HostCheck {
                         action: "Written on first serve, alongside the host key."
                     )
             )
-            return findings
+            return (findings, nil)
         }
         guard let conf = try? String(contentsOfFile: path, encoding: .utf8) else {
             findings.append(Finding(
@@ -430,7 +431,7 @@ public enum HostCheck {
                 detail: "\(path) exists but will not read",
                 action: "wg-quick reads it as root; doctor reads it as you. Check the owner and mode — editing it under sudo is how it stops being yours."
             ))
-            return findings
+            return (findings, nil)
         }
         let parsed: WireGuardConf
         do {
@@ -442,7 +443,7 @@ public enum HostCheck {
                 detail: "\(path): \(error)",
                 action: "wg-quick will refuse this file, so the mesh will not come up at all."
             ))
-            return findings
+            return (findings, nil)
         }
 
         let peers = parsed.peerCount
@@ -461,7 +462,7 @@ public enum HostCheck {
                 : "No device has been admitted. Pair one, then apply with sudo wg-quick down/up reach0."
         ))
         findings.append(checkWireGuardIdentity(parsed, hostKey: hostKey, conf: path))
-        return findings
+        return (findings, peers)
     }
 
     /// Whether the conf and the state directory agree about who this host is.
@@ -528,8 +529,44 @@ public enum HostCheck {
         )
     }
 
-    static func checkDevices(in directory: URL) async -> Finding {
+    /// `peersInConf` is what `checkWireGuard` counted, or nil when there was
+    /// no conf to count. It is passed in so this check can ask the one
+    /// question neither half could answer alone: does every device that
+    /// believes it is enrolled actually have a road?
+    ///
+    /// The ceremony activates the device record and then writes the peer
+    /// block, in that order and deliberately — the peer must not be admitted
+    /// until the device confirms it holds the grant, or a re-pair that fails
+    /// at the last step evicts the block the phone was using. The cost is a
+    /// window: a crash between the two leaves a device persisted as active,
+    /// holding a valid certificate, with no `[Peer]` line anywhere. It
+    /// authenticates, it opens sessions, and it has no mesh — so it works on
+    /// the LAN and dies at the walk-out, which is this project's signature
+    /// failure and the one doctor exists to catch. Neither half saw it:
+    /// the registry counts records and the conf check counts peers, and
+    /// nothing compared them.
+    static func checkDevices(in directory: URL, peersInConf: Int?) async -> Finding {
         let devices = await DeviceRegistry(directory: directory).all
+        if let peersInConf {
+            let active = devices.filter(\.active)
+            if active.count > peersInConf {
+                let stranded = active.count - peersInConf
+                return Finding(
+                    level: .fail,
+                    title: "enrolled devices",
+                    detail: "\(active.count) active, but the conf carries \(peersInConf) peer\(peersInConf == 1 ? "" : "s") — \(stranded) device\(stranded == 1 ? " has" : "s have") no road onto the mesh",
+                    action: "A ceremony was interrupted between enrolling the device and admitting its peer. Re-pair the affected device; it will keep its identity and address, and the peer block is written again."
+                )
+            }
+            if peersInConf > active.count {
+                return Finding(
+                    level: .warn,
+                    title: "enrolled devices",
+                    detail: "\(active.count) active, but the conf carries \(peersInConf) peers",
+                    action: "A peer block outlives a device the registry no longer lists as active. Harmless to the demo — it is a key that can still reach the mesh, which is why revocation is funded scope."
+                )
+            }
+        }
         guard !devices.isEmpty else {
             return Finding(
                 level: .wait,

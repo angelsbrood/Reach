@@ -363,6 +363,68 @@ import Testing
         }
     }
 
+    /// A device that enrolled and never got a road is a fault doctor can see.
+    ///
+    /// The ceremony activates the record and then writes the peer block, in
+    /// that order on purpose. A crash in the window between leaves a device
+    /// that authenticates, opens sessions and has no mesh — so it streams on
+    /// the LAN and dies at the walk-out, which is exactly the shape doctor
+    /// was built for. Neither half saw it before: one counts records, the
+    /// other counts peers, and nothing compared them.
+    @Test func aDeviceWithNoRoadOntoTheMeshIsAFault() async throws {
+        let directory = try fixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let conf = directory.appendingPathComponent("reach0.conf").path
+        let host = try WireGuardHost(
+            keysDirectory: directory.appendingPathComponent("wg", isDirectory: true),
+            confPath: conf,
+            endpoint: "192.0.2.1:51820"
+        )
+        // The conf exists with an [Interface] and no peer — which is what
+        // `serve` leaves behind before any device is admitted.
+        try await host.addPeer(publicKey: Data(repeating: 7, count: 32), allowedIP: "10.86.0.2")
+
+        // Two devices reach EnrollComplete; only one peer was ever written.
+        let registry = DeviceRegistry(directory: directory)
+        for (index, name) in ["phone", "tablet"].enumerated() {
+            let record = try await registry.enroll(
+                name: name,
+                devicePubX963: P256.Signing.PrivateKey().publicKey.x963Representation,
+                wgPub: Data(repeating: UInt8(20 + index), count: 32)
+            )
+            await registry.activate(record.id)
+        }
+
+        let devices = try await finding(report(directory, conf: conf), "enrolled devices")
+        #expect(devices.level == .fail)
+        #expect(devices.detail.contains("no road onto the mesh"))
+        #expect(await !report(directory, conf: conf).isSound)
+    }
+
+    /// …and the ordinary rig, where every active device has its block, is
+    /// not accused of anything.
+    @Test func aRigWhereEveryDeviceHasItsPeerIsSound() async throws {
+        let directory = try fixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let conf = directory.appendingPathComponent("reach0.conf").path
+        let host = try WireGuardHost(
+            keysDirectory: directory.appendingPathComponent("wg", isDirectory: true),
+            confPath: conf,
+            endpoint: "192.0.2.1:51820"
+        )
+        let registry = DeviceRegistry(directory: directory)
+        let record = try await registry.enroll(
+            name: "phone",
+            devicePubX963: P256.Signing.PrivateKey().publicKey.x963Representation,
+            wgPub: Data(repeating: 9, count: 32)
+        )
+        await registry.activate(record.id)
+        try await host.addPeer(publicKey: Data(repeating: 9, count: 32), allowedIP: record.assignedIP)
+
+        let devices = try await finding(report(directory, conf: conf), "enrolled devices")
+        #expect(devices.level == .pass)
+    }
+
     @Test func thePeerCountSaysItReadTheFile() async throws {
         let directory = try fixture()
         defer { try? FileManager.default.removeItem(at: directory) }
