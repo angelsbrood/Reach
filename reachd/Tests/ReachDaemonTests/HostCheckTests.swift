@@ -377,7 +377,11 @@ import Testing
         let wgConfig = try await finding(report(directory, conf: conf), "wg config")
         #expect(wgConfig.level == .pass)
         #expect(wgConfig.detail.contains("the file, not the interface"))
-        #expect(wgConfig.action?.contains("wg show reach0") == true)
+        // Bare `wg show`, not the named form: `wg show reach0` fails on this
+        // rig while the interface is up, and naming a command that fails at
+        // the moment of confirmation is worse than naming none.
+        #expect(wgConfig.action?.contains("sudo wg show (bare") == true)
+        #expect(wgConfig.action?.contains("wg show reach0") != true)
     }
 
     // MARK: - The tally

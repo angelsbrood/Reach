@@ -450,8 +450,14 @@ public enum HostCheck {
             level: peers > 0 ? .pass : .wait,
             title: "wg config",
             detail: "\(peers) peer\(peers == 1 ? "" : "s") in \(path) — the file, not the interface",
+            // `sudo wg show reach0` — the obvious form — fails on this rig with
+            // "Unable to access interface" while the interface is demonstrably
+            // up. Bare `sudo wg show` prints every interface and works. Naming
+            // the form that fails is worse than naming none, because it fails
+            // at the exact moment the operator is confirming the one thing
+            // doctor cannot see.
             action: peers > 0
-                ? "Whether the running interface carries them needs sudo wg show reach0, which doctor cannot run. The conf reads identically before and after wg-quick down/up."
+                ? "Whether the running interface carries them needs sudo wg show (bare, no interface name — the named form fails here), which doctor cannot run without root. The conf reads identically before and after wg-quick down/up."
                 : "No device has been admitted. Pair one, then apply with sudo wg-quick down/up reach0."
         ))
         findings.append(checkWireGuardIdentity(parsed, hostKey: hostKey, conf: path))

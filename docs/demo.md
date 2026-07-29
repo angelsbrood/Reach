@@ -92,8 +92,9 @@ with no config at all only WAITs — nothing has been set up yet, so nothing has
 been left out.
 
 Two things doctor deliberately does not claim. The peer count is peers in the
-*file*; only `sudo wg show reach0` sees what the running interface carries, and
-that needs root. And the mesh check observes a `10.86.0.x` address, not an
+*file*; only `sudo wg show` sees what the running interface carries, and that
+needs root. (Bare, with no interface name — the named form can fail while the
+interface is up.) And the mesh check observes a `10.86.0.x` address, not an
 interface by name — those coincide only while the config says so.
 
 It cannot see the edge — the port forward lives there, and a forward that was
