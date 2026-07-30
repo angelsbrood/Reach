@@ -56,6 +56,39 @@ final class GrantConsole {
         loop = Task { await run() }
     }
 
+    /// Re-dial, because coming back to the foreground is the one moment we
+    /// know a card may be waiting and unseen.
+    ///
+    /// The desk announces a request **exactly once**, to whoever is
+    /// subscribed at that instant (`GrantDesk.park`), and replays what is
+    /// still parked only to a **new** subscriber (`GrantDesk.subscribe`). A
+    /// console that is subscribed but SUSPENDED is neither: iOS is not
+    /// draining its stream, so the yield lands in a buffer nothing reads,
+    /// and it never re-subscribes on its own. That is the ordinary case and
+    /// not an edge one — the operator is necessarily in the asking app at
+    /// the moment they Send, which is exactly when the request parks.
+    ///
+    /// Re-dialling makes this console a new subscriber, which replays
+    /// everything outstanding. Until this existed, the only thing that
+    /// recovered the card was the operator backgrounding and foregrounding
+    /// the app by hand — the same mechanism, performed manually, and only
+    /// by someone who knew to.
+    func refresh() {
+        guard let existing = loop else { return }   // never started — start() owns that
+        // Cancelling the task does not by itself unblock `frames.next()`;
+        // closing the stream underneath it does, and watch()'s `defer` then
+        // tidies up the pinger.
+        control?.cancel()
+        existing.cancel()
+        dropConnection()
+        // Let the old loop finish unwinding before the new one dials, so two
+        // watches can never interleave their writes to `state` and `pending`.
+        loop = Task { [weak self] in
+            _ = await existing.value
+            await self?.run()
+        }
+    }
+
     /// Send first, then say it happened. The card disappearing and the line
     /// in the log are the keeper's whole account of a ruling, and they were
     /// written before anything left the phone — so a control stream that had
@@ -106,7 +139,13 @@ final class GrantConsole {
                 try? await Task.sleep(for: .seconds(30))
                 continue
             } catch {
-                state = .unavailable("cluster unreachable — retrying")
+                // A deliberate re-dial (refresh) tears the stream down on
+                // purpose, and the error it produces is not news — saying
+                // "cluster unreachable" on the way out would put a fault on
+                // screen for the one gesture that is fixing things.
+                if !Task.isCancelled {
+                    state = .unavailable("cluster unreachable — retrying")
+                }
             }
             dropConnection()
             try? await Task.sleep(for: .seconds(3))
