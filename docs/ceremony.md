@@ -83,6 +83,18 @@ that: its authorization is a one-time token, spent the moment
 converge on. A frame the device half needs is one this half would only
 duplicate.
 
+**What the app does wait for is the close.** After `EnrollComplete` it
+half-closes and then reads until end-of-stream, because the daemon sends
+nothing after the grant and half-closes only once it has read that
+confirmation — so **EOF is the acknowledgement**, and it costs no frame.
+Without that wait the app returned straight into its own teardown, and an
+abortive close overtook the confirmation it had just sent: the ceremony
+succeeded, the app streamed, and the daemon logged a socket error where
+`app enrolled:` belonged. Measured 2026-07-30 at two of four grants on the
+rig and seven of ten on loopback. The wait is bounded (2 s) and failing it
+costs only the daemon's log line, since the certificate is already in hand
+— which is why this is still not a frame the protocol requires.
+
 The keeper's side rides its authenticated session connection: a control
 stream opened with the device certificate sends `GrantSubscribe` (admin
 device only — the daemon reads the peer leaf's SAN and checks the

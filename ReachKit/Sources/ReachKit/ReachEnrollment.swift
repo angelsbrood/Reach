@@ -180,6 +180,36 @@ public enum ReachEnrollment {
         // costs the desk a held verdict it would expire anyway — the app keeps
         // a valid certificate either way — but the fix is the same one line.
         stream.finishSending()
+        // The half-close alone was not enough, and the FIN is why: `send`
+        // resolves on `.contentProcessed` — handed to the transport, not
+        // flushed — and `defer { stream.cancel() }` fires the instant this
+        // function returns, microseconds behind it. Whether the daemon drained
+        // the frame before the reset landed was a coin flip: **7 of 10 lost on
+        // loopback, 2 of 4 on the rig**, where the cost is a daemon that logs
+        // `enrollment stream failed: … Socket is not connected` for a ceremony
+        // that fully succeeded and an app that is already streaming.
+        //
+        // So wait for the cluster's own goodbye. It sends nothing after the
+        // grant and half-closes only once it has read this confirmation, so
+        // **EOF here IS the acknowledgement** — which is exactly why this half
+        // still needs no confirming frame of its own. The asymmetry
+        // `docs/ceremony.md` describes is intact: the device half needs a
+        // FRAME because its authorization is single-use and there is nothing
+        // to re-knock with; this half needs only to hear the door close.
+        //
+        // A deadline task rather than a racing task group, for the reason the
+        // Keeper's ceremony gives at the same point: `frames` is one
+        // `AsyncThrowingStream` fed by a receive pump and its iterator is not
+        // Sendable. Two seconds, not the ten a device gets — the app is
+        // granted either way, so a cluster that never says goodbye costs
+        // nothing but the daemon's log line, and a venue should not wait on
+        // bookkeeping.
+        let goodbye = Task {
+            try? await Task.sleep(for: .seconds(2))
+            stream.cancel()
+        }
+        defer { goodbye.cancel() }
+        while (try? await frames.next()) != nil {}
 
         let material = ReachIdentityRegistry.Material(
             identity: identity,

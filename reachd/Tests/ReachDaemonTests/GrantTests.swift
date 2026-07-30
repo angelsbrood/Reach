@@ -118,13 +118,28 @@ import X509
         case refused(ErrorFrame)
     }
 
+    /// How the app leaves, which is the whole of item 7d.
+    private enum Closing {
+        /// What `ReachKit.ReachEnrollment` does: confirm, half-close, and wait
+        /// for the cluster's own goodbye before hanging up.
+        case confirm
+        /// What it did before 7d: confirm, half-close, and hang up on the FIN's
+        /// heels. `send` resolves on `.contentProcessed` — handed to the
+        /// transport, not flushed — so the reset can overtake the frame.
+        case confirmAndHangUp
+        /// The app is gone after the grant (suspended, killed, uninstalled) and
+        /// never confirms at all. Deterministic, unlike the race above.
+        case vanish
+    }
+
     /// The app ceremony: begins, proves the key, and stays parked until
     /// ruled or timed out. Pass `appKey` to re-knock as the same app.
     private func appEnroll(
         _ fixture: Fixture,
         bundleID: String,
         name: String,
-        appKey: P256.Signing.PrivateKey = P256.Signing.PrivateKey()
+        appKey: P256.Signing.PrivateKey = P256.Signing.PrivateKey(),
+        closing: Closing = .confirm
     ) async throws -> AppOutcome {
         let stream = try await fixture.enrollDialer.openStream(timeout: 45)
         defer { stream.cancel() }
@@ -143,7 +158,23 @@ import X509
             return .refused(try grantRaw.decode(ErrorFrame.self))
         }
         let grant = try grantRaw.decode(AppEnrollGrant.self)
+        if closing == .vanish { return .granted(grant, appKey: appKey) }
+
         try await stream.send(EnrollComplete(ok: true))
+        stream.finishSending()
+        if closing == .confirm {
+            // Wait for the cluster's own FIN — the daemon sends nothing after
+            // the grant and half-closes only once it has read the confirmation,
+            // so EOF here IS the acknowledgement. Mirrors `ReachEnrollment`;
+            // the bound is there so a cluster that never says goodbye cannot
+            // hang the ceremony.
+            let deadline = Task {
+                try? await Task.sleep(for: .seconds(2))
+                stream.cancel()
+            }
+            defer { deadline.cancel() }
+            while (try? await frames.next()) != nil {}
+        }
         return .granted(grant, appKey: appKey)
     }
 
@@ -245,6 +276,118 @@ import X509
             if case .finished = ev.event { break }
         }
         #expect(text == ScriptedFilling().words.joined())
+    }
+
+    /// `app enrolled:` is the daemon's whole account of a grant landing, and
+    /// it was a coin flip: **2 of 4 on the rig on 2026-07-30**, and the two
+    /// that lost included the take that became the July cut. What the daemon
+    /// printed instead was `enrollment stream failed: … POSIXErrorCode 57`,
+    /// which is what a genuinely broken ceremony prints.
+    ///
+    /// This asserts the DESK rather than the log, because they are the same
+    /// fact: `desk.collected` runs only on the path that logs the line, so a
+    /// verdict still held is a confirmation the daemon never read. And the
+    /// assertion is well-ordered rather than timing-dependent — the daemon
+    /// half-closes *after* collecting, so an app that waits for that close
+    /// cannot observe the desk mid-decision.
+    @Test func everyGrantTheAppConfirmsIsCollectedFromTheDesk() async throws {
+        let fixture = try await makeFixture(sessionPort: 47448, enrollPort: 47449)
+        defer { fixture.cleanup() }
+
+        let keeper = try await enrollDevice(fixture, name: "keeper-phone")
+        var (control, controlFrames) = try await openControl(fixture, identity: keeper.identity)
+        defer { control.cancel() }
+        try await control.send(GrantSubscribe())
+
+        let rounds = 10
+        var slowestGoodbye = Duration.zero
+        for round in 0..<rounds {
+            let bundleID = "systems.reach.round-\(round)"
+            let knock = Task {
+                try await appEnroll(fixture, bundleID: bundleID, name: "Round \(round)")
+            }
+            let event = try (try #require(try await controlFrames.next())).decode(GrantEvent.self)
+            #expect(event.bundleID == bundleID)
+
+            let ruled = ContinuousClock.now
+            try await control.send(GrantRule(requestID: event.requestID, allow: true))
+            guard case .granted = try await knock.value else {
+                Issue.record("round \(round) was refused after an allow ruling")
+                return
+            }
+            slowestGoodbye = max(slowestGoodbye, ContinuousClock.now - ruled)
+        }
+
+        // Nothing sweeps inside a run (the hold window is ten minutes), so
+        // what is left on the desk is exactly the count that went unread.
+        let stranded = await fixture.desk.footprint.ruled
+        #expect(
+            stranded == 0,
+            "\(stranded) of \(rounds) confirmed grants left the verdict parked — the daemon never read EnrollComplete"
+        )
+
+        // The app waits for the cluster's goodbye, and that wait is only a fix
+        // if the goodbye arrives. A transport that never surfaces the peer's
+        // FIN would turn it into a silent two-second stall on every pairing —
+        // a dead beat on camera, and invisible in a suite that only checks
+        // correctness. Loopback, after a round trip the link has already
+        // carried: half a second is generous.
+        #expect(
+            slowestGoodbye < .milliseconds(500),
+            "the slowest ruling-to-granted was \(slowestGoodbye) — the cluster's FIN is not arriving"
+        )
+    }
+
+    /// The other ending, and the one the daemon promises in writing: *"the
+    /// grant stands and the verdict stays parked — the app collects it on its
+    /// next knock."* Nothing asserted that until now, which is how the
+    /// sentence came to be unreachable without anyone noticing.
+    ///
+    /// Distinct from `verdictSurvivesTheAskersStreamDeath`, which kills the
+    /// stream while it is still PARKED. This one dies after the grant has
+    /// been issued — the app already holds a valid certificate, and the only
+    /// thing outstanding is the daemon's bookkeeping.
+    @Test func aGrantThatIsNeverConfirmedStaysOnTheDeskForTheNextKnock() async throws {
+        let fixture = try await makeFixture(sessionPort: 47450, enrollPort: 47451)
+        defer { fixture.cleanup() }
+
+        let keeper = try await enrollDevice(fixture, name: "keeper-phone")
+        var (control, controlFrames) = try await openControl(fixture, identity: keeper.identity)
+        defer { control.cancel() }
+        try await control.send(GrantSubscribe())
+
+        // The app is granted and then vanishes without confirming.
+        let appKey = P256.Signing.PrivateKey()
+        let knock = Task {
+            try await appEnroll(fixture, bundleID: "systems.reach.vanished", name: "Vanished", appKey: appKey, closing: .vanish)
+        }
+        let event = try (try #require(try await controlFrames.next())).decode(GrantEvent.self)
+        try await control.send(GrantRule(requestID: event.requestID, allow: true))
+        guard case .granted = try await knock.value else {
+            Issue.record("the app was refused after an allow ruling")
+            return
+        }
+
+        // The daemon read no confirmation, so it holds the verdict rather than
+        // forgetting it. Give the unconfirmed path a moment to be taken.
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(await fixture.desk.footprint.ruled == 1)
+
+        // …and the same app key collects it on its next knock, with no second
+        // ruling — which is the whole reason this half needs no confirming
+        // frame. The desk is clean afterwards.
+        let second = try await appEnroll(fixture, bundleID: "systems.reach.vanished", name: "Vanished", appKey: appKey)
+        guard case .granted(let grant, _) = second else {
+            Issue.record("the held verdict was not collectable on a re-knock: \(second)")
+            return
+        }
+        let leaf = try Certificate(derEncoded: Array(grant.appCertDER))
+        let uri = try leaf.extensions.subjectAlternativeNames?.compactMap { name -> String? in
+            if case .uniformResourceIdentifier(let value) = name { return value }
+            return nil
+        }.first
+        #expect(uri?.hasSuffix("/systems.reach.vanished") == true)
+        #expect(await fixture.desk.footprint.ruled == 0)
     }
 
     @Test func nonAdminRefusedAndDenialRefusesApp() async throws {
