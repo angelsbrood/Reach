@@ -15,7 +15,11 @@ import ReachWire
 final class ExampleModel {
     enum IdentityState: Equatable {
         case missing
-        case registered(cluster: String)
+        /// nil when the identity reloaded but the cluster's name could not be
+        /// read back. Optional rather than a placeholder: this used to be a
+        /// hardcoded `"enrolled"`, so a relaunched app's header read "Paired with
+        /// enrolled" — which looks like a bug on camera because it is one.
+        case registered(cluster: String?)
         case failed(String)
     }
 
@@ -23,7 +27,23 @@ final class ExampleModel {
     var clusters: [DiscoveredCluster] = []
     var host = "127.0.0.1"
     var modelID = "gemma-3-1b"
-    var prompt = "In one short sentence: what is a reach, on a river?"
+    /// The demo prompt, in the repo rather than in the operator's clipboard.
+    ///
+    /// The one-line default it replaced finished in a sentence, which left no
+    /// generation running to survive the network switch — so every take meant
+    /// pasting a long prompt in by hand at the moment the rig was already moving.
+    /// `docs/demo.md` records why this shape: a long output from a short ask, with
+    /// no natural stopping point before the 4096-token ceiling below. Asking for
+    /// much more than 3000 words buys nothing, because the ceiling binds first.
+    var prompt = """
+        Write about 3000 words on the life of a river, reach by reach. Take it in \
+        order: the spring and the first cut of the channel; the steep young water; \
+        the shallows and the pools; the meanders and the oxbows; the confluences \
+        where other waters arrive; the slow lowland reach; the tidal reach where \
+        the current first answers the sea; and the mouth. Give each reach two or \
+        three full paragraphs, and for each one say what has changed about the \
+        water, the banks, the light, and the life in it since the reach before.
+        """
     var output = ""
     var status = ""
     var isStreaming = false
@@ -39,7 +59,11 @@ final class ExampleModel {
         // env override (simulator runs point at the host filesystem), then
         // the app's Documents directory.
         if await ReachEnrollment.ensureRegistered(label: Self.identityLabel) {
-            identityState = .registered(cluster: "enrolled")
+            // The name comes off the pinned CA's subject, which is where it has
+            // always been; nothing else persists it.
+            identityState = .registered(
+                cluster: await ReachEnrollment.registeredClusterName(label: Self.identityLabel)
+            )
         }
 
         let candidates: [URL] = [
@@ -136,7 +160,9 @@ final class ExampleModel {
     private func ensureIdentity() async throws {
         if case .registered = identityState { return }
         if await ReachEnrollment.ensureRegistered(label: Self.identityLabel) {
-            identityState = .registered(cluster: "enrolled")
+            identityState = .registered(
+                cluster: await ReachEnrollment.registeredClusterName(label: Self.identityLabel)
+            )
             return
         }
         // Give discovery a breath — a send can land before the first

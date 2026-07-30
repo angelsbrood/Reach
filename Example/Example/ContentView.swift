@@ -46,7 +46,10 @@ struct ContentView: View {
     @ViewBuilder private var header: some View {
         switch model.identityState {
         case .registered(let cluster):
-            Label("Paired with \(cluster)", systemImage: "checkmark.seal")
+            // Named when the name is known, and plainly "Paired" when it is not.
+            // Never a stand-in: the header's whole job is to say what the app is
+            // actually attached to.
+            Label(cluster.map { "Paired with \($0)" } ?? "Paired", systemImage: "checkmark.seal")
                 .foregroundStyle(.green)
         case .missing:
             Label("Not paired yet — the first send asks your keeper", systemImage: "hand.raised")

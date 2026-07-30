@@ -53,6 +53,22 @@ fallback is 512, which is what once made long answers feel truncated), and the
 prompt asks for something with a natural length to it — a description, a short
 story — rather than a fact.
 
+The prompt ships in the app, so nothing has to be typed or pasted while the rig
+is already moving. It is `ExampleModel.prompt`, and it reads:
+
+> Write about 3000 words on the life of a river, reach by reach. Take it in
+> order: the spring and the first cut of the channel; the steep young water; the
+> shallows and the pools; the meanders and the oxbows; the confluences where
+> other waters arrive; the slow lowland reach; the tidal reach where the current
+> first answers the sea; and the mouth. Give each reach two or three full
+> paragraphs, and for each one say what has changed about the water, the banks,
+> the light, and the life in it since the reach before.
+
+A short ask for a long answer, with no natural stopping point before the ceiling.
+The ceiling is what binds, not the number in the prompt: asking for much more
+than 3000 words buys nothing, and a 1500-word ask spent about half the budget and
+finished before the demonstrator reached the door.
+
 Rehearse the walk itself. The transition is not instant and is not meant to
 look instant: the stream visibly pauses for a few seconds while the client
 re-attaches at the mesh address, then continues from exactly where it stopped.

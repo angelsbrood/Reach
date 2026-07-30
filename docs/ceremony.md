@@ -19,15 +19,40 @@ keeper scans, then over reach-enroll/0 (server-auth TLS, CA-hash pinned):
       popSig = SE-sign(nonce‖devicePub‖wgPub)}   phone ──► daemon
   EnrollGrant{deviceCert, caCert, wg{...}}       daemon ──► phone
   EnrollComplete                          phone ──► daemon
+  EnrollConfirmed{applyPending}                  daemon ──► phone
 ```
 
 One proof-of-possession signature binds the Secure Enclave identity key
-and the WireGuard key — one QR, two keys, literally. The daemon appends
-the wg peer (the operator applies it: the one visible sudo) and issues
-`reach://device/<uuid>`, clientAuth, one year. The first device enrolled
-holds the admin grant. The keeper stores the certificate beside the SE
-key, installs the tunnel with the system's consent, and keeps the
-cluster's calling card (addrs, session port, CA) for its console.
+and the WireGuard key — one QR, two keys, literally. The identity key is
+Secure-Enclave-resident and the mesh key is kept in the keychain beside
+it; both are minted once and reused, so a re-pair brings back the keys the
+host already admits and the peer block does not have to be rewritten. The
+signature's freshness comes from the daemon's nonce, not from the keys
+being new.
+
+The daemon appends the wg peer (the operator applies it: the one visible
+sudo) and issues `reach://device/<uuid>`, clientAuth, one year. The first
+device enrolled holds the admin grant. The keeper stores the certificate
+beside the SE key, installs the tunnel with the system's consent, and
+keeps the cluster's calling card (addrs, session port, CA) for its
+console.
+
+**The last frame is why "paired" means anything.** `EnrollComplete` says
+the phone holds the grant; the peer install waits for it, so a re-pair
+that dies at the last step cannot evict the block the phone is still
+using. `EnrollConfirmed` closes the other half: without it the phone's
+success condition was *"I sent a frame"* while the daemon's was *"I
+received one"*, and a stream that died between the two left a phone
+reporting a pairing it did not have. The keeper writes nothing and starts
+no tunnel until it arrives. `applyPending` is false when the conf already
+named this key — nothing was written, so there is no sudo to run — and it
+never claims the running interface carries the peer, because the daemon
+writes a file and cannot see the interface.
+
+One window remains and is not closable by a further frame: a confirmation
+lost in flight leaves the host admitting a key the phone has abandoned.
+Both directions recover the same way — pair again — and the difference
+from the silence this replaced is that somebody is told.
 
 ## The app half (the grant sheet)
 
@@ -48,6 +73,15 @@ knocks at the enrollment door advertised under the same name
   AppEnrollGrant{appCert, caCert}  — or ErrorFrame(grant-denied / grant-timeout)
   EnrollComplete                          app ──► daemon
 ```
+
+No confirming frame here, and the asymmetry is the point rather than an
+oversight. The desk **holds** a ruled verdict, and a re-knock with the same
+app key collects it — so an app whose ceremony tears keeps a valid
+certificate and converges by asking again. The device half could not do
+that: its authorization is a one-time token, spent the moment
+`EnrollBegin` arrives, so there was nothing to retry with and nothing to
+converge on. A frame the device half needs is one this half would only
+duplicate.
 
 The keeper's side rides its authenticated session connection: a control
 stream opened with the device certificate sends `GrantSubscribe` (admin

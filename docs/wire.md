@@ -45,11 +45,16 @@ and yields whole frames, one instance per stream direction.
 | **22** | `GenerateCancel` | generation id |
 | **23** | `EvAck` | cumulative sequence received |
 | **24** | `Ev` | sequence, event |
-| **30–34** | `EnrollBegin` … `EnrollComplete` | the device ceremony |
-| **35–37** | `AppEnrollBegin` … `AppEnrollGrant` | the app ceremony |
+| **30–35** | `EnrollBegin` … `EnrollComplete`, `EnrollConfirmed` | the device ceremony |
+| **40–42** | `AppEnrollBegin` … `AppEnrollGrant` | the app ceremony |
 
 The gaps between the bands are deliberate: a band can grow without renumbering
-its neighbours.
+its neighbours. That held for every band except this pair, where the app
+ceremony had been placed flush against the device ceremony — so when the device
+band grew its sixth frame, the app band moved to 40 to make room rather than
+leaving the device ceremony scattered around its neighbour. The renumber cost
+nothing: raw values are read in exactly two places, both in `Envelope.swift`,
+and nothing persists a type byte.
 
 ## Two channels, and what each proves
 
