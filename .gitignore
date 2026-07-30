@@ -1,7 +1,10 @@
 # Private steering documents — on-disk working files, never in history
+# Globbed by family, not pinned per version: a rename must not silently
+# expose a draft the way reach-designnote-v3 and reach-nlnet-v3 were.
 PLAN.md
-reach-designnote-v1.md
-reach-nlnet-v2.md
+JULYCUT.md
+reach-designnote-v*.md
+reach-nlnet-v*.md
 
 # Key material and secrets — real keys live under
 # ~/Library/Application Support/Reach and never in the tree
