@@ -75,6 +75,33 @@ import Testing
         }
     }
 
+    /// The reason a confirming frame never arrived reaches a person too — it
+    /// is the whole of the daemon's account of a ceremony that tore after the
+    /// grant, and for the device half it is what says the QR is spent.
+    ///
+    /// A stream that was RESET rather than closed throws out of `next()`, and
+    /// a throw cannot reach a `guard`'s `else`: it landed in `serve`'s catch
+    /// and printed `enrollment stream failed: … POSIXErrorCode 57` instead,
+    /// so the sentences written for exactly this case were unreachable by
+    /// construction. These hold the replacements to the same standard as
+    /// everything above — and the `.broke` case must still carry the
+    /// transport's own words, because that is the part naming what happened.
+    @Test func aConfirmationThatNeverCameSaysWhichWayItDidNotCome() {
+        let endings: [EnrollmentService.Confirmation] = [
+            .closed,
+            .broke(TransportError.connectionFailed("POSIXErrorCode(rawValue: 57): Socket is not connected")),
+            .frame(RawFrame(type: Ping.frameType, body: Data())),
+        ]
+        for ending in endings {
+            #expect(ending.reason.contains(" "), "reads as a token, not a sentence: \(ending.reason)")
+            #expect(ending.reason.first?.isUppercase != true, "reads like a type name: \(ending.reason)")
+            #expect(ending.reason.contains("EnrollComplete"), "does not name the frame that is missing: \(ending.reason)")
+        }
+        #expect(EnrollmentService.Confirmation.broke(
+            TransportError.connectionFailed("POSIXErrorCode(rawValue: 57): Socket is not connected")
+        ).reason.contains("Socket is not connected"))
+    }
+
     /// A refusal that travelled the wire keeps the daemon's own words. This
     /// is the half that matters at a venue: the Mac knows why it refused and
     /// the phone is the screen someone is looking at.

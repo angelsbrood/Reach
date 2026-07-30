@@ -41,6 +41,52 @@ public struct EnrollmentService: Sendable {
         self.desk = desk
     }
 
+    /// The confirming frame, or why one never came — because those are three
+    /// endings and the code that read them only ever handled two.
+    ///
+    /// Both ceremonies close by reading a frame the daemon has already earned:
+    /// the grant is sent, and only the acknowledgement is outstanding. A stream
+    /// that was RESET and one that closed cleanly are the same event there —
+    /// the confirmation did not arrive — but they do not reach the *code* the
+    /// same way. **A reset THROWS out of `next()`, and a throw cannot reach a
+    /// `guard`'s `else`.** It went to `serve`'s catch instead and printed
+    /// `enrollment stream failed: … POSIXErrorCode 57: Socket is not
+    /// connected` — a socket rather than a situation — which left both
+    /// sentences written for exactly this ending unreachable by construction:
+    /// that the QR is spent, and that the verdict stays parked.
+    ///
+    /// Measured 2026-07-30 in the July cut's own daemon log: two of four app
+    /// grants lost the confirmation this way, and one of the two is the take
+    /// that became the cut.
+    ///
+    /// Not `private`, so a test can hold the wording to the standard the rest
+    /// of the error surface is held to.
+    enum Confirmation {
+        case frame(RawFrame)
+        case closed
+        case broke(any Error)
+
+        /// Why it never came, phrased to sit inside either half's sentence.
+        var reason: String {
+            switch self {
+            case .frame(let raw): "it sent \(raw.type) where EnrollComplete belongs"
+            case .closed: "the stream closed before EnrollComplete"
+            case .broke(let error): "the stream broke before EnrollComplete: \(error)"
+            }
+        }
+    }
+
+    private static func confirmation(
+        from iterator: inout AsyncThrowingStream<RawFrame, Error>.AsyncIterator
+    ) async -> Confirmation {
+        do {
+            guard let raw = try await iterator.next() else { return .closed }
+            return .frame(raw)
+        } catch {
+            return .broke(error)
+        }
+    }
+
     /// Serves one enrollment stream to completion. The first frame decides
     /// which ceremony this is: a device (token-authorized) or an app
     /// (grant-authorized, parked for the keeper's ruling).
@@ -150,22 +196,27 @@ public struct EnrollmentService: Sendable {
             )
         ))
 
-        // Three answers, not one silent return. A stream that closed, a frame
-        // that was the wrong thing, and a device that said `ok: false` are
-        // different faults — and this used to report none of them, which is why
-        // a ceremony that tore mid-grant left the log with nothing in it. The
-        // token is spent in all three cases, so every message says so: the
-        // absence of `device enrolled:` was the only signal, and it is one you
-        // have to already know to look for.
+        // Four answers, not one silent return. A stream that closed, a stream
+        // that broke, a frame that was the wrong thing, and a device that said
+        // `ok: false` are different faults — and this used to report none of
+        // them, which is why a ceremony that tore mid-grant left the log with
+        // nothing in it. The token is spent in all four cases, so every message
+        // says so: the absence of `device enrolled:` was the only signal, and
+        // it is one you have to already know to look for.
+        //
+        // The broken-stream ending is the one this half could not reach until
+        // `Confirmation` existed, and it is the likeliest of the four here: a
+        // phone that backgrounds or dies after the grant resets the connection
+        // rather than closing it.
         let spent = "\(record.assignedIP) has no peer and the QR is spent — run `reachd pair` for a fresh one"
-        guard let completeRaw = try await iterator.next() else {
-            Log.error("enrollment abandoned by \(begin.deviceName) after the grant: the stream closed; \(spent)")
-            stream.cancel()
-            return
-        }
-        guard completeRaw.type == .enrollComplete else {
-            Log.error("enrollment abandoned by \(begin.deviceName) after the grant: expected EnrollComplete, got \(completeRaw.type); \(spent)")
-            try? await stream.send(ErrorFrame(code: "enroll-sequence", message: "the ceremony ends with EnrollComplete"))
+        let confirmation = await Self.confirmation(from: &iterator)
+        guard case .frame(let completeRaw) = confirmation, completeRaw.type == .enrollComplete else {
+            Log.error("enrollment abandoned by \(begin.deviceName) after the grant: \(confirmation.reason); \(spent)")
+            // Worth answering only when something is still listening — a
+            // stream that closed or broke has no reader on the other end.
+            if case .frame = confirmation {
+                try? await stream.send(ErrorFrame(code: "enroll-sequence", message: "the ceremony ends with EnrollComplete"))
+            }
             stream.cancel()
             return
         }
@@ -293,8 +344,9 @@ public struct EnrollmentService: Sendable {
             // the app's next knock collects it. That is why this half needs no
             // confirming frame: it converges on a re-knock, and the device half
             // could not, because its authorization is single-use and burned.
-            guard let completeRaw = try await iterator.next(), completeRaw.type == .enrollComplete else {
-                Log.error("app enrollment unconfirmed for \(begin.bundleID): the stream closed before EnrollComplete. The grant stands and the verdict stays parked — the app collects it on its next knock.")
+            let confirmation = await Self.confirmation(from: &iterator)
+            guard case .frame(let completeRaw) = confirmation, completeRaw.type == .enrollComplete else {
+                Log.error("app enrollment unconfirmed for \(begin.bundleID): \(confirmation.reason). The grant stands and the verdict stays parked — the app collects it on its next knock.")
                 stream.cancel()
                 return
             }
@@ -303,6 +355,10 @@ public struct EnrollmentService: Sendable {
             // short of EnrollComplete leaves it for the app's next knock.
             await desk.collected(fingerprint)
             Log.info("app enrolled: \(begin.bundleID), granted under device \(ruler.uuidString.lowercased())")
+            // The app is waiting on exactly this: it drains to EOF after its
+            // confirmation, so the half-close is what tells it the frame was
+            // read. Suppressing this line puts every pairing on the client's
+            // two-second deadline instead — measured, not assumed.
             stream.finishSending()
         }
     }
