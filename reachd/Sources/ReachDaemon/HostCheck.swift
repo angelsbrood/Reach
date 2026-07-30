@@ -127,7 +127,7 @@ public enum HostCheck {
         findings.append(checkClusterCA(in: stateDirectory))
         let wireGuard = checkWireGuard(in: stateDirectory, conf: wireGuardConf)
         findings.append(contentsOf: wireGuard.findings)
-        findings.append(await checkDevices(in: stateDirectory, peersInConf: wireGuard.peers))
+        findings.append(await checkDevices(in: stateDirectory, peers: wireGuard.peers))
         findings.append(contentsOf: portFindings)
 
         return Report(findings: findings)
@@ -366,7 +366,13 @@ public enum HostCheck {
         }
     }
 
-    static func checkWireGuard(in directory: URL, conf path: String) -> (findings: [Finding], peers: Int?) {
+    /// Public keys are the most key material doctor may ever print, and its
+    /// output is shot as the evidence tail after a take — so they print short.
+    static func shortKey(_ key: Data) -> String {
+        String(key.base64EncodedString().prefix(12)) + "…"
+    }
+
+    static func checkWireGuard(in directory: URL, conf path: String) -> (findings: [Finding], peers: [[String: String]]?) {
         var findings: [Finding] = []
         let keys = directory.appendingPathComponent("wg", isDirectory: true).appendingPathComponent("server.pub")
         let hostKeyExists = FileManager.default.fileExists(atPath: keys.path)
@@ -462,7 +468,23 @@ public enum HostCheck {
                 : "No device has been admitted. Pair one, then apply with sudo wg-quick down/up reach0."
         ))
         findings.append(checkWireGuardIdentity(parsed, hostKey: hostKey, conf: path))
-        return (findings, peers)
+        // The invariant `addPeer` is built around, asserted against the file
+        // rather than trusted to the code that writes it. Two peers claiming one
+        // /32 is a conf wg will load and a mesh that routes that address to
+        // whichever block it happened to read — and nothing else here would see
+        // it, because a hand-edit and a future removal-plus-reallocation both
+        // produce it without going through `addPeer` at all.
+        let claims = parsed.peers.flatMap(WireGuardConf.allowedIPs(of:))
+        let contested = Set(claims.filter { address in claims.filter { $0 == address }.count > 1 })
+        if !contested.isEmpty {
+            findings.append(Finding(
+                level: .fail,
+                title: "wg peers",
+                detail: "\(path) has more than one peer claiming \(contested.sorted().joined(separator: ", "))",
+                action: "wg will load this and route the address to whichever block it read — so one device silently takes another's mesh. Remove the stale block; the device it belonged to keeps its identity and gets a new one by re-pairing."
+            ))
+        }
+        return (findings, parsed.peers)
     }
 
     /// Whether the conf and the state directory agree about who this host is.
@@ -513,7 +535,7 @@ public enum HostCheck {
                 action: "server.pub is written on first serve."
             )
         }
-        let shown = { (key: Data) in String(key.base64EncodedString().prefix(12)) + "…" }
+        let shown = shortKey
         guard derived == hostKey else {
             return Finding(
                 level: .fail,
@@ -529,41 +551,61 @@ public enum HostCheck {
         )
     }
 
-    /// `peersInConf` is what `checkWireGuard` counted, or nil when there was
-    /// no conf to count. It is passed in so this check can ask the one
-    /// question neither half could answer alone: does every device that
-    /// believes it is enrolled actually have a road?
+    /// `peers` is what `checkWireGuard` parsed out of the conf, or nil when there
+    /// was no conf to read. It is passed in so this check can ask the one
+    /// question neither half could answer alone: does every device that believes
+    /// it is enrolled actually have a road?
     ///
-    /// The ceremony activates the device record and then writes the peer
-    /// block, in that order and deliberately — the peer must not be admitted
-    /// until the device confirms it holds the grant, or a re-pair that fails
-    /// at the last step evicts the block the phone was using. The cost is a
-    /// window: a crash between the two leaves a device persisted as active,
-    /// holding a valid certificate, with no `[Peer]` line anywhere. It
-    /// authenticates, it opens sessions, and it has no mesh — so it works on
-    /// the LAN and dies at the walk-out, which is this project's signature
-    /// failure and the one doctor exists to catch. Neither half saw it:
-    /// the registry counts records and the conf check counts peers, and
-    /// nothing compared them.
-    static func checkDevices(in directory: URL, peersInConf: Int?) async -> Finding {
+    /// The ceremony writes the peer block only once the device confirms it holds
+    /// the grant, deliberately — admitting it earlier meant a re-pair that failed
+    /// at the last step had already evicted the block the phone was using. The
+    /// cost is a window: a device can be persisted as active, holding a valid
+    /// certificate, with no `[Peer]` line naming it. It authenticates, it opens
+    /// sessions, and it has no mesh — so it works on the LAN and dies at the
+    /// walk-out, which is this project's signature failure and the one doctor
+    /// exists to catch.
+    ///
+    /// **It compares keys and addresses, not counts, and that is the whole
+    /// point.** Counting caught only the narrowest case. A torn *re-pair* leaves
+    /// the previous block in place, so one active device and one peer balanced
+    /// exactly — and this check reported a sound rig while the phone had no road,
+    /// which is the shape it was written for and missed. A stranded device
+    /// offsetting an orphaned block did the same. Neither survives a comparison
+    /// of *which key holds which address*.
+    static func checkDevices(in directory: URL, peers: [[String: String]]?) async -> Finding {
         let devices = await DeviceRegistry(directory: directory).all
-        if let peersInConf {
+        if let peers {
             let active = devices.filter(\.active)
-            if active.count > peersInConf {
-                let stranded = active.count - peersInConf
+            let holds = { (peer: [String: String], device: DeviceRegistry.Device) in
+                WireGuardConf.publicKey(of: peer) == device.wgPub
+                    && WireGuardConf.allowedIPs(of: peer).contains("\(device.assignedIP)/32")
+            }
+            let stranded = active.filter { device in !peers.contains { holds($0, device) } }
+            if !stranded.isEmpty {
+                let named = stranded
+                    .map { "\($0.name) (\($0.assignedIP), key \(shortKey($0.wgPub)))" }
+                    .joined(separator: ", ")
                 return Finding(
                     level: .fail,
                     title: "enrolled devices",
-                    detail: "\(active.count) active, but the conf carries \(peersInConf) peer\(peersInConf == 1 ? "" : "s") — \(stranded) device\(stranded == 1 ? " has" : "s have") no road onto the mesh",
-                    action: "A ceremony was interrupted between enrolling the device and admitting its peer. Re-pair the affected device; it will keep its identity and address, and the peer block is written again."
+                    detail: "\(named) — no road onto the mesh: no peer in the conf holds that key at that address",
+                    action: "A ceremony was interrupted between admitting the device and writing its peer, or the conf still holds an older key for it. Re-pair the affected device; it will keep its identity and address, and the peer block is written again."
                 )
             }
-            if peersInConf > active.count {
+            let orphans = peers.filter { peer in !active.contains { holds(peer, $0) } }
+            if !orphans.isEmpty {
+                let named = orphans
+                    .map { peer in
+                        let key = WireGuardConf.publicKey(of: peer).map(shortKey) ?? "no key"
+                        let where_ = WireGuardConf.allowedIPs(of: peer).joined(separator: ", ")
+                        return "\(key) at \(where_.isEmpty ? "no address" : where_)"
+                    }
+                    .joined(separator: ", ")
                 return Finding(
                     level: .warn,
                     title: "enrolled devices",
-                    detail: "\(active.count) active, but the conf carries \(peersInConf) peers",
-                    action: "A peer block outlives a device the registry no longer lists as active. Harmless to the demo — it is a key that can still reach the mesh, which is why revocation is funded scope."
+                    detail: "\(active.count) active, and the conf also holds \(named)",
+                    action: "A peer block outlives the device that owned it, or holds a key that device has replaced. Harmless to the demo — it is a key that can still reach the mesh, which is why revocation is funded scope."
                 )
             }
         }

@@ -1,7 +1,11 @@
 import Foundation
 
-/// Enough of a wg-quick config to answer two questions: which key does this
-/// file claim the host is, and how many peers does it admit.
+/// Enough of a wg-quick config to answer three questions: which key does this
+/// file claim the host is, how many peers does it admit, and which key does each
+/// peer hold under which address. The third one is what lets doctor compare the
+/// conf against the device registry by key rather than by count — a count says a
+/// re-paired device has a road when what the file actually holds is the block it
+/// walked in with.
 ///
 /// The line discipline is taken from the parser already vendored in this
 /// repository (`Keeper/PacketTunnel/TunnelConfiguration+WgQuickConfig.swift`,
@@ -41,9 +45,31 @@ struct WireGuardConf {
     /// the file has no such section at all.
     let interface: [String: String]
     let hasInterfaceSection: Bool
-    let peerCount: Int
+    /// One dictionary per `[Peer]` block, in file order, keys lowercased.
+    let peers: [[String: String]]
+
+    var peerCount: Int { peers.count }
 
     var privateKey: String? { interface["privatekey"] }
+
+    /// The `AllowedIPs` a peer block claims, split and trimmed. wg-quick takes a
+    /// comma-separated list, and the daemon writes exactly one `/32`.
+    static func allowedIPs(of peer: [String: String]) -> [String] {
+        (peer["allowedips"] ?? "")
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+    }
+
+    /// Peer public keys as raw bytes, keyed nowhere — compared as bytes rather
+    /// than as strings because two spellings of one key are still one key, and a
+    /// diagnostic that reports a fault over whitespace is worse than no
+    /// diagnostic. Same rule the host-key check already follows.
+    static func publicKey(of peer: [String: String]) -> Data? {
+        guard let text = peer["publickey"] else { return nil }
+        return Data(base64Encoded: text.trimmingCharacters(in: .whitespaces))
+            .flatMap { $0.count == 32 ? $0 : nil }
+    }
 
     static func parse(_ text: String) throws -> WireGuardConf {
         enum Section { case none, interface, peer }
@@ -51,7 +77,7 @@ struct WireGuardConf {
         var section = Section.none
         var interface: [String: String] = [:]
         var interfaceSections = 0
-        var peers = 0
+        var peers: [[String: String]] = []
 
         for rawLine in text.split(omittingEmptySubsequences: false, whereSeparator: { $0.isNewline }) {
             let uncommented = rawLine.split(separator: "#", maxSplits: 1, omittingEmptySubsequences: false)[0]
@@ -65,18 +91,27 @@ struct WireGuardConf {
                     interfaceSections += 1
                 case "[peer]":
                     section = .peer
-                    peers += 1
+                    peers.append([:])
                 default:
                     section = .none
                 }
                 continue
             }
 
-            guard section == .interface, let equals = line.firstIndex(of: "=") else { continue }
+            guard section != .none, let equals = line.firstIndex(of: "=") else { continue }
             let key = line[..<equals].trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             let value = line[line.index(after: equals)...].trimmingCharacters(in: .whitespacesAndNewlines)
-            // First wins, so a duplicate cannot quietly replace the real key.
-            if interface[key] == nil { interface[key] = value }
+            // First wins in both sections, so a duplicate cannot quietly replace
+            // the real key — and in a peer block the rule is per block, not per
+            // file, because every block has its own PublicKey.
+            switch section {
+            case .interface:
+                if interface[key] == nil { interface[key] = value }
+            case .peer:
+                if peers[peers.count - 1][key] == nil { peers[peers.count - 1][key] = value }
+            case .none:
+                continue
+            }
         }
 
         guard interfaceSections <= 1 else {
@@ -85,7 +120,7 @@ struct WireGuardConf {
         return WireGuardConf(
             interface: interface,
             hasInterfaceSection: interfaceSections == 1,
-            peerCount: peers
+            peers: peers
         )
     }
 }

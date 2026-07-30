@@ -19,7 +19,13 @@ struct Pair: AsyncParsableCommand {
     var png: String?
 
     struct Payload: Codable {
-        var v = 1
+        /// The ceremony this daemon speaks, and the tripwire for the pair of
+        /// builds. Bumped to 2 when the ceremony grew its confirming frame:
+        /// this QR is minted by the same binary that serves the ceremony, so a
+        /// keeper reading the version knows what the host will do, and a
+        /// mismatched pair refuses in one sentence rather than half-pairing a
+        /// device and reporting success.
+        var v = 2
         var cluster: UUID
         var name: String
         var addrs: [String]

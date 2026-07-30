@@ -12,7 +12,10 @@ import X509
 /// single-use, proof-of-possession enforcement, and the issued chain
 /// verifying against the root the QR pinned.
 enum EnrollOutcome {
-    case granted(EnrollGrant)
+    /// `confirmed` is nil when the ceremony was abandoned on purpose, and — the
+    /// case worth writing tests against — when the daemon never sent the frame
+    /// that says a road exists.
+    case granted(EnrollGrant, confirmed: EnrollConfirmed?)
     case refused(ErrorFrame)
 }
 
@@ -104,10 +107,11 @@ enum EnrollOutcome {
         name: String,
         breakPoP: Bool = false,
         deviceKey: P256.Signing.PrivateKey = P256.Signing.PrivateKey(),
+        // A phone keeps its mesh key, so a re-pair brings the same one back.
+        // Passing it in is how a test says "the same phone, twice."
+        wgKey: Curve25519.KeyAgreement.PrivateKey = Curve25519.KeyAgreement.PrivateKey(),
         completeCeremony: Bool = true
     ) async throws -> EnrollOutcome {
-        let wgKey = Curve25519.KeyAgreement.PrivateKey()
-
         let stream = try await fixture.dialer.openStream(timeout: 45)
         defer { stream.cancel() }
         var frames = stream.frames.makeAsyncIterator()
@@ -139,14 +143,31 @@ enum EnrollOutcome {
         // A phone that dies, is backgrounded, or refuses the tunnel between
         // the grant and the confirmation. The daemon must treat that as a
         // pairing that did not happen.
-        guard completeCeremony else { return .granted(grant) }
+        guard completeCeremony else { return .granted(grant, confirmed: nil) }
         try await stream.send(EnrollComplete(ok: true))
-        // The peer block is written after EnrollComplete lands, so a test
-        // that reads reach0.conf has to wait for the daemon rather than for
-        // its own send. The daemon closes its send side once it is done, so
-        // draining to the end is the deterministic wait.
-        while (try? await frames.next()) != nil {}
-        return .granted(grant)
+        // Half-close exactly as the keeper does. `send` resolves when the
+        // transport accepts the bytes rather than when the peer reads them, so a
+        // cancel here can outrun the frame — which is how a pairing came to
+        // report success while the daemon's read failed with ENOTCONN.
+        stream.finishSending()
+        // The peer block is written before this frame is sent, so receiving it
+        // IS the deterministic wait for a test that reads reach0.conf — and a
+        // stronger one than draining, which could not tell "the daemon finished"
+        // from "the daemon gave up." Bounded, because the absence of this frame
+        // is the fault under test: an unbounded read would hang the suite where
+        // it should fail it.
+        let deadline = Task {
+            try? await Task.sleep(for: .seconds(5))
+            stream.cancel()
+        }
+        defer { deadline.cancel() }
+        guard let confirmRaw = try? await frames.next() else {
+            return .granted(grant, confirmed: nil)
+        }
+        if confirmRaw.type == .errorFrame {
+            return .refused(try confirmRaw.decode(ErrorFrame.self))
+        }
+        return .granted(grant, confirmed: try confirmRaw.decode(EnrollConfirmed.self))
     }
 
     @Test func fullCeremonyIssuesVerifiableIdentityAndMesh() async throws {
@@ -155,10 +176,19 @@ enum EnrollOutcome {
 
         let token = fixture.tokens.mint()
         let outcome = try await enroll(fixture, token: token, name: "cassies-iphone")
-        guard case .granted(let grant) = outcome else {
+        guard case .granted(let grant, let confirmed) = outcome else {
             Issue.record("enrollment failed: \(outcome)")
             return
         }
+
+        // The frame the ceremony was missing. Without it the keeper's success
+        // condition was "I sent EnrollComplete" and the daemon's peer install was
+        // "I received it", so every stream death between the two produced a phone
+        // reporting a pairing it did not have. A first pairing writes a block, so
+        // the host still has to load it — and the phone is the only screen the
+        // person holding it is looking at.
+        let confirmation = try #require(confirmed, "the daemon never confirmed the peer")
+        #expect(confirmation.applyPending)
 
         // The issued chain verifies against the pinned root.
         #expect(Data(SHA256.hash(data: grant.caCertDER)) == fixture.caHash)
@@ -206,16 +236,21 @@ enum EnrollOutcome {
     }
 
     /// Re-pairing is the demo-day path: the same Secure Enclave key comes
-    /// back with a fresh wg key, and must keep its identity — id, mesh
-    /// address, and the admin grant — while the host config swaps the
-    /// stale peer block for the new key.
+    /// back and must keep its identity — id, mesh address, and the admin grant.
+    /// Two legs, because the mesh key decides which branch of `addPeer` runs:
+    /// a key the conf has never seen swaps the stale block for it, and a key the
+    /// conf already holds is left alone. The second is the ordinary case now that
+    /// the phone keeps its mesh key, and it is what closes the torn-ceremony
+    /// window rather than shrinking it — with host and phone already agreeing, a
+    /// lost confirmation costs the pairing nothing.
     @Test func rePairKeepsIdentityAndReplacesPeer() async throws {
         let fixture = try makeFixture(port: 47432)
         defer { fixture.cleanup() }
 
         let deviceKey = P256.Signing.PrivateKey()
+        let secondWG = Curve25519.KeyAgreement.PrivateKey()
         let first = try await enroll(fixture, token: fixture.tokens.mint(), name: "keeper-phone", deviceKey: deviceKey)
-        guard case .granted(let firstGrant) = first else {
+        guard case .granted(let firstGrant, _) = first else {
             Issue.record("first enrollment failed")
             return
         }
@@ -226,11 +261,17 @@ enum EnrollOutcome {
         let original = try #require(await devices.all.first)
         #expect(original.admin)
 
-        let again = try await enroll(fixture, token: fixture.tokens.mint(), name: "keeper-phone-renamed", deviceKey: deviceKey)
-        guard case .granted(let secondGrant) = again else {
+        let again = try await enroll(
+            fixture, token: fixture.tokens.mint(), name: "keeper-phone-renamed",
+            deviceKey: deviceKey, wgKey: secondWG
+        )
+        guard case .granted(let secondGrant, let secondConfirmed) = again else {
             Issue.record("re-pair was refused")
             return
         }
+        // A key the conf has not seen: a block was written, so the host still
+        // has to load it.
+        #expect(try #require(secondConfirmed).applyPending)
 
         // Same device, same address, admin intact — and only one record.
         let after = DeviceRegistry(directory: fixture.stateDir)
@@ -248,6 +289,21 @@ enum EnrollOutcome {
         #expect(conf.components(separatedBy: "AllowedIPs = \(record.assignedIP)/32").count == 2)
         #expect(conf.contains(record.wgPub.base64EncodedString()))
         #expect(record.wgPub != original.wgPub)
+
+        // Third leg: the same phone, back again with the key it kept. `addPeer`
+        // has nothing to do, so the conf must come out byte-identical and the
+        // host must not ask for a sudo it does not need.
+        let third = try await enroll(
+            fixture, token: fixture.tokens.mint(), name: "keeper-phone-renamed",
+            deviceKey: deviceKey, wgKey: secondWG
+        )
+        guard case .granted(_, let thirdConfirmed) = third else {
+            Issue.record("a re-pair with an unchanged mesh key was refused")
+            return
+        }
+        #expect(!(try #require(thirdConfirmed).applyPending), "the host asked for a sudo it did not need")
+        let afterSameKey = try String(contentsOfFile: fixture.confPath, encoding: .utf8)
+        #expect(afterSameKey == conf, "a re-pair with an unchanged mesh key rewrote the conf")
     }
 
     /// Arriving at a venue is exactly this: re-pin `meshEndpoint`, re-pair the
@@ -270,7 +326,7 @@ enum EnrollOutcome {
         try config.save(to: fixture.stateDir)
 
         let home = try await enroll(fixture, token: fixture.tokens.mint(), name: "phone-at-home")
-        guard case .granted(let homeGrant) = home else {
+        guard case .granted(let homeGrant, _) = home else {
             Issue.record("first enrollment failed: \(home)")
             return
         }
@@ -281,7 +337,7 @@ enum EnrollOutcome {
         try config.save(to: fixture.stateDir)
 
         let away = try await enroll(fixture, token: fixture.tokens.mint(), name: "phone-at-venue")
-        guard case .granted(let awayGrant) = away else {
+        guard case .granted(let awayGrant, _) = away else {
             Issue.record("second enrollment failed: \(away)")
             return
         }
@@ -382,6 +438,24 @@ enum EnrollOutcome {
         defer { fixture.cleanup() }
 
         let deviceKey = P256.Signing.PrivateKey()
+
+        // The FIRST pairing, abandoned — the half this test did not cover, and
+        // the one with no earlier block to preserve. Nothing may be admitted: the
+        // reservation keeps the address so a retry lands on the same one, but it
+        // must not read as a device with a road, because doctor's fault check is
+        // all that stands between this state and a venue.
+        _ = try await enroll(
+            fixture, token: fixture.tokens.mint(), name: "phone",
+            deviceKey: deviceKey, completeCeremony: false
+        )
+        try? await Task.sleep(for: .milliseconds(400))
+        let afterAbandonedFirst = try String(contentsOfFile: fixture.confPath, encoding: .utf8)
+        #expect(!afterAbandonedFirst.contains("[Peer]"), "an abandoned first pairing wrote a peer block")
+        let reserved = await DeviceRegistry(directory: fixture.stateDir).all
+        #expect(reserved.count == 1, "the reservation should survive so a retry keeps the address")
+        #expect(reserved.first?.active == false, "an abandoned pairing left the device reading as active")
+        #expect(reserved.first?.wgPub.isEmpty == true, "a mesh key was recorded with no peer block to match it")
+
         _ = try await enroll(fixture, token: fixture.tokens.mint(), name: "phone", deviceKey: deviceKey)
 
         let afterFirst = try String(contentsOfFile: fixture.confPath, encoding: .utf8)
@@ -401,6 +475,20 @@ enum EnrollOutcome {
 
         let afterAbandon = try String(contentsOfFile: fixture.confPath, encoding: .utf8)
         #expect(afterAbandon == afterFirst, "an abandoned re-pair rewrote the peer block the phone was using")
+
+        // And when the conf itself will not read, the phone hears which file
+        // rather than a stream that simply stops — it is one frame away from
+        // deciding it is paired, so the reason is its business too. Invalid UTF-8
+        // rather than chmod 000: a mode of 000 does not stop root, so the
+        // permission form silently passes under `sudo swift test`.
+        try Data([0xFF, 0xFE, 0xFD]).write(to: URL(fileURLWithPath: fixture.confPath))
+        let refused = try await enroll(fixture, token: fixture.tokens.mint(), name: "another-phone")
+        guard case .refused(let error) = refused else {
+            Issue.record("a conf that could not be read still reported a pairing")
+            return
+        }
+        #expect(error.code == "enroll-peer")
+        #expect(error.message.contains(fixture.confPath), "the refusal did not name the file")
     }
 
     /// The same collapse `DaemonConfig.load` had, in the one other file the
@@ -451,5 +539,15 @@ enum EnrollOutcome {
         // re-scanning the same dead code. The message names the remedy.
         #expect(error.code == "enroll-token")
         #expect(error.message.contains("reachd pair"))
+    }
+
+    /// `;`, not `&&`. `wg-quick down` exits non-zero on this host even on a clean
+    /// teardown, so `&&` short-circuits and `up` never runs — twice, on camera,
+    /// leaving the mesh down mid-ceremony. Asserted rather than trusted because
+    /// the last wrong command in this file survived four days as a literal inside
+    /// a log call, where nothing could see it.
+    @Test func theApplyCommandSurvivesADownThatExitsNonZero() {
+        #expect(WireGuardHost.applyCommand.contains("down reach0;"))
+        #expect(!WireGuardHost.applyCommand.contains("&&"))
     }
 }

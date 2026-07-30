@@ -387,12 +387,11 @@ import Testing
         // Two devices reach EnrollComplete; only one peer was ever written.
         let registry = DeviceRegistry(directory: directory)
         for (index, name) in ["phone", "tablet"].enumerated() {
-            let record = try await registry.enroll(
+            let record = try await registry.reserve(
                 name: name,
-                devicePubX963: P256.Signing.PrivateKey().publicKey.x963Representation,
-                wgPub: Data(repeating: UInt8(20 + index), count: 32)
+                devicePubX963: P256.Signing.PrivateKey().publicKey.x963Representation
             )
-            await registry.activate(record.id)
+            await registry.admit(record.id, wgPub: Data(repeating: UInt8(20 + index), count: 32))
         }
 
         let devices = try await finding(report(directory, conf: conf), "enrolled devices")
@@ -413,16 +412,81 @@ import Testing
             endpoint: "192.0.2.1:51820"
         )
         let registry = DeviceRegistry(directory: directory)
-        let record = try await registry.enroll(
+        let record = try await registry.reserve(
             name: "phone",
-            devicePubX963: P256.Signing.PrivateKey().publicKey.x963Representation,
-            wgPub: Data(repeating: 9, count: 32)
+            devicePubX963: P256.Signing.PrivateKey().publicKey.x963Representation
         )
-        await registry.activate(record.id)
+        await registry.admit(record.id, wgPub: Data(repeating: 9, count: 32))
         try await host.addPeer(publicKey: Data(repeating: 9, count: 32), allowedIP: record.assignedIP)
 
         let devices = try await finding(report(directory, conf: conf), "enrolled devices")
         #expect(devices.level == .pass)
+    }
+
+    /// The case that actually bit, and the one counting could never see. A torn
+    /// re-pair leaves the previous peer block in place, so the tally balances at
+    /// one active device and one peer while the phone — holding a key the conf
+    /// does not name — has no road at all. Measured on the rig on 2026-07-29: the
+    /// registry held one key, the conf held another, and doctor called it sound.
+    @Test func aDeviceWhoseConfKeyIsStaleIsAFault() async throws {
+        let directory = try fixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let conf = directory.appendingPathComponent("reach0.conf").path
+        let host = try WireGuardHost(
+            keysDirectory: directory.appendingPathComponent("wg", isDirectory: true),
+            confPath: conf,
+            endpoint: "192.0.2.1:51820"
+        )
+        // The block the phone walked in with.
+        try await host.addPeer(publicKey: Data(repeating: 7, count: 32), allowedIP: "10.86.0.2")
+
+        // The registry moved on to the key a re-pair brought; the conf did not.
+        let registry = DeviceRegistry(directory: directory)
+        let record = try await registry.reserve(
+            name: "phone",
+            devicePubX963: P256.Signing.PrivateKey().publicKey.x963Representation
+        )
+        await registry.admit(record.id, wgPub: Data(repeating: 8, count: 32))
+
+        // One active device and one peer: the counts agree, the keys do not, and
+        // the old check read exactly this as a sound rig.
+        let wg = try await finding(report(directory, conf: conf), "wg config")
+        #expect(wg.detail.contains("1 peer"))
+        let devices = try await finding(report(directory, conf: conf), "enrolled devices")
+        #expect(devices.level == .fail)
+        #expect(devices.detail.contains("no road onto the mesh"))
+        #expect(await !report(directory, conf: conf).isSound)
+    }
+
+    /// `addPeer`'s invariant, asserted against the file rather than trusted to the
+    /// code that writes it. Two peers claiming one /32 is a conf wg will load, and
+    /// a mesh that hands the address to whichever block it read — so one device
+    /// silently takes another's. A hand-edit produces it without going through
+    /// `addPeer` at all, which is why the file is where it has to be caught.
+    @Test func twoPeersClaimingOneAddressIsAFault() async throws {
+        let directory = try fixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let conf = directory.appendingPathComponent("reach0.conf").path
+        let host = try WireGuardHost(
+            keysDirectory: directory.appendingPathComponent("wg", isDirectory: true),
+            confPath: conf,
+            endpoint: "192.0.2.1:51820"
+        )
+        try await host.addPeer(publicKey: Data(repeating: 7, count: 32), allowedIP: "10.86.0.2")
+        // Appended by hand, the way an operator would.
+        let text = try String(contentsOfFile: conf, encoding: .utf8)
+        try (text + """
+
+        [Peer]
+        PublicKey = \(Data(repeating: 8, count: 32).base64EncodedString())
+        AllowedIPs = 10.86.0.2/32
+
+        """).write(toFile: conf, atomically: true, encoding: .utf8)
+
+        let peers = try await finding(report(directory, conf: conf), "wg peers")
+        #expect(peers.level == .fail)
+        #expect(peers.detail.contains("10.86.0.2/32"))
+        #expect(await !report(directory, conf: conf).isSound)
     }
 
     @Test func thePeerCountSaysItReadTheFile() async throws {

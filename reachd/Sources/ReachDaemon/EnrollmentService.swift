@@ -9,7 +9,11 @@ import X509
 
 /// The ceremony's daemon side: one bidirectional stream on the enrollment
 /// listener carries EnrollBegin → EnrollChallenge → EnrollCertRequest →
-/// EnrollGrant → EnrollComplete. Mutual authentication is asymmetric by
+/// EnrollGrant → EnrollComplete → EnrollConfirmed. The last frame comes back
+/// the other way, and it is what makes the phone's idea of success the same
+/// event as this side's: without it the phone's condition was "I sent it" and
+/// the daemon's was "I received it," and everything between them was a pairing
+/// that reported success and had no road. Mutual authentication is asymmetric by
 /// design — the phone authenticates the daemon via the CA-hash pin from
 /// the QR; the daemon authenticates the phone via the one-time token. One
 /// proof-of-possession signature binds the device key and the WireGuard
@@ -125,7 +129,7 @@ public struct EnrollmentService: Sendable {
             return
         }
 
-        let record = try await devices.enroll(name: begin.deviceName, devicePubX963: request.devicePubDER, wgPub: request.wgPubKey)
+        let record = try await devices.reserve(name: begin.deviceName, devicePubX963: request.devicePubDER)
         let certificate = try ca.issueClientLeaf(
             publicKeyX963: request.devicePubDER,
             commonName: begin.deviceName,
@@ -146,12 +150,33 @@ public struct EnrollmentService: Sendable {
             )
         ))
 
-        guard let completeRaw = try await iterator.next(), completeRaw.type == .enrollComplete else {
+        // Three answers, not one silent return. A stream that closed, a frame
+        // that was the wrong thing, and a device that said `ok: false` are
+        // different faults — and this used to report none of them, which is why
+        // a ceremony that tore mid-grant left the log with nothing in it. The
+        // token is spent in all three cases, so every message says so: the
+        // absence of `device enrolled:` was the only signal, and it is one you
+        // have to already know to look for.
+        let spent = "\(record.assignedIP) has no peer and the QR is spent — run `reachd pair` for a fresh one"
+        guard let completeRaw = try await iterator.next() else {
+            Log.error("enrollment abandoned by \(begin.deviceName) after the grant: the stream closed; \(spent)")
             stream.cancel()
             return
         }
-        _ = try completeRaw.decode(EnrollComplete.self)
-        await devices.activate(record.id)
+        guard completeRaw.type == .enrollComplete else {
+            Log.error("enrollment abandoned by \(begin.deviceName) after the grant: expected EnrollComplete, got \(completeRaw.type); \(spent)")
+            try? await stream.send(ErrorFrame(code: "enroll-sequence", message: "the ceremony ends with EnrollComplete"))
+            stream.cancel()
+            return
+        }
+        // `ok` was decoded and discarded here, so a device reporting failure
+        // read as success. It is the device's own verdict on the grant it just
+        // installed; honour it.
+        guard try completeRaw.decode(EnrollComplete.self).ok else {
+            Log.error("enrollment declined by \(begin.deviceName) after the grant: it could not hold the certificate; \(spent)")
+            stream.cancel()
+            return
+        }
         // The peer waits until the device has confirmed it holds the grant.
         // Admitting it earlier meant a re-pair that failed after the grant
         // had already evicted the block the phone was using — two peers must
@@ -160,11 +185,38 @@ public struct EnrollmentService: Sendable {
         // way back to the one it had. Nothing in the grant depends on this
         // having run: it carries the host's public key and the assigned
         // address, both known well before here.
-        try await wgHost.addPeer(publicKey: request.wgPubKey, allowedIP: record.assignedIP)
+        let applyPending: Bool
+        do {
+            applyPending = try await wgHost.addPeer(publicKey: request.wgPubKey, allowedIP: record.assignedIP)
+        } catch {
+            // Reachable: the conf is the one file the operator edits by hand.
+            // It is also the phone's business, because the phone is about to
+            // decide whether it is paired — so it hears the reason rather than
+            // a closed stream. Nothing was admitted, so there is nothing to
+            // undo: the reservation keeps its address and its certificate and
+            // has no road, which is exactly what doctor now reports.
+            Log.error("enrollment refused — no road for \(begin.deviceName): \(error)")
+            try? await stream.send(ErrorFrame(code: "enroll-peer", message: "\(error)"))
+            stream.cancel()
+            return
+        }
+        // The key and the active flag land here, on the same side of the
+        // confirmation as the peer block that carries them.
+        await devices.admit(record.id, wgPub: request.wgPubKey)
         // The endpoint is logged because it is the one thing in the grant
         // that cannot be re-derived later: the phone carries it into its
         // tunnel config, and this line is the record of what it was told.
         Log.info("device enrolled: \(begin.deviceName) → \(record.assignedIP)\(record.admin ? " (admin)" : ""), mesh endpoint \(endpoint)")
+        // Best-effort, and after the success line on purpose. A keeper built
+        // before this frame existed has already closed its side, so the send
+        // fails — and a pairing that fully succeeded must not come out of the
+        // log as nothing but an error. The peer is installed and the record is
+        // admitted; there is nothing here to roll back.
+        do {
+            try await stream.send(EnrollConfirmed(applyPending: applyPending))
+        } catch {
+            Log.error("device enrolled, but \(begin.deviceName) was never told: \(error). It will report the pairing as failed; re-pair to settle it.")
+        }
         stream.finishSending()
     }
 
@@ -235,7 +287,14 @@ public struct EnrollmentService: Sendable {
                 appCertDER: Data(serializer.serializedBytes),
                 caCertDER: try ca.certificateDER()
             ))
+            // The same silence the device half had, and the same fix. This one
+            // costs far less — the app holds a valid certificate the moment the
+            // grant lands, and the verdict stays parked for its hold window, so
+            // the app's next knock collects it. That is why this half needs no
+            // confirming frame: it converges on a re-knock, and the device half
+            // could not, because its authorization is single-use and burned.
             guard let completeRaw = try await iterator.next(), completeRaw.type == .enrollComplete else {
+                Log.error("app enrollment unconfirmed for \(begin.bundleID): the stream closed before EnrollComplete. The grant stands and the verdict stays parked — the app collects it on its next knock.")
                 stream.cancel()
                 return
             }
@@ -415,24 +474,38 @@ public actor DeviceRegistry {
         }
     }
 
-    public func enroll(name: String, devicePubX963: Data, wgPub: Data) throws -> Device {
-        // The Secure Enclave key IS the device: a re-pair arrives with the
-        // same device key and a fresh wg key, and keeps its identity —
-        // id, address, and the admin grant. (The wg key can never match
-        // across scans; it is minted per ceremony and never persisted.)
+    /// Reserves the device's identity — id, address, admin grant, name — and
+    /// deliberately does NOT record its mesh key. The grant carries the address,
+    /// so this has to run before the certificate is issued; the key is admitted
+    /// later, beside the peer block, by `admit`.
+    ///
+    /// The split is the point. This used to write the key here too, which put
+    /// the registry and the wg conf on opposite sides of the confirmation: the
+    /// key landed before the grant was even sent, the peer block only after
+    /// `EnrollComplete`. An abandoned re-pair therefore left the two disagreeing
+    /// **by design**, and any check comparing them would accuse a rig whose mesh
+    /// was carrying traffic. One decision writes both now.
+    public func reserve(name: String, devicePubX963: Data) throws -> Device {
+        // The Secure Enclave key IS the device: a re-pair arrives with the same
+        // device key and keeps its identity — id, address, and the admin grant.
         if let existing = devices.firstIndex(where: { $0.devicePubX963 == devicePubX963 }) {
             devices[existing].name = name
-            devices[existing].wgPub = wgPub
             persist()
             return devices[existing]
         }
-        let host = 2 + devices.count
+        // Monotonic, not `2 + count`. A count re-issues an address as soon as
+        // anything removes a record, and the /32 it hands out could be one a
+        // stale peer block still holds under a different key — breaking the
+        // invariant `addPeer` exists to protect, at the one place `addPeer`
+        // cannot see it. Nothing removes records yet; this is why it stays safe
+        // when something does.
+        let taken = devices.compactMap { Int($0.assignedIP.split(separator: ".").last ?? "") }
         let device = Device(
             id: UUID(),
             name: name,
             devicePubX963: devicePubX963,
-            wgPub: wgPub,
-            assignedIP: "10.86.0.\(host)",
+            wgPub: Data(),
+            assignedIP: "10.86.0.\((taken.max() ?? 1) + 1)",
             admin: devices.isEmpty,
             active: false,
             enrolledAt: Date()
@@ -442,8 +515,12 @@ public actor DeviceRegistry {
         return device
     }
 
-    public func activate(_ id: UUID) {
+    /// Admits the device: its mesh key and its active flag, in one write, once
+    /// the peer block naming that key is on disk. Before this the record is a
+    /// reservation — it holds an address and a certificate, and it has no road.
+    public func admit(_ id: UUID, wgPub: Data) {
         if let index = devices.firstIndex(where: { $0.id == id }) {
+            devices[index].wgPub = wgPub
             devices[index].active = true
             persist()
         }
@@ -483,6 +560,18 @@ public actor WireGuardHost {
     private nonisolated let endpointResolver: @Sendable () throws -> String
 
     private let confURL: URL
+
+    /// How the operator loads a conf this actor has just written.
+    ///
+    /// `;`, not `&&`. `wg-quick down` exits non-zero on this machine even when
+    /// it tears the interface down correctly, so `&&` short-circuits and `up`
+    /// never runs — which happened twice on camera, leaving the mesh down in the
+    /// middle of a ceremony. It is a constant rather than a literal inside the
+    /// log call so a test can hold it to that, the way `HostCheck`'s remediation
+    /// strings are held: the last wrong command in this file survived four days
+    /// because nothing could see it.
+    public static let applyCommand =
+        "sudo /opt/homebrew/bin/wg-quick down reach0; sudo /opt/homebrew/bin/wg-quick up reach0"
 
     public nonisolated func currentEndpoint() throws -> String {
         try endpointResolver()
@@ -536,10 +625,15 @@ public actor WireGuardHost {
         try self.init(keysDirectory: keysDirectory, confPath: confPath, endpoint: { endpoint })
     }
 
-    /// Installs the peer: idempotent when the key is already present, and
-    /// a re-paired device's fresh key REPLACES the stale block holding its
-    /// address (two peers must never claim one /32). Returns whether the
-    /// config changed (the operator then applies it).
+    /// Installs the peer: idempotent when this key already holds this address,
+    /// and otherwise REPLACES any block claiming either the address or the key.
+    /// Returns whether the config changed (the operator then applies it).
+    ///
+    /// Since the phone keeps its mesh key, the idempotent branch is the one a
+    /// re-pair takes: nothing is written, nothing is evicted, and no sudo is
+    /// needed before the mesh carries traffic again. The eviction branch is
+    /// still here and still enforces that two peers never claim one /32 — it is
+    /// now reached by a first pairing, or by a device whose address changed.
     @discardableResult
     public func addPeer(publicKey: Data, allowedIP: String) throws -> Bool {
         let base64 = publicKey.base64EncodedString()
@@ -560,10 +654,22 @@ public actor WireGuardHost {
         } else {
             text = ""
         }
-        guard !text.contains(base64) else { return false }
         var chunks = text.components(separatedBy: "[Peer]")
         let head = chunks.removeFirst()
-        let kept = chunks.filter { !$0.contains("AllowedIPs = \(allowedIP)/32") }
+        // Already right: this key, under this address. Checking the pair rather
+        // than the key alone matters now that the key persists — a device whose
+        // address changed (a re-minted state directory reissues from
+        // 10.86.0.2) brings back a key the file already names, and answering
+        // "nothing to do" would leave it with no road at all.
+        if chunks.contains(where: { $0.contains(base64) && $0.contains("AllowedIPs = \(allowedIP)/32") }) {
+            return false
+        }
+        // Evict on EITHER match: the address, because two peers must never
+        // claim one /32; the key, because wg refuses a conf naming one public
+        // key twice, so a key that moved address has to lose its old block.
+        let kept = chunks.filter {
+            !$0.contains("AllowedIPs = \(allowedIP)/32") && !$0.contains(base64)
+        }
         var out = head + kept.map { "[Peer]" + $0 }.joined()
         if !out.hasSuffix("\n") { out += "\n" }
         out += """
@@ -575,7 +681,7 @@ public actor WireGuardHost {
 
         """
         try out.write(to: confURL, atomically: true, encoding: .utf8)
-        Log.info("wg peer installed — apply with: sudo /opt/homebrew/bin/wg-quick down reach0 && sudo /opt/homebrew/bin/wg-quick up reach0")
+        Log.info("wg peer installed — apply with: \(Self.applyCommand)")
         return true
     }
 }
