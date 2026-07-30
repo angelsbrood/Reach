@@ -146,6 +146,14 @@ private func roundTrip<F: WireFrame>(_ frame: F) throws -> F {
             )
         )
         #expect(try roundTrip(grant) == grant)
+
+        // The frame that ends the ceremony, and the one the keeper waits for
+        // before it believes anything. Both values matter on the wire: false is
+        // the ordinary re-pair, where the conf already named this key.
+        for applyPending in [true, false] {
+            let confirmed = EnrollConfirmed(applyPending: applyPending)
+            #expect(try roundTrip(confirmed) == confirmed)
+        }
     }
 
     @Test func appEnrollFramesRoundTrip() throws {

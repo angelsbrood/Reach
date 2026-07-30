@@ -339,6 +339,25 @@ public struct EnrollComplete: WireFrame, Equatable {
     }
 }
 
+/// The daemon's answer to `EnrollComplete`, and the reason the client's success
+/// condition is now the same event as the daemon's: the peer block naming this
+/// device's key is on disk.
+///
+/// It does not claim the running interface carries it. `addPeer` writes the file
+/// and never invokes `wg` — applying is the operator's one visible sudo, and the
+/// daemon cannot see the interface. `applyPending` is the honest half of that:
+/// false when the conf already named this key, which is what a re-pair hits now
+/// that the phone keeps its mesh key, and true when a block was written and the
+/// host still has to load it.
+public struct EnrollConfirmed: WireFrame, Equatable {
+    public static let frameType = FrameType.enrollConfirmed
+    public var applyPending: Bool
+
+    public init(applyPending: Bool) {
+        self.applyPending = applyPending
+    }
+}
+
 // MARK: - App enrollment (the grant sheet's wire half)
 
 /// An app asking to use the cluster. No token: authorization is a human

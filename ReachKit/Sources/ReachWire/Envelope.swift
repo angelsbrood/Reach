@@ -29,11 +29,18 @@ public enum FrameType: UInt8, Codable, Sendable, CaseIterable {
     case enrollCertRequest = 32
     case enrollGrant = 33
     case enrollComplete = 34
+    case enrollConfirmed = 35
 
     // App enrollment (same channel; authorized by a grant ruling, not a token).
-    case appEnrollBegin = 35
-    case appEnrollCertRequest = 36
-    case appEnrollGrant = 37
+    // Moved off 35–37 when the device ceremony grew its sixth frame: the bands
+    // are documented as growable without renumbering their neighbours, and the
+    // device band was flush against this one, so the claim was true only until
+    // it was tested. Renumbering costs nothing — the raw values are read in
+    // exactly two places, both in this file, and nothing on disk carries a
+    // type byte.
+    case appEnrollBegin = 40
+    case appEnrollCertRequest = 41
+    case appEnrollGrant = 42
 }
 
 /// A frame that can ride the wire. Bodies are JSON for v0; the envelope is
