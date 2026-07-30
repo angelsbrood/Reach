@@ -6,7 +6,7 @@ struct CeremonyView: View {
         case idle
         case scanning
         case enrolling
-        case paired(cluster: String, meshIP: String)
+        case paired(cluster: String, meshIP: String, applyPending: Bool)
         case failed(String)
     }
 
@@ -36,13 +36,26 @@ struct CeremonyView: View {
                     ProgressView()
                     Text("Enrolling — issuing your certificate, joining the mesh…")
                 }
-            case .paired(let cluster, let meshIP):
+            case .paired(let cluster, let meshIP, let applyPending):
                 Label("Paired with \(cluster)", systemImage: "checkmark.seal.fill")
                     .foregroundStyle(.green)
                     .font(.title3)
                 Text("Device certificate in the Secure Enclave. Mesh address \(meshIP).")
                     .font(.callout)
                     .foregroundStyle(.secondary)
+                if applyPending {
+                    // The host writes the peer block; loading it is the
+                    // operator's one visible sudo, and the daemon cannot see the
+                    // interface to know whether it happened. Saying "paired"
+                    // without saying this is how a phone leaves the room
+                    // believing in a mesh that is not carrying anything yet.
+                    Label(
+                        "The host has your key but has not loaded it yet — it needs one wg-quick down/up before the mesh carries anything.",
+                        systemImage: "exclamationmark.triangle"
+                    )
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+                }
             case .failed(let message):
                 Label(message, systemImage: "xmark.octagon")
                     .foregroundStyle(.red)
@@ -74,7 +87,11 @@ struct CeremonyView: View {
                 return
             }
             tunnel.start()
-            phase = .paired(cluster: outcome.clusterName, meshIP: outcome.assignedIP)
+            phase = .paired(
+                cluster: outcome.clusterName,
+                meshIP: outcome.assignedIP,
+                applyPending: outcome.applyPending
+            )
         } catch {
             phase = .failed(error.localizedDescription)
         }

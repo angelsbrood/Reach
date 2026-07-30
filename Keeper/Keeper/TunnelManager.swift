@@ -59,6 +59,21 @@ final class TunnelManager {
             state = .noConfiguration
             return
         }
+        // Nothing to install when the installed configuration is already this
+        // one. That case is ordinary now rather than exotic: the phone keeps its
+        // mesh key, so a re-pair against the same host produces a byte-identical
+        // conf — and the first thing this function otherwise does is stop a
+        // running tunnel, which would tear the mesh down and rebuild it for no
+        // reason, mid-ceremony, on the one leg the demo is about.
+        if let manager,
+           let installed = (manager.protocolConfiguration as? NETunnelProviderProtocol)?
+               .providerConfiguration?["wgQuickConfig"] as? String,
+           installed == config {
+            state = .installed(manager.connection.status)
+            observeStatus()
+            append("tunnel already carries this configuration — nothing to install")
+            return
+        }
         do {
             let manager = self.manager ?? NETunnelProviderManager()
             if manager.connection.status == .connected || manager.connection.status == .connecting {

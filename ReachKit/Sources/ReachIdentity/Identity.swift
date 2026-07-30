@@ -119,4 +119,17 @@ public enum IdentityStore {
     public static func der(of certificate: SecCertificate) -> Data {
         SecCertificateCopyData(certificate) as Data
     }
+
+    /// The certificate's subject summary. For a Reach cluster CA that is the
+    /// cluster's name, because this project mints it that way
+    /// (`ClusterCA.create(commonName: config.clusterName)`) — the API itself
+    /// promises only "something human-readable about the subject", so this is a
+    /// fact about our own certificates rather than about X.509.
+    ///
+    /// It matters because it is the only place a consumer app can recover the
+    /// cluster's name after a relaunch: nothing else persists it, and the pinned
+    /// CA outlives app installs the way every keychain item does.
+    public static func commonName(of certificate: SecCertificate) -> String? {
+        SecCertificateCopySubjectSummary(certificate) as String?
+    }
 }

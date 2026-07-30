@@ -44,6 +44,24 @@ public enum ReachEnrollment {
         return await ReachIdentityRegistry.shared.registerFromKeychain(label: label) != nil
     }
 
+    /// The name of the cluster this label is registered against, or nil when it
+    /// is not registered.
+    ///
+    /// A consumer app knows the name on the path that enrolls — it passed it in —
+    /// and had no way to recover it on a relaunch, because `ensureRegistered`
+    /// answers only yes or no and nothing persists the name beside the identity.
+    /// So the sample app rendered a placeholder, and its header read "Paired with
+    /// enrolled". The pinned CA already carries the answer in its subject, which
+    /// is authoritative rather than remembered, and survives an app reinstall the
+    /// way every keychain item does.
+    public static func registeredClusterName(label: String) async -> String? {
+        var material = await ReachIdentityRegistry.shared.material(for: label)
+        if material == nil {
+            material = await ReachIdentityRegistry.shared.registerFromKeychain(label: label)
+        }
+        return material.flatMap { IdentityStore.commonName(of: $0.caCertificate) }
+    }
+
     /// Runs the ceremony against a discovered cluster and registers the
     /// granted identity under `label`. Suspends for as long as the request
     /// stays parked — surface that state in UI ("asking your keeper…").
@@ -157,6 +175,11 @@ public enum ReachEnrollment {
         )
         try KeychainIdentity.storeCertificate(der: grant.caCertDER, label: identityLabel + ".ca")
         try await stream.send(EnrollComplete(ok: true))
+        // Same half-close as the device ceremony: `defer` cancels below, and a
+        // reset where a FIN belongs can take this frame with it. Here it only
+        // costs the desk a held verdict it would expire anyway — the app keeps
+        // a valid certificate either way — but the fix is the same one line.
+        stream.finishSending()
 
         let material = ReachIdentityRegistry.Material(
             identity: identity,
