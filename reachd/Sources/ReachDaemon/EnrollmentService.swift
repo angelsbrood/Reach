@@ -74,6 +74,31 @@ public struct EnrollmentService: Sendable {
             case .broke(let error): "the stream broke before EnrollComplete: \(error)"
             }
         }
+
+        /// Whether the **app** half recovers from this ending unaided. Two of
+        /// the three do: the desk holds the ruled verdict and the app's next
+        /// knock collects it.
+        ///
+        /// That is not the exceptional case — on a one-phone rig it is the
+        /// only case. The operator has to leave the asking app to rule the
+        /// sheet, iOS suspends it there, and so the app is reliably gone by
+        /// the time the ruling lands and the certificate is sent. Measured at
+        /// five of five ceremonies on 2026-07-30, which is what retired the
+        /// reading that this was an anomaly worth an `error`.
+        ///
+        /// The third ending does not converge: an app that sends the wrong
+        /// frame will send it again. That one stays an error.
+        ///
+        /// ⚠️ The **device** half converges from none of these — its
+        /// authorization is a one-time token, already spent — so it does not
+        /// consult this and logs all three at `error`. The asymmetry is the
+        /// ceremony's own, and `docs/ceremony.md` states it.
+        var appHalfConverges: Bool {
+            switch self {
+            case .frame: false
+            case .closed, .broke: true
+            }
+        }
     }
 
     private static func confirmation(
@@ -346,7 +371,18 @@ public struct EnrollmentService: Sendable {
             // could not, because its authorization is single-use and burned.
             let confirmation = await Self.confirmation(from: &iterator)
             guard case .frame(let completeRaw) = confirmation, completeRaw.type == .enrollComplete else {
-                Log.error("app enrollment unconfirmed for \(begin.bundleID): \(confirmation.reason). The grant stands and the verdict stays parked — the app collects it on its next knock.")
+                // Two endings, because they are two different events. The app
+                // going away before it confirms is how a one-phone grant
+                // ordinarily ends — the ruling lands on a stream the operator
+                // suspended by walking to the keeper — and it heals itself on
+                // the next knock, so it is news, not a fault. Reading it at
+                // `error` for a whole recording session is what made the level
+                // wrong; saying less than this is what would make it useless.
+                if confirmation.appHalfConverges {
+                    Log.info("grant stands for \(begin.bundleID) — the app left before confirming; the verdict stays parked and its next knock collects it (\(confirmation.reason))")
+                } else {
+                    Log.error("app enrollment unconfirmed for \(begin.bundleID): \(confirmation.reason). The grant stands and the verdict stays parked — the app collects it on its next knock.")
+                }
                 stream.cancel()
                 return
             }

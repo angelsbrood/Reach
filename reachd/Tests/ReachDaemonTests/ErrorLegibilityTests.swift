@@ -102,6 +102,27 @@ import Testing
         ).reason.contains("Socket is not connected"))
     }
 
+    /// Which endings the app half survives on its own — because the log level
+    /// follows from that, and getting it backwards is what put `error` on
+    /// every successful ceremony for a whole recording session.
+    ///
+    /// A one-phone grant cannot end any other way: the operator must leave the
+    /// asking app to rule the sheet, iOS suspends it, and the ruling lands on a
+    /// stream nobody is on. The desk keeps the verdict; the next knock collects
+    /// it. An app that sent the wrong frame is the one that will not heal, so
+    /// that is the one that stays an error.
+    @Test func theAppHalfKnowsWhichEndingsItRecoversFrom() {
+        #expect(EnrollmentService.Confirmation.closed.appHalfConverges)
+        #expect(EnrollmentService.Confirmation.broke(
+            TransportError.connectionFailed("POSIXErrorCode(rawValue: 61): Connection refused")
+        ).appHalfConverges)
+        #expect(
+            EnrollmentService.Confirmation.frame(RawFrame(type: Ping.frameType, body: Data()))
+                .appHalfConverges == false,
+            "an app that sent the wrong frame will send it again — that one is not news, it is a fault"
+        )
+    }
+
     /// A refusal that travelled the wire keeps the daemon's own words. This
     /// is the half that matters at a venue: the Mac knows why it refused and
     /// the phone is the screen someone is looking at.
