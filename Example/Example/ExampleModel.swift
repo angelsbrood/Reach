@@ -140,7 +140,12 @@ final class ExampleModel {
             }
             // Prefer a discovered cluster (dialed as a Bonjour service,
             // resolved by the system) unless the operator typed a host.
-            let service = host == "127.0.0.1" ? clusters.first?.name : nil
+            // The wait belongs HERE and not only in the enrollment path: a
+            // granted app never enters that path, and dialling before
+            // discovery lands means dialling `host`, which is this phone.
+            let wantsDiscovered = host == "127.0.0.1"
+            if wantsDiscovered { await awaitDiscovery() }
+            let service = wantsDiscovered ? clusters.first?.name : nil
             let key = "\(service ?? host)|\(modelID)"
             if session == nil || sessionKey != key {
                 let configuration = ReachExecutor.Configuration(
@@ -189,11 +194,7 @@ final class ExampleModel {
             )
             return
         }
-        // Give discovery a breath — a send can land before the first
-        // browse result does.
-        for _ in 0..<20 where clusters.isEmpty {
-            try await Task.sleep(for: .milliseconds(250))
-        }
+        await awaitDiscovery()
         guard let cluster = clusters.first, let caHash = cluster.txt[Wire.txtCAHashKey] else {
             throw ExampleError.noGrantDoor
         }
@@ -204,6 +205,28 @@ final class ExampleModel {
             identityLabel: Self.identityLabel
         )
         identityState = .registered(cluster: cluster.name)
+    }
+
+    /// Give discovery a breath — a send can land before the first browse
+    /// result does.
+    ///
+    /// ⚠️ Both paths need this, and that is the bug it exists to close. It
+    /// used to live inline in `ensureIdentity()`, *below* the early return
+    /// for an already-registered app — so a granted app that sent before
+    /// Bonjour resolved skipped it entirely, found `clusters` empty, fell
+    /// back to `host` (`127.0.0.1`) and dialled the phone itself. It failed
+    /// with "no reachable cluster address (1 dialed)", and the count in that
+    /// sentence is what identified it. Reproduced 2026-07-31 with
+    /// `REACH_AUTOSEND=1`; a human tapping Send within a second of launch
+    /// does the same thing.
+    ///
+    /// Waiting on the dial path costs a granted app nothing once discovery
+    /// has landed — the loop exits on its first check.
+    private func awaitDiscovery() async {
+        for _ in 0..<20 {
+            if !clusters.isEmpty || Task.isCancelled { return }
+            try? await Task.sleep(for: .milliseconds(250))
+        }
     }
 
     enum ExampleError: LocalizedError {
