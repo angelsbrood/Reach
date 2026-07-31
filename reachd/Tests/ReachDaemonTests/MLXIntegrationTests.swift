@@ -6,7 +6,9 @@ import Testing
 @testable import ReachDaemon
 
 /// The whole spine with real weights: session → executor → wire → daemon →
-/// MLX → tokens back. Needs the model cache — **~4.3 GB for gemma-4-e2b**, six
+/// MLX → tokens back. Pinned to the SMALL model deliberately — this exercises
+/// the spine, not the weights, and the demo's 26B would make it a 26 GB load.
+/// Needs the model cache — **~4.3 GB for gemma-4-e2b**, six
 /// times the gemma-3 weights this used to name, so it is a deliberate download
 /// and not something to discover on a recording day; skipped where the GPU or
 /// cache is absent by failing prewarm.

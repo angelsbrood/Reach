@@ -4,6 +4,10 @@ import SwiftUI
 struct ContentView: View {
     @State private var model = ExampleModel()
 
+    /// Zero-height marker at the end of the transcript; the streaming view
+    /// scrolls to this rather than to the text, which has no stable id.
+    private static let streamTail = "stream-tail"
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
@@ -29,12 +33,35 @@ struct ContentView: View {
                     .buttonStyle(.borderedProminent)
                     .disabled(model.isStreaming)
             }
-            ScrollView {
-                Text(model.output.isEmpty ? " " : model.output)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .textSelection(.enabled)
+            // The stream follows itself down, so nobody touches the phone
+            // while it is being filmed.
+            //
+            // ⚠️ `.defaultScrollAnchor(.bottom, for: .sizeChanges)` was tried
+            // first and does NOT do this: it preserves whatever anchor the
+            // scroll view currently has, and the view starts at the top with
+            // empty content — so "preserve" means "stay at the top" and the
+            // text piles up out of frame. Measured on device, not reasoned
+            // about. Scrolling to an explicit tail marker is unconditional.
+            //
+            // The .onChange adds no invalidation the body did not already
+            // have: it renders `model.output`, so it re-evaluates per chunk
+            // regardless.
+            ScrollViewReader { proxy in
+                ScrollView {
+                    Text(model.output.isEmpty ? " " : model.output)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                    Color.clear
+                        .frame(height: 1)
+                        .id(Self.streamTail)
+                }
+                .frame(minHeight: 160)
+                .onChange(of: model.output) {
+                    // No animation: at ~100 tokens/second an animated scroll
+                    // per chunk fights itself and reads as stutter on camera.
+                    proxy.scrollTo(Self.streamTail, anchor: .bottom)
+                }
             }
-            .frame(minHeight: 160)
             Text(model.status)
                 .font(.footnote)
                 .foregroundStyle(.secondary)

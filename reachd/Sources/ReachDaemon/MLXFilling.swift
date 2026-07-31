@@ -21,13 +21,44 @@ public final class MLXFilling: SlotFilling {
     public init(modelID: String) {
         self.modelID = modelID
         switch modelID {
-        case "gemma-4-e2b", "default":
-            // Built by hand because the QAT weights are in no registry —
-            // neither factory names them. `extraEOSTokens` is not decoration:
-            // the registry's own gemma-4 entries carry it, and without it the
-            // stream does not stop at the turn boundary. What that looks like
-            // is the demo's essay followed by chatbot text, which is the one
-            // thing the closing frame cannot have.
+        // The model sets the demo's pacing, and it is the ONLY thing that
+        // does — measured 2026-07-31 across seven runs. The prompt's stated
+        // word count moves nothing (3000/5000/8000 all landed in the same
+        // band) and neither does the paragraph count. What changes is the
+        // model, and it moves both terms of the same fraction: a larger one
+        // writes more tokens AND emits them more slowly, so wall-clock swings
+        // far more than the parameter count suggests.
+        //
+        //   e2b-qat-4bit  ~2,500 tok  ~110 tok/s  19–27 s   (too tight)
+        //   e4b-it-4bit   ~2,700 tok   ~90 tok/s  ~30 s     ← the demo
+        //   26b-a4b-8bit  ~4,100 tok   ~54 tok/s  76 s      (dominates the film)
+        //
+        // 26B is the better sentence about the rig and the worse film: at 76 s
+        // the stream *is* the piece, and the one span that must run 1:1 — the
+        // hop — ends up buried in fast-forward. E4B is the compromise that is
+        // not a compromise.
+        case "gemma-4-e4b", "default":
+            // Straight off the registry: upstream names this one, so it
+            // carries its own `extraEOSTokens` and there is no hand-built
+            // configuration to drift.
+            configuration = LLMRegistry.gemma4_e4b_it_4bit
+            displayName = "Gemma 4 E4B (4-bit)"
+        case "gemma-4-26b":
+            // Kept because it is the strongest claim available if a take ever
+            // wants it: 26B is self-evidently not running on the handset.
+            // Hand-built — the MoE build is in no registry.
+            configuration = ModelConfiguration(
+                id: "mlx-community/gemma-4-26b-a4b-it-8bit",
+                extraEOSTokens: ["<turn|>"]
+            )
+            displayName = "Gemma 4 26B A4B (8-bit)"
+        case "gemma-4-e2b":
+            // The fast path, kept as the shoot-day fallback.
+            // ⚠️ Hand-built because the QAT weights are in no registry, and
+            // `extraEOSTokens` is not decoration: without it the stream does
+            // not stop at the turn boundary, and what that looks like is the
+            // essay followed by chatbot text — the one thing the closing
+            // frame cannot have.
             configuration = ModelConfiguration(
                 id: "mlx-community/gemma-4-E2B-it-qat-4bit",
                 extraEOSTokens: ["<turn|>"]

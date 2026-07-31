@@ -48,10 +48,10 @@ already joined, and works — for a phone on that same mesh.
 
 The door-walk has to land mid-stream, so the generation has to still be running
 when the demonstrator reaches it. Two things make that reliable rather than
-lucky: the sample app asks for **4096 response tokens** (the daemon's own
-fallback is 512, which is what once made long answers feel truncated), and the
-prompt asks for something with a natural length to it — a description, a short
-story — rather than a fact.
+lucky: the sample app raises the response-token ceiling well clear of the ask
+(the daemon's own fallback is 512, which is what once made long answers feel
+truncated), and the prompt asks for something with a natural length to it — a
+description rather than a fact — structured so the model keeps going.
 
 The prompt ships in the app, so nothing has to be typed or pasted while the rig
 is already moving. It is `ExampleModel.prompt`, and it reads:
@@ -60,16 +60,37 @@ is already moving. It is `ExampleModel.prompt`, and it reads:
 > order: the spring and the first cut of the channel; the steep young water; the
 > shallows and the pools; the meanders and the oxbows; the confluences where
 > other waters arrive; the slow lowland reach; the tidal reach where the current
-> first answers the sea; and the mouth. Give each reach two or three full
-> paragraphs, and for each one say what has changed about the water, the banks,
-> the light, and the life in it since the reach before. End with the last line of
+> first answers the sea; and the mouth. Give each reach four full paragraphs —
+> one each on what has changed about the water, the banks, the light, and the
+> life in it since the reach before. End with the last line of
 > the essay itself. Do not add a closing question, an offer to continue or expand,
 > a summary of what you have written, or any remark addressed to the reader.
 
-A short ask for a long answer, with no natural stopping point before the ceiling.
-The ceiling is what binds, not the number in the prompt: asking for much more
-than 3000 words buys nothing, and a 1500-word ask spent about half the budget and
-finished before the demonstrator reached the door.
+A short ask for a long answer. ⚠️ **What sets the pacing is the MODEL, and
+measured on 2026-07-31 it is the only thing that does.** Seven runs swept the
+stated word count from 3000 to 8000 and varied the paragraph count; output never
+left an 8,300-11,300 character band. The ask is not a lever. Temperature is unset,
+so the slot samples and runs vary on their own — an apparent effect smaller than
+that spread is noise, and reading one run per configuration as a result is how
+three false conclusions got drawn before the sweep was finished. **If a lever ever
+has to be proven, run each configuration more than once.**
+
+The model moves both terms of the same fraction — a larger one writes more tokens
+*and* emits them more slowly — so wall-clock swings further than parameter count
+suggests:
+
+| model | tokens | rate | stream |
+|---|---|---|---|
+| `gemma-4-e2b` (QAT 4-bit) | ~2,500 | ~110 tok/s | 19-27 s |
+| **`gemma-4-e4b` (4-bit)** | ~2,700 | ~90 tok/s | **30-35 s** |
+| `gemma-4-26b-a4b` (8-bit) | ~4,100 | ~54 tok/s | 76 s |
+
+E4B is what the demo serves. 26B makes the stronger claim about the rig — a model
+that size is self-evidently not running on the handset — but at 76 s the stream
+becomes the film, and the one span that must run 1:1, the hop, ends up buried in
+fast-forward. **Plan the walk for the short end of whichever band applies:** the
+length is not deterministic, so the drop move should land early rather than be
+timed against an expected duration.
 
 The closing sentences earn their place too: the generation's last line is the
 last thing on screen, and without them the model signs off — a question, an offer
@@ -77,13 +98,13 @@ to expand — so the final image belongs to a chatbot rather than to the river.
 Naming all four exits is what it takes; asking only for "no closing question"
 still buys an offer to continue.
 
-Measured on the gemma-4-e2b build (2026-07-31, `reachd selftest --mlx`): the
-**first** generation after a model swap reaches its first token in **1.9 s**, and
-every generation after it in **0.16 s** — the gap is a one-time kernel compile,
-not a property of the model. Prewarm plus a short generation is about **3 s** of
-wall clock from a cold process against a warm disk cache. Two consequences worth
-planning around: burn the first generation before anything depends on the timing,
-and do not expect prewarm to land in the same second the daemon starts.
+⚠️ **The first generation after the daemon starts is materially slower than the
+rest, and it is not a property of the model.** MLX memory-maps the weights, so
+`model prewarmed` fires in about two seconds while almost nothing is resident —
+the paging happens during the first generation instead. Measured on e4b: **52 s
+cold against 30-35 s warm**, and on the 26B build 76 s cold. Prewarm is therefore
+not the thing to budget for; **the first generation is**. Run one before anything
+depends on the timing.
 
 Rehearse the walk itself. The transition is not instant and is not meant to
 look instant: the stream visibly pauses for a few seconds while the client

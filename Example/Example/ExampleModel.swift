@@ -26,15 +26,27 @@ final class ExampleModel {
     var identityState: IdentityState = .missing
     var clusters: [DiscoveredCluster] = []
     var host = "127.0.0.1"
-    var modelID = "gemma-4-e2b"
+    var modelID = "gemma-4-e4b"
     /// The demo prompt, in the repo rather than in the operator's clipboard.
     ///
     /// The one-line default it replaced finished in a sentence, which left no
     /// generation running to survive the network switch — so every take meant
     /// pasting a long prompt in by hand at the moment the rig was already moving.
-    /// `docs/demo.md` records why this shape: a long output from a short ask, with
-    /// no natural stopping point before the 4096-token ceiling below. Asking for
-    /// much more than 3000 words buys nothing, because the ceiling binds first.
+    /// `docs/demo.md` records why this shape: a long output from a short ask,
+    /// with no natural stopping point early enough to strand the walk.
+    ///
+    /// ⚠️ The ceiling is NOT what governs the length any more. On gemma-3 it was:
+    /// ~3000 words filled 4096 tokens. Measured on gemma-4 (2026-07-31) the model
+    /// finished the whole essay in ~2,600 tokens at ~123 tok/s — twenty-one
+    /// seconds, which is not enough stream to walk out into.
+    ///
+    /// ⚠️ Two levers, and the one predicted to work did not. Going from two
+    /// paragraphs per reach to four was expected to give ~2.5x and **measured
+    /// 1.10x** — this model largely writes what it was going to write. The
+    /// stated word count is the other lever. Neither is obvious from reading;
+    /// both have to be measured on the model actually being served, which is
+    /// why the number lives here next to the reason rather than in someone's
+    /// memory of how the last model behaved.
     ///
     /// The closing sentences are the film's last frame. Without them the model
     /// signs off — a question, an offer to expand — and the final image belongs
@@ -45,9 +57,9 @@ final class ExampleModel {
         order: the spring and the first cut of the channel; the steep young water; \
         the shallows and the pools; the meanders and the oxbows; the confluences \
         where other waters arrive; the slow lowland reach; the tidal reach where \
-        the current first answers the sea; and the mouth. Give each reach two or \
-        three full paragraphs, and for each one say what has changed about the \
-        water, the banks, the light, and the life in it since the reach before. \
+        the current first answers the sea; and the mouth. Give each reach four \
+        full paragraphs — one each on what has changed about the water, the \
+        banks, the light, and the life in it since the reach before. \
         End with the last line of the essay itself. Do not add a closing \
         question, an offer to continue or expand, a summary of what you have \
         written, or any remark addressed to the reader.
@@ -145,10 +157,14 @@ final class ExampleModel {
             do {
                 // Demo pacing: long stories must stream long — the request
                 // carries the ceiling and the daemon honors it (its own
-                // fallback stays a bounded 512).
+                // fallback stays a bounded 512). The ceiling is deliberately
+                // NON-binding now. On gemma-3 it was the limit; measured on
+                // gemma-4 (2026-07-31) the model finishes the essay at ~2,600
+                // tokens and stops, so what governs the length is the ask, and
+                // the ceiling only has to stay out of its way.
                 let stream = session.streamResponse(
                     to: text,
-                    options: GenerationOptions(maximumResponseTokens: 4096)
+                    options: GenerationOptions(maximumResponseTokens: 16384)
                 )
                 for try await snapshot in stream {
                     self.output = snapshot.content
