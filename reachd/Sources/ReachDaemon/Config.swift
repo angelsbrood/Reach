@@ -37,7 +37,7 @@ public struct DaemonConfig: Codable, Sendable {
     public var clusterName: String = "Reach Cluster"
     public var port: UInt16 = 47337
     public var enrollPort: UInt16 = 47338
-    public var modelID: String = "gemma-3-1b"
+    public var modelID: String = "gemma-4-e2b"
     /// The mesh endpoint pinned at the ceremony (host:port for WireGuard).
     /// Absent means the daemon derives one; `MeshEndpoint.resolve` says so out
     /// loud, because a derived endpoint is LAN-only and the away leg needs a

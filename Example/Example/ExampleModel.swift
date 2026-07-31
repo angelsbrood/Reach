@@ -26,7 +26,7 @@ final class ExampleModel {
     var identityState: IdentityState = .missing
     var clusters: [DiscoveredCluster] = []
     var host = "127.0.0.1"
-    var modelID = "gemma-3-1b"
+    var modelID = "gemma-4-e2b"
     /// The demo prompt, in the repo rather than in the operator's clipboard.
     ///
     /// The one-line default it replaced finished in a sentence, which left no
@@ -35,6 +35,11 @@ final class ExampleModel {
     /// `docs/demo.md` records why this shape: a long output from a short ask, with
     /// no natural stopping point before the 4096-token ceiling below. Asking for
     /// much more than 3000 words buys nothing, because the ceiling binds first.
+    ///
+    /// The closing sentences are the film's last frame. Without them the model
+    /// signs off — a question, an offer to expand — and the final image belongs
+    /// to a chatbot rather than to the river. Naming all four exits is what it
+    /// takes; "no closing question" alone still buys an offer to continue.
     var prompt = """
         Write about 3000 words on the life of a river, reach by reach. Take it in \
         order: the spring and the first cut of the channel; the steep young water; \
@@ -42,7 +47,10 @@ final class ExampleModel {
         where other waters arrive; the slow lowland reach; the tidal reach where \
         the current first answers the sea; and the mouth. Give each reach two or \
         three full paragraphs, and for each one say what has changed about the \
-        water, the banks, the light, and the life in it since the reach before.
+        water, the banks, the light, and the life in it since the reach before. \
+        End with the last line of the essay itself. Do not add a closing \
+        question, an offer to continue or expand, a summary of what you have \
+        written, or any remark addressed to the reader.
         """
     var output = ""
     var status = ""

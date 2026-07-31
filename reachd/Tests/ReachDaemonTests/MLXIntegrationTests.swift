@@ -6,8 +6,10 @@ import Testing
 @testable import ReachDaemon
 
 /// The whole spine with real weights: session → executor → wire → daemon →
-/// MLX → tokens back. Needs the model cache (~0.7 GB, downloaded by the
-/// spikes); skipped where the GPU or cache is absent by failing prewarm.
+/// MLX → tokens back. Needs the model cache — **~4.3 GB for gemma-4-e2b**, six
+/// times the gemma-3 weights this used to name, so it is a deliberate download
+/// and not something to discover on a recording day; skipped where the GPU or
+/// cache is absent by failing prewarm.
 @Suite(.serialized) struct MLXIntegrationTests {
     @Test(
         .enabled(if: ProcessInfo.processInfo.environment["REACH_MLX_TESTS"] == "1",
@@ -15,7 +17,7 @@ import Testing
         .timeLimit(.minutes(5))
     )
     func realTokensStreamEndToEnd() async throws {
-        let filling = MLXFilling(modelID: "gemma-3-1b")
+        let filling = MLXFilling(modelID: "gemma-4-e2b")
         try await filling.prewarm()
 
         let ca = try ClusterCA.create(commonName: "Reach MLX CA")
@@ -31,7 +33,7 @@ import Testing
         var config = DaemonConfig()
         config.port = 47416
         config.clusterName = "mlx-spine"
-        config.modelID = "gemma-3-1b"
+        config.modelID = "gemma-4-e2b"
         let daemon = Daemon(
             config: config,
             filling: filling,
@@ -49,7 +51,7 @@ import Testing
             model: ReachLanguageModel(configuration: ReachExecutor.Configuration(
                 host: "127.0.0.1",
                 port: 47416,
-                modelID: "gemma-3-1b",
+                modelID: "gemma-4-e2b",
                 identityLabel: label,
                 connectTimeout: 45
             )),

@@ -62,12 +62,28 @@ is already moving. It is `ExampleModel.prompt`, and it reads:
 > other waters arrive; the slow lowland reach; the tidal reach where the current
 > first answers the sea; and the mouth. Give each reach two or three full
 > paragraphs, and for each one say what has changed about the water, the banks,
-> the light, and the life in it since the reach before.
+> the light, and the life in it since the reach before. End with the last line of
+> the essay itself. Do not add a closing question, an offer to continue or expand,
+> a summary of what you have written, or any remark addressed to the reader.
 
 A short ask for a long answer, with no natural stopping point before the ceiling.
 The ceiling is what binds, not the number in the prompt: asking for much more
 than 3000 words buys nothing, and a 1500-word ask spent about half the budget and
 finished before the demonstrator reached the door.
+
+The closing sentences earn their place too: the generation's last line is the
+last thing on screen, and without them the model signs off — a question, an offer
+to expand — so the final image belongs to a chatbot rather than to the river.
+Naming all four exits is what it takes; asking only for "no closing question"
+still buys an offer to continue.
+
+Measured on the gemma-4-e2b build (2026-07-31, `reachd selftest --mlx`): the
+**first** generation after a model swap reaches its first token in **1.9 s**, and
+every generation after it in **0.16 s** — the gap is a one-time kernel compile,
+not a property of the model. Prewarm plus a short generation is about **3 s** of
+wall clock from a cold process against a warm disk cache. Two consequences worth
+planning around: burn the first generation before anything depends on the timing,
+and do not expect prewarm to land in the same second the daemon starts.
 
 Rehearse the walk itself. The transition is not instant and is not meant to
 look instant: the stream visibly pauses for a few seconds while the client

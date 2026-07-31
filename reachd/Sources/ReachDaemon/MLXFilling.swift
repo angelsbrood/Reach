@@ -21,9 +21,18 @@ public final class MLXFilling: SlotFilling {
     public init(modelID: String) {
         self.modelID = modelID
         switch modelID {
-        case "gemma-3-1b", "default":
-            configuration = LLMRegistry.gemma3_1B_qat_4bit
-            displayName = "Gemma 3 1B (QAT 4-bit)"
+        case "gemma-4-e2b", "default":
+            // Built by hand because the QAT weights are in no registry —
+            // neither factory names them. `extraEOSTokens` is not decoration:
+            // the registry's own gemma-4 entries carry it, and without it the
+            // stream does not stop at the turn boundary. What that looks like
+            // is the demo's essay followed by chatbot text, which is the one
+            // thing the closing frame cannot have.
+            configuration = ModelConfiguration(
+                id: "mlx-community/gemma-4-E2B-it-qat-4bit",
+                extraEOSTokens: ["<turn|>"]
+            )
+            displayName = "Gemma 4 E2B (QAT 4-bit)"
         default:
             configuration = ModelConfiguration(id: modelID)
             displayName = modelID
@@ -53,7 +62,13 @@ public final class MLXFilling: SlotFilling {
                         case .user: .user(message.text)
                         }
                     }
-                    let input = try await context.processor.prepare(input: UserInput(chat: chat))
+                    // Gemma 4's thinking is configurable, and a thought block
+                    // rendered on camera is a killed take. The template kwarg
+                    // is the belt; the rehearsal is what proves the template
+                    // honours it, because nothing here can.
+                    let input = try await context.processor.prepare(
+                        input: UserInput(chat: chat, additionalContext: ["enable_thinking": false])
+                    )
                     var parameters = GenerateParameters(maxTokens: maxTokens)
                     if let temperature {
                         parameters.temperature = Float(temperature)

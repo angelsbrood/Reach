@@ -10,7 +10,13 @@ let package = Package(
     ],
     dependencies: [
         .package(path: "../ReachKit"),
-        .package(url: "https://github.com/ml-explore/mlx-swift-lm.git", from: "3.31.3"),
+        // Pinned to a revision, not a version: Gemma 4 landed on main after the
+        // last tag (3.31.4), so `from:` cannot reach it. The commit is the one
+        // the take was shot on — a filing artifact, so it names itself.
+        .package(
+            url: "https://github.com/ml-explore/mlx-swift-lm.git",
+            revision: "83f3ef6dc5bc24daeea33cfd9e18ab1383bb0bc8"
+        ),
         .package(url: "https://github.com/huggingface/swift-transformers.git", from: "1.3.0"),
         .package(url: "https://github.com/huggingface/swift-huggingface.git", from: "0.9.0"),
         .package(url: "https://github.com/apple/swift-certificates.git", from: "1.5.0"),

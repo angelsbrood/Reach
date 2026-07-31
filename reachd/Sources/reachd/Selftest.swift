@@ -29,7 +29,7 @@ struct Selftest: AsyncParsableCommand {
         let clientIdentity = try IdentityMaterializer.materialize(client, label: "reach-selftest-client")
         let caCert = try IdentityStore.certificate(fromDER: ca.certificateDER())
 
-        let filling: any SlotFilling = mlx ? MLXFilling(modelID: "gemma-3-1b") : SelftestFilling()
+        let filling: any SlotFilling = mlx ? MLXFilling(modelID: "gemma-4-e2b") : SelftestFilling()
         var config = DaemonConfig()
         config.port = port
         config.clusterName = "selftest"
