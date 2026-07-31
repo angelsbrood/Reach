@@ -93,13 +93,22 @@ import Testing
             .frame(RawFrame(type: Ping.frameType, body: Data())),
         ]
         for ending in endings {
-            #expect(ending.reason.contains(" "), "reads as a token, not a sentence: \(ending.reason)")
-            #expect(ending.reason.first?.isUppercase != true, "reads like a type name: \(ending.reason)")
-            #expect(ending.reason.contains("EnrollComplete"), "does not name the frame that is missing: \(ending.reason)")
+            let reason = ending.reason(waitingFor: "EnrollComplete")
+            #expect(reason.contains(" "), "reads as a token, not a sentence: \(reason)")
+            #expect(reason.first?.isUppercase != true, "reads like a type name: \(reason)")
+            #expect(reason.contains("EnrollComplete"), "does not name the frame that is missing: \(reason)")
+            // The caller names the frame, so the sentence has to actually use
+            // the one it was given — a hardcoded noun would pass every check
+            // above while telling the device half's operator about the wrong
+            // read.
+            #expect(
+                ending.reason(waitingFor: "EnrollCertRequest").contains("EnrollCertRequest"),
+                "the sentence ignores the frame the caller was waiting for"
+            )
         }
         #expect(EnrollmentService.Confirmation.broke(
             TransportError.connectionFailed("POSIXErrorCode(rawValue: 57): Socket is not connected")
-        ).reason.contains("Socket is not connected"))
+        ).reason(waitingFor: "EnrollComplete").contains("Socket is not connected"))
     }
 
     /// Which endings the app half survives on its own — because the log level

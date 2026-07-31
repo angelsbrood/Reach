@@ -59,58 +59,13 @@ public struct EnrollmentService: Sendable {
     /// grants lost the confirmation this way, and one of the two is the take
     /// that became the cut.
     ///
-    /// Not `private`, so a test can hold the wording to the standard the rest
-    /// of the error surface is held to.
-    enum Confirmation {
-        case frame(RawFrame)
-        case closed
-        case broke(any Error)
-
-        /// Why it never came, phrased to sit inside either half's sentence.
-        var reason: String {
-            switch self {
-            case .frame(let raw): "it sent \(raw.type) where EnrollComplete belongs"
-            case .closed: "the stream closed before EnrollComplete"
-            case .broke(let error): "the stream broke before EnrollComplete: \(error)"
-            }
-        }
-
-        /// Whether the **app** half recovers from this ending unaided. Two of
-        /// the three do: the desk holds the ruled verdict and the app's next
-        /// knock collects it.
-        ///
-        /// That is not the exceptional case — on a one-phone rig it is the
-        /// only case. The operator has to leave the asking app to rule the
-        /// sheet, iOS suspends it there, and so the app is reliably gone by
-        /// the time the ruling lands and the certificate is sent. Measured at
-        /// five of five ceremonies on 2026-07-30, which is what retired the
-        /// reading that this was an anomaly worth an `error`.
-        ///
-        /// The third ending does not converge: an app that sends the wrong
-        /// frame will send it again. That one stays an error.
-        ///
-        /// ⚠️ The **device** half converges from none of these — its
-        /// authorization is a one-time token, already spent — so it does not
-        /// consult this and logs all three at `error`. The asymmetry is the
-        /// ceremony's own, and `docs/ceremony.md` states it.
-        var appHalfConverges: Bool {
-            switch self {
-            case .frame: false
-            case .closed, .broke: true
-            }
-        }
-    }
-
-    private static func confirmation(
-        from iterator: inout AsyncThrowingStream<RawFrame, Error>.AsyncIterator
-    ) async -> Confirmation {
-        do {
-            guard let raw = try await iterator.next() else { return .closed }
-            return .frame(raw)
-        } catch {
-            return .broke(error)
-        }
-    }
+    /// The type moved to `ReachTransport.FrameEnding` when the same defect was
+    /// found in the keeper (7e): the shape belongs beside the stream, and the
+    /// keeper cannot import this module. The name stays because it is what the
+    /// ceremony calls it here — and because a `Confirmation` that had to be
+    /// spelled `FrameEnding` at every site would make two readings of one
+    /// event look like two events.
+    typealias Confirmation = FrameEnding
 
     /// Serves one enrollment stream to completion. The first frame decides
     /// which ceremony this is: a device (token-authorized) or an app
@@ -179,8 +134,25 @@ public struct EnrollmentService: Sendable {
         nonce.withUnsafeMutableBytes { _ = SecRandomCopyBytes(kSecRandomDefault, 32, $0.baseAddress!) }
         try await stream.send(EnrollChallenge(nonce: nonce))
 
-        guard let requestRaw = try await iterator.next(), requestRaw.type == .enrollCertRequest else {
-            try await stream.send(ErrorFrame(code: "enroll-sequence", message: "expected EnrollCertRequest"))
+        // The same three endings as the confirming read below, and this one
+        // answered two — worse, it said nothing at all about either. A stream
+        // that broke here threw past the guard entirely into `serve`'s catch,
+        // which prints `enrollment stream failed: <socket>`: a fault with no
+        // device in it and no mention that the token above is already spent.
+        // A stream that closed, or a frame of the wrong type, reached the
+        // guard and still left the Mac's terminal silent.
+        //
+        // The absence of `device enrolled:` is a signal only to someone who
+        // already knows to look for it. Say it instead — and say it here,
+        // where nothing has been minted yet, so the QR is the entire cost.
+        let requested = await FrameEnding.next(from: &iterator)
+        guard case .frame(let requestRaw) = requested, requestRaw.type == .enrollCertRequest else {
+            Log.error("enrollment abandoned by \(begin.deviceName) before the certificate request: \(requested.reason(waitingFor: "EnrollCertRequest")); nothing was issued and the QR is spent — run `reachd pair` for a fresh one")
+            // Worth answering only when something is still listening, exactly
+            // as below: a stream that closed or broke has no reader left.
+            if case .frame = requested {
+                try? await stream.send(ErrorFrame(code: "enroll-sequence", message: "expected EnrollCertRequest"))
+            }
             stream.cancel()
             return
         }
@@ -234,9 +206,9 @@ public struct EnrollmentService: Sendable {
         // phone that backgrounds or dies after the grant resets the connection
         // rather than closing it.
         let spent = "\(record.assignedIP) has no peer and the QR is spent — run `reachd pair` for a fresh one"
-        let confirmation = await Self.confirmation(from: &iterator)
+        let confirmation = await FrameEnding.next(from: &iterator)
         guard case .frame(let completeRaw) = confirmation, completeRaw.type == .enrollComplete else {
-            Log.error("enrollment abandoned by \(begin.deviceName) after the grant: \(confirmation.reason); \(spent)")
+            Log.error("enrollment abandoned by \(begin.deviceName) after the grant: \(confirmation.reason(waitingFor: "EnrollComplete")); \(spent)")
             // Worth answering only when something is still listening — a
             // stream that closed or broke has no reader on the other end.
             if case .frame = confirmation {
@@ -369,7 +341,7 @@ public struct EnrollmentService: Sendable {
             // the app's next knock collects it. That is why this half needs no
             // confirming frame: it converges on a re-knock, and the device half
             // could not, because its authorization is single-use and burned.
-            let confirmation = await Self.confirmation(from: &iterator)
+            let confirmation = await FrameEnding.next(from: &iterator)
             guard case .frame(let completeRaw) = confirmation, completeRaw.type == .enrollComplete else {
                 // Two endings, because they are two different events. The app
                 // going away before it confirms is how a one-phone grant
@@ -379,9 +351,9 @@ public struct EnrollmentService: Sendable {
                 // `error` for a whole recording session is what made the level
                 // wrong; saying less than this is what would make it useless.
                 if confirmation.appHalfConverges {
-                    Log.info("grant stands for \(begin.bundleID) — the app left before confirming; the verdict stays parked and its next knock collects it (\(confirmation.reason))")
+                    Log.info("grant stands for \(begin.bundleID) — the app left before confirming; the verdict stays parked and its next knock collects it (\(confirmation.reason(waitingFor: "EnrollComplete")))")
                 } else {
-                    Log.error("app enrollment unconfirmed for \(begin.bundleID): \(confirmation.reason). The grant stands and the verdict stays parked — the app collects it on its next knock.")
+                    Log.error("app enrollment unconfirmed for \(begin.bundleID): \(confirmation.reason(waitingFor: "EnrollComplete")). The grant stands and the verdict stays parked — the app collects it on its next knock.")
                 }
                 stream.cancel()
                 return
@@ -410,6 +382,50 @@ public struct EnrollmentService: Sendable {
             return "\(device.name) · \(remote)"
         }
         return remote
+    }
+}
+
+/// What the ceremony makes of an ending. The classification is the transport's
+/// (`FrameEnding`); the words are this file's, because the daemon is the half
+/// that has to say what was lost and what it costs.
+extension FrameEnding {
+    /// Why the frame never came, phrased to sit inside a caller's sentence.
+    ///
+    /// The caller names the frame it was waiting for, because the reads do not
+    /// end alike: losing `EnrollComplete` costs an acknowledgement the grant has
+    /// already outlived, and losing `EnrollCertRequest` costs a QR that is
+    /// already spent. Neither can borrow the other's noun and stay true.
+    func reason(waitingFor frame: String) -> String {
+        switch self {
+        case .frame(let raw): "it sent \(raw.type) where \(frame) belongs"
+        case .closed: "the stream closed before \(frame)"
+        case .broke(let error): "the stream broke before \(frame): \(error)"
+        }
+    }
+
+    /// Whether the **app** half recovers from this ending unaided. Two of
+    /// the three do: the desk holds the ruled verdict and the app's next
+    /// knock collects it.
+    ///
+    /// That is not the exceptional case — on a one-phone rig it is the
+    /// only case. The operator has to leave the asking app to rule the
+    /// sheet, iOS suspends it there, and so the app is reliably gone by
+    /// the time the ruling lands and the certificate is sent. Measured at
+    /// five of five ceremonies on 2026-07-30, which is what retired the
+    /// reading that this was an anomaly worth an `error`.
+    ///
+    /// The third ending does not converge: an app that sends the wrong
+    /// frame will send it again. That one stays an error.
+    ///
+    /// ⚠️ The **device** half converges from none of these — its
+    /// authorization is a one-time token, already spent — so it does not
+    /// consult this and logs all three at `error`. The asymmetry is the
+    /// ceremony's own, and `docs/ceremony.md` states it.
+    var appHalfConverges: Bool {
+        switch self {
+        case .frame: false
+        case .closed, .broke: true
+        }
     }
 }
 

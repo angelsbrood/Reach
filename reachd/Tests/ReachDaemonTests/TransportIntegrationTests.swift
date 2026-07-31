@@ -243,7 +243,7 @@ enum IdentityTrash {
             identity: fixture.clientIdentity,
             serverTrustRoots: [fixture.caCert]
         )
-        let ack: HelloAck = try await withTimeout(60) {
+        let (ack, stream): (HelloAck, ReachTransport.QUICStream) = try await withTimeout(60) {
             let dialer = QUICDialer(
                 endpoint: .hostPort(host: "127.0.0.1", port: 47411),
                 parameters: .reachQUIC(options: clientOptions)
@@ -251,12 +251,68 @@ enum IdentityTrash {
             let stream = try await dialer.openStream(timeout: 45)
             try await stream.send(Hello(client: "loopback-test"))
             for try await raw in stream.frames {
-                return try raw.decode(HelloAck.self)
+                return (try raw.decode(HelloAck.self), stream)
             }
             throw TransportError.streamClosed
         }
         #expect(ack.cluster == "loopback")
         #expect(ack.version == Wire.version)
+
+        // A read that is waiting when this side cancels its own stream. Folded
+        // into this fixture on purpose — `makeFixture` materializes two
+        // identities through `SecPKCS12Import`, and a fixture per assertion is
+        // what starves the cooperative pool.
+        //
+        // Both halves of the enrollment ceremony do exactly this: they arm a
+        // deadline task that calls `cancel()` on the stream they are parked on,
+        // and the keeper's comment claims the cancel "lands as a clean nil
+        // below." **Measured 2026-07-30 at 12 of 12: it does.** The race that
+        // reading predicts is real on paper — `connection.cancel()` could
+        // complete the parked receive with an error (`QUIC.swift:122` →
+        // `finish(throwing:)`) before the state handler reaches `.cancelled`
+        // (`QUIC.swift:50` → `finish()`), and `AsyncThrowingStream.finish` is
+        // first-caller-wins — but on this transport the state handler wins
+        // every time. Written down because the opposite was assumed first, and
+        // the fix was very nearly justified by it.
+        //
+        // So the ending that bypasses a `guard`'s `else` is NOT a timeout. It
+        // is a peer that resets: `.failed` → `finish(throwing:)`, which is the
+        // `POSIXErrorCode 57` the July cut's own daemon log carries. That is
+        // hardware evidence, not fixture evidence, and it is the whole reason
+        // `FrameEnding.next` may not throw.
+        //
+        // What is asserted here is the invariant rather than the winner — the
+        // winner is a race this machine happens to settle one way, and pinning
+        // it would pin the settlement rather than the property. A cancelled
+        // read TERMINATES. If it ever stopped finishing the continuation, the
+        // keeper's ten-second deadline would never return and the phone would
+        // sit on "Enrolling…" for as long as anyone waited, which no other test
+        // in this tree would notice.
+        let parked = Task { () -> FrameEnding in
+            var iterator = stream.frames.makeAsyncIterator()
+            return await FrameEnding.next(from: &iterator)
+        }
+        // The read has to be waiting before the cancel, or this measures the
+        // wrong thing: a cancel that lands first finishes the stream and the
+        // read never parks at all.
+        try? await Task.sleep(for: .milliseconds(250))
+        let cancelledAt = ContinuousClock.now
+        stream.cancel()
+        // Only so a regression fails instead of hanging the suite. The bound
+        // being asserted is the elapsed time, not this.
+        let watchdog = Task { try? await Task.sleep(for: .seconds(5)); parked.cancel() }
+        defer { watchdog.cancel() }
+        let ending = await parked.value
+        #expect(
+            ContinuousClock.now - cancelledAt < .seconds(5),
+            "a cancelled read did not terminate — the keeper's deadline would wait forever"
+        )
+        // Not asserted, only named: `.frame` would mean the cancel did not end
+        // the read at all, which the elapsed bound above cannot catch on its
+        // own — a frame that was already buffered returns instantly.
+        if case .frame = ending {
+            Issue.record("a cancelled read returned a frame: the stream outlived its own cancel")
+        }
     }
 
     @Test func certlessClientNeverRoundTrips() async throws {

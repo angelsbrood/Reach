@@ -115,6 +115,22 @@ enum EnrollmentClient {
         throw lastError
     }
 
+    /// What the phone says when the confirming frame never came — one sentence
+    /// for two endings, because they are one situation: the grant may or may
+    /// not have been acted on, and pairing again settles it either way.
+    ///
+    /// A break additionally carries the transport's own words. They read oddly
+    /// nested inside a sentence that has just said the ceremony got this far —
+    /// the transport only knows it lost a connection — but they are the part
+    /// that names *what happened*, and dropping them would leave a person with
+    /// a situation and no fault. `ErrorLegibilityTests` holds the daemon's
+    /// equivalent to the same rule.
+    private static func unconfirmed(_ ending: FrameEnding) -> String {
+        let sentence = "the cluster never confirmed a road for this device. It may have admitted the peer without saying so, so pair again to settle it — this device keeps its identity and address."
+        guard case .broke(let error) = ending else { return sentence }
+        return "\(sentence) (the connection ended: \(error))"
+    }
+
     private static func run(
         stream: ReachTransport.QUICStream,
         payload: QRPayload,
@@ -179,10 +195,24 @@ enum EnrollmentClient {
             stream.cancel()
         }
         defer { deadline.cancel() }
-        guard let confirmRaw = try await frames.next() else {
-            throw EnrollError.sequence(
-                "the cluster never confirmed a road for this device. It may have admitted the peer without saying so, so pair again to settle it — this device keeps its identity and address."
-            )
+        // Read through `FrameEnding`, because there are three endings here and
+        // a `guard let … = try await frames.next() else` answers two. A stream
+        // that closed cleanly returns nil and lands in the `else`; a stream the
+        // cluster RESET throws, and **a throw cannot reach a `guard`'s
+        // `else`** — it goes to `CeremonyView`'s catch, which puts
+        // `error.localizedDescription` on the screen. So the sentence below,
+        // written for exactly this ending, was unreachable in exactly the case
+        // it describes, and what the phone showed instead was *"could not open
+        // a connection to the cluster: POSIXErrorCode(rawValue: 57)"* — false,
+        // as well as raw: the connection opened, the certificate was issued and
+        // is installed above, and only the acknowledgement is outstanding.
+        //
+        // The daemon carried this same defect on both halves of the ceremony
+        // and closed it in 7d/7f; this is the third site, found by grepping for
+        // the shape afterwards. It is the only one whose text a person reads.
+        let ending = await FrameEnding.next(from: &frames)
+        guard case .frame(let confirmRaw) = ending else {
+            throw EnrollError.sequence(Self.unconfirmed(ending))
         }
         if confirmRaw.type == .errorFrame {
             let error = try confirmRaw.decode(ErrorFrame.self)
