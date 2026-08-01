@@ -45,8 +45,10 @@ QUIC/mTLS → a `LanguageModelSession` streaming from the host); the pairing
 ceremony in both halves — a device's identity and its mesh membership from
 one QR, then a per-app grant a human rules on the keeper; and the away
 path, where a session survives leaving the network it began on and falls to
-the mesh without the app having been configured with either address. What
-remains is the demo itself, recorded behind a public uplink.
+the mesh without the app having been configured with either address.
+The demo is recorded — one unbroken take, July 2026 at Moon, on internal
+networks: https://youtu.be/FmhNJYJ_o0A. What remains is the same take
+behind a public uplink.
 
 ## License
 

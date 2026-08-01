@@ -4,6 +4,9 @@ This is the demo Reach is built to make true, and the definition of done for
 the pre-filing package. Everything in the repository exists to hold these
 ninety seconds up, and nothing in it reaches past them.
 
+Watch: https://youtu.be/FmhNJYJ_o0A (July 2026, at Moon, on internal
+networks; the public-uplink cut is to follow.)
+
 ## The beat sheet
 
 > The daemon is running and `reachd pair` is on screen — scan it with the
