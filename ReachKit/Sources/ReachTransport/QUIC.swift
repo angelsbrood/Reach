@@ -106,11 +106,11 @@ public final class QUICStream: Sendable {
         continuation: AsyncThrowingStream<RawFrame, Error>.Continuation,
         reassembler: FrameReassembler = FrameReassembler()
     ) {
-        var reassembler = reassembler
         connection.receive(minimumIncompleteLength: 1, maximumLength: 128 * 1024) { data, _, isComplete, error in
+            var nextReassembler = reassembler
             if let data, !data.isEmpty {
                 do {
-                    for frame in try reassembler.feed(data) {
+                    for frame in try nextReassembler.feed(data) {
                         continuation.yield(frame)
                     }
                 } catch {
@@ -127,7 +127,7 @@ public final class QUICStream: Sendable {
                 continuation.finish()
                 return
             }
-            pump(connection: connection, continuation: continuation, reassembler: reassembler)
+            pump(connection: connection, continuation: continuation, reassembler: nextReassembler)
         }
     }
 

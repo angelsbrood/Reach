@@ -39,7 +39,7 @@ fork's commit says why each exists.
 
 ## Status
 
-Pre-filing build, and further along than the spine it started as. Three
+Public prototype, and further along than the spine it started as. Three
 things have each been accepted on hardware: the LAN profile (discovery →
 QUIC/mTLS → a `LanguageModelSession` streaming from the host); the pairing
 ceremony in both halves — a device's identity and its mesh membership from
@@ -49,6 +49,15 @@ the mesh without the app having been configured with either address.
 The demo is recorded — one unbroken take, July 2026 at Moon, on internal
 networks: https://youtu.be/FmhNJYJ_o0A. What remains is the same take
 behind a public uplink.
+
+## Collaboration
+
+Reach is designed and directed by Cassie Spiral at Moon and developed with
+Claude Code across implementation, tests, and documentation. Claude
+Code-assisted commits preserve the model and version, a session link, and a
+co-author trailer in the public history.
+
+Identity designed by [Vanessa Spiral](https://vanessaspiral.com).
 
 ## License
 
