@@ -53,9 +53,9 @@ behind a public uplink.
 ## Collaboration
 
 Reach is designed and directed by Cassie Spiral at Moon and developed with
-Codex and Claude Code across implementation, tests, and documentation. Claude
-Code-assisted commits preserve the model and version, a session link, and a
-co-author trailer in the public history.
+Codex and Claude Code across implementation, tests, and documentation.
+Assisted commits identify the tool and model and retain a co-author trailer;
+Claude Code commits also include a session link.
 
 Identity designed by [Vanessa Spiral](https://vanessaspiral.com).
 
