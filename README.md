@@ -2,7 +2,7 @@
 
 An open serving link between personal devices and self-hosted AI clusters.
 
-Reach is the Foundation Models framework talking to itself across a trust
+[Reach](https://cassiespiral.com/work/reach) is the Foundation Models framework talking to itself across a trust
 boundary you own: a serving daemon (`reachd`) fronts self-hosted open weights
 with the framework's native semantics; a conforming provider package
 (`ReachKit`) lets any iOS, macOS, or visionOS app adopt that cluster as its
