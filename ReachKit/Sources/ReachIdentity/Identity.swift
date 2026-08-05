@@ -74,8 +74,10 @@ public enum IdentityStore {
         // never once recovered: when this fails it fails identically on the
         // same bytes, so a retry buys nothing but three times the work at the
         // worst moment. What IS known about the failure is recorded on
-        // `KeychainLock` and in PLAN.md; it is not concurrency and it is not
-        // the archive being malformed.
+        // `KeychainLock` above and on `IdentityMaterializer.viaPKCS12`, which
+        // keeps the archive it could not import and prints where — the failing
+        // bytes are the evidence, and they read back fine under LibreSSL. It is
+        // not concurrency and it is not the archive being malformed.
         try importOnce(data, passphrase: passphrase)
     }
 
