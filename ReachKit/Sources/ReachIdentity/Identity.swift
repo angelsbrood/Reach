@@ -130,7 +130,7 @@ public enum IdentityStore {
     }
 
     /// The certificate's subject summary. For a Reach cluster CA that is the
-    /// cluster's name, because this project mints it that way
+    /// cluster's name **as of the day the CA was minted**
     /// (`ClusterCA.create(commonName: config.clusterName)`) — the API itself
     /// promises only "something human-readable about the subject", so this is a
     /// fact about our own certificates rather than about X.509.
@@ -138,6 +138,17 @@ public enum IdentityStore {
     /// It matters because it is the only place a consumer app can recover the
     /// cluster's name after a relaunch: nothing else persists it, and the pinned
     /// CA outlives app installs the way every keychain item does.
+    ///
+    /// ⚠️ **It is not necessarily the cluster's name now.** This once read as
+    /// though the two could not diverge; they can, and they did. The CA is
+    /// minted once and nothing re-mints it, so a `config.json` that is renamed
+    /// — or regenerated, and therefore quietly returned to the default
+    /// "Reach Cluster" — leaves every issued certificate saying the old name
+    /// while the daemon advertises the new one. A granted app then names a
+    /// cluster nobody calls that any more, and is not wrong to: this is the
+    /// name it pinned. `reachd doctor` reports the drift; resolving it means
+    /// agreeing with the CA, because re-minting invalidates every enrolled
+    /// device.
     public static func commonName(of certificate: SecCertificate) -> String? {
         SecCertificateCopySubjectSummary(certificate) as String?
     }

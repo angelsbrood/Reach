@@ -523,4 +523,57 @@ import Testing
         let counted = report.count(.pass) + report.count(.warn) + report.count(.wait) + report.count(.fail)
         #expect(counted == report.findings.count)
     }
+
+    // MARK: - The CA's name and the config's name
+
+    /// The CA is minted once, with whatever the cluster was called that day,
+    /// and nothing re-mints it. A `config.json` that is renamed — or
+    /// regenerated, and so quietly returned to the default — leaves every
+    /// issued certificate saying the old name while the daemon advertises the
+    /// new one. A granted app reads the CA's name, because that is the only
+    /// one that survives its own relaunch, so the drift shows up as an app
+    /// confidently naming a cluster nobody calls that any more. It went
+    /// unnoticed until it was read off a screen.
+    @Test func aCAWhoseNameTheConfigNoLongerSharesIsReported() throws {
+        let directory = try fixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try ClusterCA.create(commonName: "Drift CA")
+            .save(to: directory.appendingPathComponent("ca", isDirectory: true))
+
+        var config = DaemonConfig()
+        config.clusterName = "Renamed In Config"
+
+        let finding = HostCheck.checkClusterCA(in: directory, config: config)
+        #expect(finding.level == .warn)
+        #expect(finding.detail.contains("Drift CA"))
+        #expect(finding.detail.contains("Renamed In Config"))
+        // The action has to name which way to resolve it: agreeing with the CA
+        // costs nothing, re-minting invalidates every enrolled device.
+        #expect(finding.action?.contains("Drift CA") == true)
+    }
+
+    @Test func aCAAndConfigThatAgreeSaySoAndNothingMore() throws {
+        let directory = try fixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try ClusterCA.create(commonName: "Drift CA")
+            .save(to: directory.appendingPathComponent("ca", isDirectory: true))
+
+        var config = DaemonConfig()
+        config.clusterName = "Drift CA"
+
+        let finding = HostCheck.checkClusterCA(in: directory, config: config)
+        #expect(finding.level == .pass)
+    }
+
+    /// No config is not a mismatch. Without this the check would invent a
+    /// warning on a first run, which is the failure mode doctor exists to
+    /// avoid: noise that trains an operator to skim.
+    @Test func aCAWithNoConfigToCompareAgainstIsNotADrift() throws {
+        let directory = try fixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try ClusterCA.create(commonName: "Drift CA")
+            .save(to: directory.appendingPathComponent("ca", isDirectory: true))
+
+        #expect(HostCheck.checkClusterCA(in: directory, config: nil).level == .pass)
+    }
 }

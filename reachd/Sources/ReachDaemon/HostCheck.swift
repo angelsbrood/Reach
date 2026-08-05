@@ -1,6 +1,7 @@
 import Crypto
 import Darwin
 import Foundation
+import ReachIdentity
 import ReachWire
 
 /// Everything about this host that the away leg depends on, examined in one
@@ -124,7 +125,7 @@ public enum HostCheck {
 
         findings.append(contentsOf: checkMeshEndpoint(config: config, configExists: configExists, addresses: addresses))
         findings.append(checkMeshInterface(addresses, daemonUp: daemonUp))
-        findings.append(checkClusterCA(in: stateDirectory))
+        findings.append(checkClusterCA(in: stateDirectory, config: config))
         let wireGuard = checkWireGuard(in: stateDirectory, conf: wireGuardConf)
         findings.append(contentsOf: wireGuard.findings)
         findings.append(await checkDevices(in: stateDirectory, peers: wireGuard.peers))
@@ -343,11 +344,26 @@ public enum HostCheck {
     /// A CA that has not been created yet is the next step; a CA that is
     /// present and will not load has taken every enrolled device with it, and
     /// must never be reported as "not started yet".
-    static func checkClusterCA(in directory: URL) -> Finding {
+    static func checkClusterCA(in directory: URL, config: DaemonConfig? = nil) -> Finding {
         let caDirectory = directory.appendingPathComponent("ca", isDirectory: true)
         do {
             let der = try ClusterCA.load(from: caDirectory).certificateDER()
             let pin = Wire.base64URL(Data(SHA256.hash(data: der)))
+            // The CA is minted once, with whatever the cluster was called that
+            // day, and nothing re-mints it — so a renamed (or regenerated, and
+            // therefore defaulted) config.json silently disagrees with the name
+            // in every certificate it has ever issued. A granted app reads the
+            // CA's subject, because that is the only name that survives its own
+            // relaunch, so the drift surfaces as an app confidently naming a
+            // cluster nobody calls that any more.
+            if let config, let subject = subjectCommonName(ofDER: der), subject != config.clusterName {
+                return Finding(
+                    level: .warn,
+                    title: "cluster CA",
+                    detail: "present; pin \(pin) — but its subject is \"\(subject)\" and config.json says \"\(config.clusterName)\"",
+                    action: "Granted apps display the CA's name, so they will say \"\(subject)\". Set clusterName back to \"\(subject)\" to agree with every certificate already issued — renaming the CA instead means re-minting it, which invalidates every enrolled device."
+                )
+            }
             return Finding(level: .pass, title: "cluster CA", detail: "present; pin \(pin)")
         } catch CAError.stateMissing {
             return Finding(
@@ -364,6 +380,13 @@ public enum HostCheck {
                 action: "Every enrolled device was issued against this CA — if it is gone, they are all invalid and must re-pair. Restore it from wherever it is kept before starting anything."
             )
         }
+    }
+
+    /// The CA's own name, read the same way a granted app reads it, so this
+    /// check cannot pass on a name the app would never see.
+    static func subjectCommonName(ofDER der: Data) -> String? {
+        guard let certificate = try? IdentityStore.certificate(fromDER: der) else { return nil }
+        return IdentityStore.commonName(of: certificate)
     }
 
     /// Public keys are the most key material doctor may ever print, and its
