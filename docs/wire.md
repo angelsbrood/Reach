@@ -102,6 +102,15 @@ died re-dials those as candidates and keeps the first that connects. The list
 arrives over an already mutually authenticated stream, so trusting it grants
 nothing that mTLS did not already grant.
 
+The client also **keeps them**, in the keychain beside the CA it pinned, so
+they outlive the process that learned them and the app install that learned
+them. That is what lets a session be *born* away rather than only survive
+going there: a cold launch on a network that has never seen this cluster
+races the roads it kept alongside the address it was configured with, and the
+chain decides which of them is the cluster. Loopback is dropped on the way in
+— the daemon's declared set carries it because that set doubles as the server
+certificate's SAN list, and on another device it names that device.
+
 Both fields are **optional on the wire**, which is the whole compatibility
 story: a daemon that predates them simply omits them, and a client that
 receives none falls back to the address it already had.
