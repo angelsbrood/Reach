@@ -24,6 +24,17 @@ struct ContentView: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
+            Toggle(isOn: $model.offersTool) {
+                Label("Offer this phone's clock", systemImage: "clock")
+            }
+            .font(.footnote)
+            if let zone = model.toolRan {
+                // Said out loud because the completion cannot say it: the time
+                // in the answer came from this device, not from the cluster.
+                Label("The cluster asked this phone for \(zone)", systemImage: "arrow.turn.down.left")
+                    .font(.footnote)
+                    .foregroundStyle(.green)
+            }
             HStack {
                 TextField("Prompt", text: $model.prompt, axis: .vertical)
                     .textFieldStyle(.roundedBorder)

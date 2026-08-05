@@ -27,6 +27,20 @@ final class ExampleModel {
     var clusters: [DiscoveredCluster] = []
     var host = "127.0.0.1"
     var modelID = "gemma-4-e4b"
+
+    /// Whether to offer the cluster this app's clock.
+    ///
+    /// ⚠️ **Off by default, and that is not timidity.** Offering a tool puts a
+    /// declaration block in the rendered template, which changes the prompt
+    /// the model actually sees — and the demo's pacing was measured against
+    /// the prompt below on this exact model (see `docs/demo.md`, and the
+    /// warnings on `prompt`). A default that quietly re-rendered the film's
+    /// prompt would invalidate numbers nobody would think to re-measure.
+    var offersTool = false
+
+    /// Which timezone the tool was asked for, once it has run. The completion
+    /// text cannot establish that the tool ran *here* — this can.
+    var toolRan: String?
     /// The demo prompt, in the repo rather than in the operator's clipboard.
     ///
     /// The one-line default it replaced finished in a sentence, which left no
@@ -146,7 +160,10 @@ final class ExampleModel {
             let wantsDiscovered = host == "127.0.0.1"
             if wantsDiscovered { await awaitDiscovery() }
             let service = wantsDiscovered ? clusters.first?.name : nil
-            let key = "\(service ?? host)|\(modelID)"
+            // The tool flag belongs in the key: offering a tool changes the
+            // rendered template, so a session built without one cannot be
+            // reused after the switch is thrown.
+            let key = "\(service ?? host)|\(modelID)|\(offersTool)"
             if session == nil || sessionKey != key {
                 let configuration = ReachExecutor.Configuration(
                     serviceName: service,
@@ -154,9 +171,19 @@ final class ExampleModel {
                     modelID: modelID,
                     identityLabel: Self.identityLabel
                 )
-                session = LanguageModelSession(model: ReachLanguageModel(configuration: configuration))
+                let model = ReachLanguageModel(configuration: configuration)
+                session = offersTool
+                    ? LanguageModelSession(
+                        model: model,
+                        tools: [ClockTool(ran: { [weak self] zone in
+                            Task { @MainActor in self?.toolRan = zone }
+                        })],
+                        instructions: "Use the tools you are given."
+                    )
+                    : LanguageModelSession(model: model)
                 sessionKey = key
             }
+            toolRan = nil
             guard let session, !session.isResponding else { return }
             status = "streaming…"
             do {
