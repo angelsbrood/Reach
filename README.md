@@ -9,8 +9,11 @@ with the framework's native semantics; a conforming provider package
 model by swapping one dependency; and a single pairing ceremony provisions
 both halves of trust — a mutually authenticated device identity at the
 application layer, and membership in an embedded WireGuard mesh — in one
-gesture. The cluster is never exposed to the internet; access is per-device
-and per-app; every session is inspectable; there is no account anywhere.
+gesture. The cluster is never internet-exposed: a public door, where there
+is one, is a single UDP port speaking WireGuard that answers nothing
+unauthenticated — not even to say no — and the session port never faces the
+internet at all. Access is per-device and per-app; every session is
+inspectable; there is no account anywhere.
 
 ## Layout
 
