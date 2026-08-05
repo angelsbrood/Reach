@@ -166,6 +166,21 @@ case usage(inputTokens:outputTokens:)
 case finished(.complete | .cancelled | .error(String))
 ```
 
+`toolCallAppendArguments` is emitted. It maps one-to-one onto the framework's
+factory chain — `Event.toolCalls(entryID:action:)` →
+`ToolCalls.Action.toolCall(id:name:action:)` →
+`ToolCall.Action.appendArguments(_:tokenCount:)` — which is the only place a
+framework tool-call event is constructed, on the client side, per S4's
+construct-only finding. One turn's calls share an `entryID`, because the
+framework groups them under a single `toolCalls` transcript entry.
+
+**A tool round trip needs no new frame and no new session state.** The model
+turn ends with the call in its transcript; the framework runs the tool in the
+adopting app and re-invokes the executor with the transcript extended by
+`toolCalls` and `toolOutput` entries; the daemon renders those and continues.
+Sequential generations on one session, so the one-in-flight invariant holds.
+The daemon never executes anything — it asks, and it is answered.
+
 ## The request
 
 `Transcript` and `GenerationSchema` are natively `Codable` and ride as
@@ -185,8 +200,23 @@ native conformances take their place.
   resolved by the same rebase.
 - **Request `metadata` is dropped.** Its values are existential
   `Sendable & Codable & Equatable`, which JSON coding cannot carry generically.
-- **`toolCallAppendArguments` is reserved and never emitted.** Tool round-trips
-  are funded scope; the case exists so adding them is not a wire break.
+- **Tool arguments arrive whole, not streamed.** Response text still streams
+  token by token; a call's arguments cross in one `toolCallAppendArguments`.
+  This is what the grammar forces rather than a shortcut: the slot model's
+  call syntax has no escape mechanism, so a fragment emitted before the closing
+  token can turn out to have been part of a string value, and this wire has no
+  way to take one back. Apple's own MLX-backed executor emits whole for the
+  same reason. Streaming arguments becomes possible with constrained decoding,
+  which is the seam below.
+- **Tool arguments are not constrained-decoded.** The model emits its natural
+  syntax and the host parses and validates; nothing forces the arguments to
+  match the tool's schema during generation. Guided argument decoding is funded
+  scope, and it is the same seam that would make streamed arguments safe.
+- **`ToolCallingMode.required` is best-effort.** `.disallowed` is exact — the
+  tools are simply never rendered, so there is nothing to call. `.required` has
+  no forcing mechanism without constrained decoding: the definitions are
+  rendered and the model is asked, and a model that answers in prose instead is
+  not overridden.
 - **Bodies are JSON.** Chosen for legibility while the shape is still moving —
   every frame on this wire can be read by a human with a hex dump and patience,
   which during a ceremony debugged at a kitchen table is worth more than bytes.

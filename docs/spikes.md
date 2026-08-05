@@ -11,6 +11,54 @@ the decision. Kill criteria come from the pre-filing plan.
 | S2 | Development-signed packet-tunnel extension carrying WireGuardKit traffic on device | **PASS** (2026-07-22) — kill fired on the personal team, reversed same day by program enrollment; embedded tunnel verified end to end |
 | S3 | Headscale as a supervised subprocess with programmatic pre-auth key minting | **PASS** (2026-07-21) |
 | S5 | Does a road the user already owns — their own tailnet — work as a Reach candidate without code? | **PASS** (2026-07-24) — by construction, then confirmed on hardware: the session fell to the tailnet with the Reach tunnel down, and the mesh sat idle |
+| S6 | How does the framework's session drive a tool round trip through a third-party executor? | **PASS** (2026-08-05) — the transcript loop, and it is forced: the channel is send-only, so no `respond` call can receive tool output. `capabilities` is a hard gate, not a label |
+| S7 | Does the slot model emit tool calls the host can parse? | **PASS** (2026-08-05) — `gemma-4-e4b` 5/5, ~0.85 s per round trip; MLX parses the call itself, and the grammar has no escaping, which is why arguments cross whole |
+
+## S6 — the framework runs the tool and comes back (2026-08-05)
+
+Three probes in a plain CLI process: a real `LanguageModelSession`, a real
+`Tool`, a local executor, no wire and no weights.
+
+- **The transcript loop is not a preference, it is the only shape the API
+  admits.** `LanguageModelExecutorGenerationChannel` is send-only from the
+  executor's side — there is no path by which one `respond` call receives tool
+  output. The session runs the tool in-process and **re-invokes** the executor
+  with the transcript extended by `.toolCalls` and `.toolOutput`. Observed:
+  `instructions | prompt | toolCalls | toolOutput | response`.
+- **`capabilities` is a framework-enforced gate.** A model declaring
+  `LanguageModelCapabilities([])` handed a tool-bearing session does not
+  silently ignore the tools: the framework throws
+  `LanguageModelError.unsupportedCapability` and `respond` is **never called**.
+  So declaring `.toolCalling` is what makes tools reachable, and it must land
+  with working support rather than ahead of it.
+- **`GenerationSchema` encodes to JSON Schema** — `type`, `properties`,
+  `required`, `title`, `additionalProperties`, `x-order` — and survives a
+  `Codable` round trip byte-identically. A tool spec is therefore one
+  `JSONEncoder` away, which is exactly how Apple's own adapter builds it.
+- A `toolOutput` carries the **call's** id, not the id of the `toolCalls` entry
+  holding it.
+
+## S7 — the slot model calls tools (2026-08-05)
+
+Measured through `reachd selftest --mlx --tools`, which is where it can run:
+MLX's metallib is only locatable in an executable layout, so `swift test` from
+a terminal cannot load it at all.
+
+**`gemma-4-e4b`, 5 runs: 5/5 called the tool**, every run choosing
+`Europe/Vienna` for "What time is it in Vienna?", ~0.85 s per full two-turn
+round trip warm. The demonstration model does not have to change.
+
+Two facts that shaped the daemon more than the emission rate did:
+
+- **MLX already parses the call.** `MLXLMCommon.ToolCallProcessor`, configured
+  from the model's `model_type`, swallows the `<|tool_call>…<tool_call|>` span
+  out of the chunk stream and yields a parsed `Generation.toolCall`. The markers
+  never reach the daemon, so there is no scanning to do — the case that dropped
+  it was a `default: break`.
+- **Gemma's call grammar has no escape mechanism.** Its only string delimiter is
+  the special token `<|"|>`, and a `}`, `,` or `<|"|>` inside a string value is
+  emitted verbatim and is unrecoverable by any parser. That, not convenience, is
+  why arguments cross whole.
 
 ## S4 — the provider slot is real (2026-07-21)
 
@@ -30,11 +78,21 @@ Rulings this confirms or forces:
   private storage with no read path). The daemon therefore speaks Reach's
   own wire-event vocabulary natively and never serializes framework Events;
   only the client-side executor constructs them.
-- **The announced off-the-shelf `MLXLanguageModel` provider does not ship
-  in tagged `mlx-swift-lm`** (checked 3.31.4; it lands with the FM core
-  open-sourcing, announced for later this summer — the tripwire already
-  watched). Driving `MLXLMCommon` directly behind the slot is the primary
-  path, not a fallback.
+- ~~**The announced off-the-shelf `MLXLanguageModel` provider does not ship
+  in tagged `mlx-swift-lm`**~~ (checked 3.31.4). **Stale as of 2026-08-05:**
+  the repo pins a *revision past that tag* (`83f3ef6dc5bc`, for Gemma 4), and
+  that revision carries a whole `MLXFoundationModels` library — a public
+  `MLXLanguageModel` and `.Executor`, plus `TranscriptConverter`,
+  `SchemaConverter`, `SamplingModeMapper` and `ToolCallingConversions`. It has
+  been in the tree the daemon builds against since before the take was shot.
+  Every helper is internal, so none of it can be imported, and the adapter is
+  an *in-process* FM model where reachd is a wire server — so driving
+  `MLXLMCommon` directly behind the slot remains the primary path. Its value is
+  as a reference implementation, and it settled two questions for the tool pass.
+  **This does NOT trigger the roadmap's FM-core tripwire:** FoundationModels
+  itself is still a closed system framework read through a `.swiftinterface`,
+  and `GenerationOptions`/`Transcript.ToolDefinition` are still not natively
+  `Codable`, so `Mirrors.swift` does not retire.
 - First streamed token ~2.1 s after container load (gemma-3-1b-qat-4bit on
   an M5 Pro); warm-cache model load a few seconds, cold download ~95 s.
 - Build notes that will bite later if forgotten: the Metal Toolchain is a
