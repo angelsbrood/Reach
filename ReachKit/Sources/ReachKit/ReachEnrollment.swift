@@ -192,6 +192,12 @@ public enum ReachEnrollment {
         // stale identity beside a granted one makes lookup a coin toss.
         KeychainIdentity.remove(label: identityLabel)
         KeychainIdentity.remove(label: identityLabel + ".ca")
+        // The roads go with them. A grant against a different cluster would
+        // otherwise inherit the last one's addresses: trust makes dialing
+        // them harmless — they cannot present this cluster's chain — but they
+        // are noise in the race, and a record of where this device used to be
+        // is not something a re-pair should keep.
+        try? ClusterRoads.forget(for: identityLabel)
         let identity = try KeychainIdentity.store(
             privateKeyX963: key.x963Representation,
             certificateDER: grant.appCertDER,

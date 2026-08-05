@@ -57,6 +57,20 @@ public actor ReachConnectionHub {
         /// Set when the path changed or an open failed — the next open
         /// races candidates instead of trusting the cached dialer.
         var dirty = false
+        /// False until a dial through this entry has actually opened a
+        /// stream. A fresh entry's `dialer` is the configured primary and
+        /// nothing more — trying it alone first is not a fast path, it is the
+        /// race's first endpoint run alone for the whole connect timeout. Off
+        /// the LAN with a name that will never resolve, that is the connect
+        /// timeout spent twice: once alone, once again inside the race.
+        ///
+        /// Not folded into `dirty`, whose meaning above is "the path changed
+        /// or an open failed". A fresh entry is neither of those things.
+        var proven = false
+        /// Whether this entry started from roads a previous process wrote
+        /// down. Only the refusal reads it, and only to tell "never been
+        /// answered" apart from "knows the roads and none of them worked".
+        var knewStoredRoads = false
     }
 
     private var entries: [ReachExecutor.Configuration: Entry] = [:]
@@ -180,20 +194,38 @@ public actor ReachConnectionHub {
     private func noteCandidates(from ack: HelloAck, for configuration: ReachExecutor.Configuration) {
         guard let addrs = ack.addrs, let port = ack.port,
               let nwPort = NWEndpoint.Port(rawValue: port) else { return }
+        entries[configuration]?.candidates = endpoints(from: addrs, port: nwPort, for: configuration)
+        // Writing them down is what lets the next cold launch dial at all —
+        // this is the one moment the app is certainly being answered, so it is
+        // the only moment the roads are certainly true. Failing to write them
+        // is not a reason to fail a session that is working, and ReachKit has
+        // no channel to say so on; a store that will not write surfaces later
+        // as an app that cannot start away.
+        try? ClusterRoads.save(addrs: addrs, port: port, for: configuration.identityLabel)
+    }
+
+    /// The declared addresses as endpoints, minus whatever is already the
+    /// primary — the same conversion whether they arrived in a `HelloAck` or
+    /// came back out of the store.
+    private func endpoints(
+        from addrs: [String],
+        port: NWEndpoint.Port,
+        for configuration: ReachExecutor.Configuration
+    ) -> [NWEndpoint] {
         var seen: Set<NWEndpoint> = [primaryEndpoint(for: configuration)]
         var candidates: [NWEndpoint] = []
         for addr in addrs {
-            let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(addr), port: nwPort)
+            let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(addr), port: port)
             if seen.insert(endpoint).inserted {
                 candidates.append(endpoint)
             }
         }
-        entries[configuration]?.candidates = candidates
+        return candidates
     }
 
     private func openStream(for configuration: ReachExecutor.Configuration) async throws -> ReachTransport.QUICStream {
         let entry = try await ensureEntry(for: configuration)
-        if !entry.dirty {
+        if entry.proven && !entry.dirty {
             do {
                 return try await entry.dialer.openStream(timeout: configuration.connectTimeout)
             } catch is CancellationError {
@@ -255,6 +287,8 @@ public actor ReachConnectionHub {
         }
         entries[configuration]?.dialer = dialers[index]
         entries[configuration]?.dirty = false
+        // The only place a dial is ever proven: it opened a stream.
+        entries[configuration]?.proven = true
         return stream
     }
 
@@ -271,7 +305,27 @@ public actor ReachConnectionHub {
         )
         let parameters = NWParameters.reachQUIC(options: options, handover: configuration.multipathHandover)
         let dialer = QUICDialer(endpoint: primaryEndpoint(for: configuration), parameters: parameters)
-        let entry = Entry(dialer: dialer, session: nil)
+        var entry = Entry(dialer: dialer, session: nil)
+        // A fresh entry is a cold start: nothing in this process has been
+        // answered yet, so the only roads it knows are the ones an earlier
+        // process wrote down. Because the entry is not yet `proven`, the very
+        // first dial goes through the race — these join the primary in it,
+        // which is what makes a session born away possible. On the LAN the
+        // LAN wins that race on latency without being told to; away, the mesh
+        // does.
+        //
+        // A store that will not read back is treated as a store that holds
+        // nothing: there is nothing dialable either way, and claiming the
+        // refusal tried "the addresses it last answered on" would then be
+        // false.
+        if let roads = try? ClusterRoads.load(for: configuration.identityLabel),
+           let nwPort = NWEndpoint.Port(rawValue: roads.port) {
+            let stored = endpoints(from: roads.addrs, port: nwPort, for: configuration)
+            if !stored.isEmpty {
+                entry.candidates = stored
+                entry.knewStoredRoads = true
+            }
+        }
         entries[configuration] = entry
         return entry
     }

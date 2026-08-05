@@ -3,6 +3,7 @@ import FoundationModels
 import ReachIdentity
 import ReachKit
 import ReachWire
+import Security
 import Testing
 @testable import ReachDaemon
 
@@ -11,7 +12,11 @@ import Testing
 /// daemon over loopback with mutual TLS. This is Phase 1's acceptance
 /// sentence minus the second machine.
 @Suite(.serialized) struct SpineTests {
-    private func startDaemon(port: UInt16) async throws -> (Daemon, ReachExecutor.Configuration) {
+    private func startDaemon(
+        port: UInt16,
+        host: String = "127.0.0.1",
+        connectTimeout: Double = 45
+    ) async throws -> (Daemon, ReachExecutor.Configuration) {
         let ca = try ClusterCA.create(commonName: "Reach Spine CA")
         let server = try ca.issueServer(commonName: "localhost", dnsNames: ["localhost"], ipAddresses: [[127, 0, 0, 1]])
         let client = try ca.issueClient(commonName: "spine-app", uri: "reach://device/spine-app")
@@ -38,13 +43,79 @@ import Testing
             material: .init(identity: clientIdentity, caCertificate: caCert)
         )
         let configuration = ReachExecutor.Configuration(
-            host: "127.0.0.1",
+            host: host,
             port: port,
             modelID: "scripted",
             identityLabel: label,
-            connectTimeout: 45
+            connectTimeout: connectTimeout
         )
         return (daemon, configuration)
+    }
+
+    /// Writes the store the way a previous process would have, bypassing
+    /// `ClusterRoads.save` for one reason: `save` drops loopback, correctly —
+    /// on any other device a stored `127.0.0.1` names that device. A loopback
+    /// rig is the one place that policy and this test disagree, and the policy
+    /// is right, so the test writes the bytes instead of weakening it.
+    /// `save`'s own behaviour is proven in `ClusterRoadsTests`.
+    private func seedRoads(_ addrs: [String], port: UInt16, for label: String) throws {
+        let data = try JSONEncoder().encode(ClusterRoads.Roads(addrs: addrs, port: port))
+        let add: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: ClusterRoads.service,
+            kSecAttrAccount as String: label,
+            kSecValueData as String: data,
+        ]
+        #expect(SecItemAdd(add as CFDictionary, nil) == errSecSuccess)
+    }
+
+    /// A session born away. The configured address is TEST-NET-2, reserved for
+    /// documentation and routed nowhere, so the primary endpoint cannot
+    /// possibly answer — exactly the shape of a granted app cold-launched on a
+    /// network that has never seen this cluster, where the Bonjour name will
+    /// not resolve either. The only reachable address is the one an earlier
+    /// process wrote down. A session that opens can have come from nowhere
+    /// else, and that it opens at all is the claim this pass exists to make
+    /// true. (The real topology — a café, the tunnel, the mesh — is hardware
+    /// acceptance; this proves the machinery: store read, seeded race, win.)
+    @Test func aSessionIsBornAwayFromTheRoadsItKept() async throws {
+        defer { IdentityTrash.drain() }
+        let (daemon, configuration) = try await startDaemon(port: 47417, host: "198.51.100.1")
+        defer { Task { await daemon.stop() } }
+        defer { try? ClusterRoads.forget(for: configuration.identityLabel) }
+
+        try seedRoads(["127.0.0.1"], port: 47417, for: configuration.identityLabel)
+
+        let session = LanguageModelSession(
+            model: ReachLanguageModel(configuration: configuration),
+            instructions: "Scripted."
+        )
+        var final = ""
+        for try await snapshot in session.streamResponse(to: "Go.") {
+            final = snapshot.content
+        }
+        #expect(final == ScriptedFilling().words.joined())
+    }
+
+    /// The instrument, checked: the same configuration with nothing in the
+    /// store must fail. Without this the case above would pass just as well if
+    /// the dead primary were somehow answering, and would be proving nothing.
+    @Test func withoutStoredRoadsTheSameDialFails() async throws {
+        defer { IdentityTrash.drain() }
+        // Short, because the whole point is to wait out a dial that never
+        // lands: TEST-NET-2 looks routable, so it hangs rather than refusing.
+        let (daemon, configuration) = try await startDaemon(
+            port: 47418, host: "198.51.100.1", connectTimeout: 5
+        )
+        defer { Task { await daemon.stop() } }
+
+        let session = LanguageModelSession(
+            model: ReachLanguageModel(configuration: configuration),
+            instructions: "Scripted."
+        )
+        await #expect(throws: (any Error).self) {
+            for try await _ in session.streamResponse(to: "Go.") {}
+        }
     }
 
     @Test func sessionStreamsThroughTheDaemon() async throws {
