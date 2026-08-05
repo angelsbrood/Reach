@@ -13,9 +13,17 @@ public struct ReachLanguageModel: FoundationModels.LanguageModel {
     public let executorConfiguration: ReachExecutor.Configuration
 
     public var capabilities: LanguageModelCapabilities {
-        // v0 serves plain text streaming; guided generation, tools, and
-        // vision are funded scope and advertise here when they land.
-        LanguageModelCapabilities([])
+        // This is a gate, not a label. A session handed tools by an app whose
+        // model has not declared `.toolCalling` never reaches the executor at
+        // all: the framework throws `unsupportedCapability` in its place
+        // (spike S6b, where `respond` was provably never called). So the line
+        // below is what makes tools possible, and it must never run ahead of
+        // the daemon actually serving them — an app told the tools are
+        // supported and then quietly ignored is worse off than one refused.
+        //
+        // Guided generation and vision stay undeclared: funded scope, and
+        // declaring either would take away the same honest refusal.
+        LanguageModelCapabilities([.toolCalling])
     }
 
     public init(configuration: ReachExecutor.Configuration) {
@@ -213,7 +221,19 @@ public struct ReachExecutor: FoundationModels.LanguageModelExecutor {
             await channel.send(.response(entryID: entryID, action: .appendText(text, segmentID: segmentID, tokenCount: tokenCount)))
         case .responseReplace(let entryID, let text, let segmentID, let tokenCount):
             await channel.send(.response(entryID: entryID, action: .replaceTextSegment(text, segmentID: segmentID, tokenCount: tokenCount)))
-        case .reasoningAppend, .toolCallAppendArguments, .usage:
+        case .toolCallAppendArguments(let entryID, let id, let name, let content, let tokenCount):
+            // The only place a framework tool-call event is constructed. The
+            // wire case was shaped for this chain when it was still reserved,
+            // and it fits it exactly.
+            await channel.send(.toolCalls(
+                entryID: entryID,
+                action: .toolCall(
+                    id: id,
+                    name: name,
+                    action: .appendArguments(content, tokenCount: tokenCount)
+                )
+            ))
+        case .reasoningAppend, .usage:
             // Reserved vocabulary; the v0 daemon does not emit these.
             break
         case .finished(let reason):
