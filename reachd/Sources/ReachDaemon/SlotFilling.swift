@@ -21,13 +21,46 @@ public protocol SlotFilling: Sendable {
 /// Transcript → (role, text) mapping shared by fillings (spike S4c).
 public enum TranscriptChat {
     public struct Message: Sendable, Equatable {
-        public enum Role: Sendable, Equatable { case system, user, assistant }
+        public enum Role: Sendable, Equatable { case system, user, assistant, tool }
+
+        /// One call the model already made, as it must be replayed on the next
+        /// turn. Arguments ride as a JSON string because that is what both ends
+        /// speak: the framework hands them over as `GeneratedContent`, whose
+        /// `jsonString` is lossless, and every chat template renders them from
+        /// JSON.
+        public struct Call: Sendable, Equatable {
+            public var id: String
+            public var name: String
+            public var argumentsJSON: String
+
+            public init(id: String, name: String, argumentsJSON: String) {
+                self.id = id
+                self.name = name
+                self.argumentsJSON = argumentsJSON
+            }
+        }
+
+        /// What a message carries beyond its text once a tool round trip is in
+        /// the transcript. Absent for every message in a session without tools,
+        /// which is why nothing about the no-tools path changes shape.
+        public enum ToolPart: Sendable, Equatable {
+            /// An assistant turn that ended in calls rather than prose.
+            case calls([Call])
+            /// A tool's answer, tagged with the call it answers. The id is the
+            /// **call's**, not the transcript entry's — verified in spike S6a,
+            /// where a `toolOutput` came back carrying the id minted for the
+            /// call rather than the id of the `toolCalls` entry holding it.
+            case output(callID: String)
+        }
+
         public var role: Role
         public var text: String
+        public var tool: ToolPart?
 
-        public init(role: Role, text: String) {
+        public init(role: Role, text: String, tool: ToolPart? = nil) {
             self.role = role
             self.text = text
+            self.tool = tool
         }
     }
 
@@ -41,6 +74,29 @@ public enum TranscriptChat {
                 messages.append(Message(role: .user, text: text(of: prompt.segments)))
             case .response(let response):
                 messages.append(Message(role: .assistant, text: text(of: response.segments)))
+            // The two entries a tool round trip adds. They were dropped here
+            // for as long as the daemon had nothing to do with them, which was
+            // survivable only while it never rendered tools: replaying a turn
+            // with the call and its answer missing leaves the model looking at
+            // its own question with no answer and asking it again.
+            case .toolCalls(let calls):
+                messages.append(Message(
+                    role: .assistant,
+                    text: "",
+                    tool: .calls(calls.map { call in
+                        Message.Call(
+                            id: call.id,
+                            name: call.toolName,
+                            argumentsJSON: call.arguments.jsonString
+                        )
+                    })
+                ))
+            case .toolOutput(let output):
+                messages.append(Message(
+                    role: .tool,
+                    text: text(of: output.segments),
+                    tool: .output(callID: output.id)
+                ))
             default:
                 continue
             }

@@ -43,6 +43,13 @@ import Testing
         // Both branches: they render differently and both reach a screen.
         ReachError.unreachable(roads: 4, stored: true),
         ReachError.unreachable(roads: 1, stored: false),
+        // A tool the model could not be told about: the filling turns this
+        // throw into `.finished(.error(…))`, which crosses the wire and lands
+        // on the asking app's screen.
+        ToolRenderingError.schemaUnrenderable(
+            tool: "current_time",
+            reason: "its parameters did not encode as a JSON object"
+        ),
         ReachEnrollmentError.badCAHash,
         ReachEnrollmentError.refused(code: "grant-denied", message: "the ruling was no"),
         ReachEnrollmentError.sequence("expected EnrollGrant"),
