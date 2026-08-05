@@ -10,6 +10,13 @@ public enum ReachError: Error, Sendable, CustomStringConvertible, LocalizedError
     case sessionRejected(String)
     case remote(code: String, message: String)
     case transport(String)
+    /// Every road dialed and none of them led anywhere. `stored` is whether
+    /// any of them came from the calling card an earlier session left, and it
+    /// is what makes the sentence actionable: an app that has never been
+    /// answered needs the cluster's own network once, and an app that knows
+    /// the roads and cannot use them needs its tunnel up. Those are different
+    /// next actions and the coarse prefix could tell neither.
+    case unreachable(roads: Int, stored: Bool)
 
     public var description: String {
         switch self {
@@ -23,7 +30,17 @@ public enum ReachError: Error, Sendable, CustomStringConvertible, LocalizedError
             "the cluster refused this (\(code)): \(message)"
         case .transport(let detail):
             "could not reach the cluster: \(detail)"
+        case .unreachable(let roads, let stored):
+            if stored {
+                "no road reached the cluster — nothing answered on \(Self.roads(roads)), and those are the addresses it last answered on. The cluster may be off, or this device may need its mesh tunnel up."
+            } else {
+                "no road reached the cluster — nothing answered on \(Self.roads(roads)), and this app has not been answered before, so it knows no way there but the one it was configured with. Open it once on the cluster's own network and it will keep the way back."
+            }
         }
+    }
+
+    private static func roads(_ count: Int) -> String {
+        count == 1 ? "the one road it knows" : "any of the \(count) roads it knows"
     }
 
     public var errorDescription: String? { description }
@@ -283,7 +300,10 @@ public actor ReachConnectionHub {
         }
         guard let (index, stream) = winner else {
             entries[configuration]?.dirty = true
-            throw ReachError.transport("no reachable cluster address (\(endpoints.count) dialed)")
+            throw ReachError.unreachable(
+                roads: endpoints.count,
+                stored: entries[configuration]?.knewStoredRoads ?? false
+            )
         }
         entries[configuration]?.dialer = dialers[index]
         entries[configuration]?.dirty = false

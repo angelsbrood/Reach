@@ -40,6 +40,9 @@ import Testing
         ReachError.identityNotRegistered("reach-app-systems.reach.example"),
         ReachError.sessionRejected("token did not match"),
         ReachError.transport("no route to host"),
+        // Both branches: they render differently and both reach a screen.
+        ReachError.unreachable(roads: 4, stored: true),
+        ReachError.unreachable(roads: 1, stored: false),
         ReachEnrollmentError.badCAHash,
         ReachEnrollmentError.refused(code: "grant-denied", message: "the ruling was no"),
         ReachEnrollmentError.sequence("expected EnrollGrant"),
