@@ -100,6 +100,12 @@ import Testing
     /// The instrument, checked: the same configuration with nothing in the
     /// store must fail. Without this the case above would pass just as well if
     /// the dead primary were somehow answering, and would be proving nothing.
+    ///
+    /// It also holds the refusal's latency. The session open lives inside the
+    /// retry loop so a dial landing while the tunnel is still rising is not
+    /// thrown away — but a cold open must not inherit the daemon's 120-second
+    /// residency budget, because before the first session there is nothing
+    /// resident to wait for and the wait is all a person gets.
     @Test func withoutStoredRoadsTheSameDialFails() async throws {
         defer { IdentityTrash.drain() }
         // Short, because the whole point is to wait out a dial that never
@@ -113,9 +119,11 @@ import Testing
             model: ReachLanguageModel(configuration: configuration),
             instructions: "Scripted."
         )
+        let started = ContinuousClock.now
         await #expect(throws: (any Error).self) {
             for try await _ in session.streamResponse(to: "Go.") {}
         }
+        #expect(ContinuousClock.now - started < .seconds(30))
     }
 
     @Test func sessionStreamsThroughTheDaemon() async throws {

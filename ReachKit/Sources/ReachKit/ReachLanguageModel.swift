@@ -74,7 +74,7 @@ public struct ReachExecutor: FoundationModels.LanguageModelExecutor {
         streamingInto channel: LanguageModelExecutorGenerationChannel
     ) async throws {
         let wire = WireGenerationRequest(request)
-        var session = try await ReachConnectionHub.shared.session(for: configuration)
+        var session: ReachConnectionHub.SessionHandle?
         let genID = UUID()
 
         var lastReceived: UInt64?
@@ -83,6 +83,15 @@ public struct ReachExecutor: FoundationModels.LanguageModelExecutor {
         // measured from the last sign of life, matching the daemon's
         // residency window, not from when the generation began.
         var reconnectDeadline = ContinuousClock.now + .seconds(120)
+        // A cold open gets its own, much shorter budget. The 120 seconds above
+        // is the daemon's residency window: mid-generation there is something
+        // resident worth waiting for, and re-attaching recovers it. Before the
+        // first session there is nothing resident — the only thing worth
+        // waiting for is a mesh tunnel coming up under an on-demand rule,
+        // which takes seconds, not minutes. Spending the residency budget here
+        // would turn "there is no road to the cluster" into a two-minute hang,
+        // which is the opposite of saying so.
+        let coldOpenDeadline = ContinuousClock.now + .seconds(10)
         var backoff: Duration = .milliseconds(250)
         // A generation that never started can be re-begun against a fresh
         // session; once tokens are flowing, only re-attach is safe.
@@ -93,6 +102,20 @@ public struct ReachExecutor: FoundationModels.LanguageModelExecutor {
                 // Epoch read precedes the open: a path change that lands
                 // mid-dial still trips the watcher rather than being missed.
                 let epoch = await ReachConnectionHub.shared.currentPathEpoch()
+                // Opening the session lives inside the loop so the first open
+                // takes the same discipline as every later one. It used to sit
+                // above, outside the budget: a cold dial that landed while the
+                // mesh tunnel was still coming up failed at once, with no
+                // backoff and no retry — which is exactly the shape a phone
+                // that has just rebooted is in, and the one case "reach it
+                // from anywhere" most has to survive.
+                let live: ReachConnectionHub.SessionHandle
+                if let session {
+                    live = session
+                } else {
+                    live = try await ReachConnectionHub.shared.session(for: configuration)
+                    session = live
+                }
                 let stream = try await ReachConnectionHub.shared.openGenerationStream(for: configuration)
                 defer { stream.cancel() }
                 // A path change (an SSID hop, Wi-Fi loss) cancels the live
@@ -107,13 +130,13 @@ public struct ReachExecutor: FoundationModels.LanguageModelExecutor {
                 defer { watcher.cancel() }
                 if let lastReceived {
                     try await stream.send(GenerateReattach(
-                        sessionID: session.sessionID,
-                        token: session.token,
+                        sessionID: live.sessionID,
+                        token: live.token,
                         genID: genID,
                         fromSeq: lastReceived
                     ))
                 } else {
-                    try await stream.send(GenerateBegin(sessionID: session.sessionID, genID: genID, request: wire))
+                    try await stream.send(GenerateBegin(sessionID: live.sessionID, genID: genID, request: wire))
                 }
 
                 for try await raw in stream.frames {
@@ -152,15 +175,30 @@ public struct ReachExecutor: FoundationModels.LanguageModelExecutor {
                    lastReceived == nil, freshStartRetries > 0 {
                     freshStartRetries -= 1
                     await ReachConnectionHub.shared.invalidateSession(for: configuration)
-                    session = try await ReachConnectionHub.shared.session(for: configuration)
+                    // Dropped, not reopened here — the top of the loop opens
+                    // it, so the fresh start gets the same budget too.
+                    session = nil
                     continue
                 }
+                // An app that was never granted access does not become granted
+                // by waiting. Terminal, like `.remote`: without this, moving
+                // the open into the loop would make an ungranted app hang for
+                // two minutes instead of saying so at once.
+                if case .identityNotRegistered = error { throw error }
                 if case .remote = error { throw error }
-                try await waitBeforeRetry(&backoff, deadline: reconnectDeadline, cause: error)
+                try await waitBeforeRetry(
+                    &backoff,
+                    deadline: session == nil ? coldOpenDeadline : reconnectDeadline,
+                    cause: error
+                )
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
-                try await waitBeforeRetry(&backoff, deadline: reconnectDeadline, cause: error)
+                try await waitBeforeRetry(
+                    &backoff,
+                    deadline: session == nil ? coldOpenDeadline : reconnectDeadline,
+                    cause: error
+                )
             }
         }
     }
