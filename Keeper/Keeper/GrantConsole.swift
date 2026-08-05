@@ -163,6 +163,29 @@ final class GrantConsole {
 
     private struct NotAdmin: Error {}
 
+    /// The console's control stream ended before the cluster's hello ack.
+    ///
+    /// It is its own type because both transport cases that could carry it are
+    /// false here: `connectionFailed` renders as "could not open a connection
+    /// to the cluster" and the connection *did* open — the same sentence the
+    /// ceremony's catch used to put on the phone — and `streamClosed` is true
+    /// of one of the three endings and a lie about the other two.
+    ///
+    /// `run()` renders all three as "cluster unreachable — retrying", which is
+    /// right: all three are fixed by re-dialling, which is what the loop does.
+    /// So this text is for the next reader and a crash log, not the sheet, and
+    /// the defect it closes is a value being false rather than a sentence.
+    private struct NoHelloAck: Error, CustomStringConvertible {
+        let ending: FrameEnding
+        var description: String {
+            switch ending {
+            case .frame(let raw): "the cluster answered the console's hello with \(raw.type)"
+            case .closed: "the cluster closed the console's stream before its hello ack"
+            case .broke(let error): "the console's stream broke before the hello ack: \(error)"
+            }
+        }
+    }
+
     private func watch(_ record: ClusterRecord) async throws {
         let identity = try KeychainIdentity.find(label: DeviceKey.label)
         let ca = try IdentityStore.certificate(fromDER: record.caCertDER)
@@ -184,8 +207,9 @@ final class GrantConsole {
         var frames = stream.frames.makeAsyncIterator()
 
         try await stream.send(Hello(client: "Keeper/\(Wire.version)"))
-        guard let ack = try await frames.next(), ack.type == .helloAck else {
-            throw TransportError.streamClosed
+        let acked = await FrameEnding.next(from: &frames)
+        guard case .frame(let ack) = acked, ack.type == .helloAck else {
+            throw NoHelloAck(ending: acked)
         }
         try await stream.send(GrantSubscribe())
         state = .watching(cluster: record.name)

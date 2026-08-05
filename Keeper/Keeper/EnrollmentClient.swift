@@ -115,6 +115,30 @@ enum EnrollmentClient {
         throw lastError
     }
 
+    /// What the phone says when the cluster stops answering mid-ceremony,
+    /// before the certificate exists.
+    ///
+    /// **The QR is the cost, and it is already paid.** The daemon consumes the
+    /// token the instant `EnrollBegin` arrives — `EnrollmentService.serveDevice`,
+    /// "Consumed on presentation, deliberately" — so every ending past the send
+    /// below leaves a code that will never work again. These two reads were
+    /// filed as reads-before-any-work, where a throw is the intended signal;
+    /// that classification was wrong, and this is the re-ruling. "closed at
+    /// challenge" said neither of the two things an operator has to act on:
+    /// that nothing was installed, and that the next attempt needs a fresh
+    /// `reachd pair`. It said even that only on a clean close — a reset threw
+    /// past the guard into `CeremonyView`'s catch, which is where "could not
+    /// open a connection to the cluster: POSIXErrorCode 57" came from, about a
+    /// connection that had opened.
+    ///
+    /// The caller names the frame because the two reads did not get equally
+    /// far; the remedy is identical, so the sentence leads with the remedy.
+    private static func spent(_ ending: FrameEnding, waitingFor frame: String) -> String {
+        let sentence = "the cluster stopped answering before \(frame). Nothing was installed on this device, and the QR is spent — run `reachd pair` on the host for a fresh one, then scan again."
+        guard case .broke(let error) = ending else { return sentence }
+        return "\(sentence) (the connection ended: \(error))"
+    }
+
     /// What the phone says when the confirming frame never came — one sentence
     /// for two endings, because they are one situation: the grant may or may
     /// not have been acted on, and pairing again settles it either way.
@@ -143,7 +167,10 @@ enum EnrollmentClient {
         var frames = stream.frames.makeAsyncIterator()
 
         try await stream.send(EnrollBegin(token: payload.token, deviceName: deviceName))
-        guard let challengeRaw = try await frames.next() else { throw EnrollError.sequence("closed at challenge") }
+        let challenged = await FrameEnding.next(from: &frames)
+        guard case .frame(let challengeRaw) = challenged else {
+            throw EnrollError.sequence(Self.spent(challenged, waitingFor: "the challenge"))
+        }
         if challengeRaw.type == .errorFrame {
             let error = try challengeRaw.decode(ErrorFrame.self)
             throw EnrollError.refused("\(error.code): \(error.message)")
@@ -154,7 +181,10 @@ enum EnrollmentClient {
         let popSig = try DeviceKey.sign(challenge.nonce + devicePub + wgPub, with: deviceKey)
         try await stream.send(EnrollCertRequest(devicePubDER: devicePub, wgPubKey: wgPub, popSig: popSig))
 
-        guard let grantRaw = try await frames.next() else { throw EnrollError.sequence("closed at grant") }
+        let granted = await FrameEnding.next(from: &frames)
+        guard case .frame(let grantRaw) = granted else {
+            throw EnrollError.sequence(Self.spent(granted, waitingFor: "the grant"))
+        }
         if grantRaw.type == .errorFrame {
             let error = try grantRaw.decode(ErrorFrame.self)
             throw EnrollError.refused("\(error.code): \(error.message)")

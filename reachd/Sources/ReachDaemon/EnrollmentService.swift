@@ -282,8 +282,30 @@ public struct EnrollmentService: Sendable {
         nonce.withUnsafeMutableBytes { _ = SecRandomCopyBytes(kSecRandomDefault, 32, $0.baseAddress!) }
         try await stream.send(EnrollChallenge(nonce: nonce))
 
-        guard let requestRaw = try await iterator.next(), requestRaw.type == .appEnrollCertRequest else {
-            try await stream.send(ErrorFrame(code: "enroll-sequence", message: "expected AppEnrollCertRequest"))
+        // The last instance of the shape in this file, closed by the grep the
+        // other three earned. Losing this frame costs nothing durable — no
+        // token spent, nothing minted, no verdict parked, and the app's next
+        // knock starts a fresh ceremony — but the ending that produces it, an
+        // asker iOS suspended between the challenge and its request, THREW
+        // past this guard. So did the `send` below, which was ungated and
+        // wrote to a stream that may already be gone: both routes ended at
+        // `serve`'s catch as `enrollment stream failed: <socket>`, with no
+        // bundle in it.
+        //
+        // `appHalfConverges` is deliberately not consulted. Its sentence is
+        // about a verdict the desk is holding, and there is no verdict yet;
+        // borrowing it would make its own doc false at a second site. The
+        // level stays `error` because that is the level this path already
+        // fires at — if a take shows this is the ordinary ending, it moves
+        // then, on evidence, the way the app half's did.
+        let requested = await FrameEnding.next(from: &iterator)
+        guard case .frame(let requestRaw) = requested, requestRaw.type == .appEnrollCertRequest else {
+            Log.error("app enrollment abandoned by \(begin.bundleID) before its certificate request: \(requested.reason(waitingFor: "AppEnrollCertRequest")); nothing was minted and its next knock starts over")
+            // Worth answering only when something is still listening, exactly
+            // as the device half does at both of its reads.
+            if case .frame = requested {
+                try? await stream.send(ErrorFrame(code: "enroll-sequence", message: "expected AppEnrollCertRequest"))
+            }
             stream.cancel()
             return
         }

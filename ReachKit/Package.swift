@@ -33,6 +33,6 @@ let package = Package(
 
         .testTarget(name: "ReachWireTests", dependencies: ["ReachWire"]),
         .testTarget(name: "ReachTransportTests", dependencies: ["ReachTransport", "ReachIdentity", "ReachWire"]),
-        .testTarget(name: "ReachKitTests", dependencies: ["ReachKit"]),
+        .testTarget(name: "ReachKitTests", dependencies: ["ReachKit", "ReachTransport", "ReachWire"]),
     ]
 )

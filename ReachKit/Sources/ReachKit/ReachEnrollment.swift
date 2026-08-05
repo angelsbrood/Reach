@@ -18,7 +18,11 @@ public enum ReachEnrollmentError: Error, Sendable, CustomStringConvertible, Loca
         case .refused(let code, let message):
             "the cluster declined the grant (\(code)): \(message)"
         case .sequence(let detail):
-            "the enrollment exchange arrived out of order: \(detail)"
+            // "arrived out of order" was true of the one ending this case was
+            // written for and false of the two it now also carries: a stream
+            // that closed or broke did not arrive at all. The detail says which
+            // — this only has to stop contradicting it.
+            "the enrollment exchange did not complete: \(detail)"
         }
     }
 
@@ -135,8 +139,17 @@ public enum ReachEnrollment {
         var frames = stream.frames.makeAsyncIterator()
 
         try await stream.send(AppEnrollBegin(bundleID: bundle, displayName: name))
-        guard let challengeRaw = try await frames.next() else {
-            throw ReachEnrollmentError.sequence("closed at challenge")
+        // Three endings, and this shape answered two. A reset THROWS out of
+        // `next()`, and a throw cannot reach a `guard`'s `else`, so it went to
+        // the retry loop's generic catch above and left as
+        // `TransportError.connectionFailed` — which renders as "could not open
+        // a connection to the cluster" about a door that had just opened. That
+        // reaches a person: `ExampleModel` puts "no grant: \(error)" on screen.
+        let challenged = await FrameEnding.next(from: &frames)
+        guard case .frame(let challengeRaw) = challenged else {
+            throw ReachEnrollmentError.sequence(challenged.detailing(
+                "the cluster stopped answering before the challenge; nothing has been asked of the keeper yet"
+            ))
         }
         if challengeRaw.type == .errorFrame {
             let error = try challengeRaw.decode(ErrorFrame.self)
@@ -148,9 +161,20 @@ public enum ReachEnrollment {
         let popSig = try key.signature(for: challenge.nonce + pub).derRepresentation
         try await stream.send(AppEnrollCertRequest(appPubX963: pub, popSig: popSig))
 
-        // The parked wait: nothing moves until a human rules the sheet.
-        guard let grantRaw = try await frames.next() else {
-            throw ReachEnrollmentError.sequence("closed while parked")
+        // The parked wait: nothing moves until a human rules the sheet — which
+        // is exactly why this read has to answer all three endings. On a
+        // one-phone cluster the operator must LEAVE this app to rule, iOS
+        // suspends it there, and the stream dies: five of five ceremonies on
+        // 2026-07-30, and the daemon says the same thing from its side in
+        // `appHalfConverges`. So the ending that threw past this guard is not
+        // the exceptional one — it is the only one — and the sentence that
+        // could tell a person their request is still on the desk was
+        // unreachable in precisely the case that produces it every time.
+        let ruled = await FrameEnding.next(from: &frames)
+        guard case .frame(let grantRaw) = ruled else {
+            throw ReachEnrollmentError.sequence(ruled.detailing(
+                "the connection ended while the request was parked on the keeper's sheet — the ruling is not lost; the cluster holds it and this app's next knock collects it"
+            ))
         }
         if grantRaw.type == .errorFrame {
             let error = try grantRaw.decode(ErrorFrame.self)

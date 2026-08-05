@@ -137,7 +137,14 @@ public actor ReachConnectionHub {
         defer { control.cancel() }
         var frames = control.frames.makeAsyncIterator()
         try await control.send(Hello(client: "ReachKit/\(Wire.version)"))
-        guard let ackRaw = try await frames.next() else { throw ReachError.transport("no hello ack") }
+        // `.closed` reached the old `else`; `.broke` did not, and left as
+        // `TransportError.connectionFailed` — "could not open a connection to
+        // the cluster" for a tunnel that had already opened, which is the
+        // false sentence this shape exists to stop producing.
+        let acked = await FrameEnding.next(from: &frames)
+        guard case .frame(let ackRaw) = acked else {
+            throw ReachError.transport(acked.detailing("the cluster's hello ack never came"))
+        }
         if ackRaw.type == .errorFrame {
             let error = try ackRaw.decode(ErrorFrame.self)
             throw ReachError.sessionRejected("\(error.code): \(error.message)")
@@ -145,7 +152,12 @@ public actor ReachConnectionHub {
         let ack = try ackRaw.decode(HelloAck.self)
         noteCandidates(from: ack, for: configuration)
         try await control.send(SessionOpen(modelID: configuration.modelID))
-        guard let openedRaw = try await frames.next() else { throw ReachError.transport("no session response") }
+        let answered = await FrameEnding.next(from: &frames)
+        guard case .frame(let openedRaw) = answered else {
+            throw ReachError.transport(answered.detailing(
+                "the cluster never answered the session request for \(configuration.modelID)"
+            ))
+        }
         if openedRaw.type == .errorFrame {
             let error = try openedRaw.decode(ErrorFrame.self)
             throw ReachError.sessionRejected("\(error.code): \(error.message)")

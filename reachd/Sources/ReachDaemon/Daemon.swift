@@ -170,7 +170,23 @@ public final class Daemon: Sendable {
     private func serve(stream: ReachTransport.QUICStream) async {
         var iterator = stream.frames.makeAsyncIterator()
         do {
-            guard let first = try await iterator.next() else { return }
+            // A stream that opens and never speaks is not a fault: a dial the
+            // client cancelled, an app that went away between connect and
+            // send, a probe. Both silent endings are that — and the reset one
+            // arrived here as a THROW, past this guard into the catch below,
+            // where it printed `stream ended: POSIXErrorCode 57` at error
+            // level for a session that never existed. That is 7f's reading, on
+            // the one listener 7f did not reach.
+            //
+            // Nothing was served, so there is nothing to say. The cancel is
+            // what the catch was already doing for that path and still has to
+            // happen — and the clean close, which used to fall out of here
+            // without one, was leaking the connection.
+            let opening = await FrameEnding.next(from: &iterator)
+            guard case .frame(let first) = opening else {
+                stream.cancel()
+                return
+            }
             switch first.type {
             case .hello:
                 _ = try first.decode(Hello.self)

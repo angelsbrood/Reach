@@ -493,6 +493,55 @@ import X509
             return
         }
     }
+
+    /// An app that goes away between the challenge and its certificate request.
+    ///
+    /// That read was the last `guard let … = try await ….next() else` in
+    /// `EnrollmentService`, so a break threw past it — and so did the `send` in
+    /// its `else`, which was ungated and wrote to a stream that may already be
+    /// gone. Both routes ended at `serve`'s catch as `enrollment stream failed:
+    /// <socket>`, with no bundle in it.
+    ///
+    /// Nothing durable is at stake there, and that is what this pins: no token
+    /// is spent, no verdict is parked, and the service is not wedged. The log
+    /// line itself is not assertable — the daemon has no sink a test can read —
+    /// so this holds the two things that are observable and says plainly that
+    /// it does not hold the third.
+    @Test func anAppThatLeavesBeforeItsCertificateRequestParksNothing() async throws {
+        let fixture = try await makeFixture(sessionPort: 47452, enrollPort: 47453)
+        defer { fixture.cleanup() }
+
+        let keeper = try await enrollDevice(fixture, name: "keeper-phone")
+        var (control, controlFrames) = try await openControl(fixture, identity: keeper.identity)
+        defer { control.cancel() }
+        try await control.send(GrantSubscribe())
+
+        // Knock, take the challenge, and vanish without answering it.
+        let abandoned = try await fixture.enrollDialer.openStream(timeout: 45)
+        var abandonedFrames = abandoned.frames.makeAsyncIterator()
+        try await abandoned.send(AppEnrollBegin(bundleID: "systems.reach.abandoned", displayName: "Abandoned"))
+        let challengeRaw = try #require(try await abandonedFrames.next())
+        #expect(challengeRaw.type == EnrollChallenge.frameType)
+        abandoned.cancel()
+        try await Task.sleep(for: .milliseconds(200))
+
+        // A whole ceremony for a different bundle now runs. The first event to
+        // reach the keeper has to be that one: if the abandoned knock had
+        // parked, its event would be sitting ahead of this in the queue.
+        let second = Task {
+            try await appEnroll(fixture, bundleID: "systems.reach.arrived", name: "Arrived")
+        }
+        let event = try (try #require(try await controlFrames.next())).decode(GrantEvent.self)
+        #expect(
+            event.bundleID == "systems.reach.arrived",
+            "a knock that never sent its certificate request parked anyway: \(event.bundleID)"
+        )
+        try await control.send(GrantRule(requestID: event.requestID, allow: true))
+        guard case .granted = try await second.value else {
+            Issue.record("the enrollment service did not serve a fresh ceremony after the abandoned one")
+            return
+        }
+    }
 }
 
 /// The desk's own tables, which nothing else in the daemon can observe.

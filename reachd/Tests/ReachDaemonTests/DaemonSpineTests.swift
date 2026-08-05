@@ -369,4 +369,66 @@ struct ScriptedFilling: SlotFilling {
         #expect(text == reference)
         control.cancel()
     }
+
+    /// A stream that opens and never speaks, twice — once closed cleanly, once
+    /// reset — and then a real session on the same listener.
+    ///
+    /// `serve`'s opening read used to return on the clean close without
+    /// cancelling, leaking the connection, and let the reset throw into its
+    /// catch, which logged `stream ended: <socket>` at error level for a
+    /// session that never existed. Neither is a fault: a cancelled dial, an app
+    /// that went away between connect and send, and a probe all look like this.
+    ///
+    /// What is assertable is that the listener survives both — the log level is
+    /// not, because the daemon has no sink a test can read.
+    @Test func aStreamThatNeverSpeaksDoesNotDisturbTheListener() async throws {
+        let ca = try ClusterCA.create(commonName: "Reach Silent CA")
+        let server = try ca.issueServer(commonName: "localhost", dnsNames: ["localhost"], ipAddresses: [[127, 0, 0, 1]])
+        let client = try ca.issueClient(commonName: "silent-client", uri: "reach://device/silent")
+        let serverIdentity = try IdentityMaterializer.materialize(server, label: "reach-silent-server-\(UUID())")
+        let clientIdentity = try IdentityMaterializer.materialize(client, label: "reach-silent-client-\(UUID())")
+        IdentityTrash.add(serverIdentity)
+        IdentityTrash.add(clientIdentity)
+        defer { IdentityTrash.drain() }
+        let caCert = try IdentityStore.certificate(fromDER: ca.certificateDER())
+
+        var config = DaemonConfig()
+        config.port = 47454
+        config.clusterName = "silent-test"
+        let daemon = Daemon(
+            config: config,
+            filling: ScriptedFilling(),
+            identity: Daemon.ListenerIdentity(identity: serverIdentity, caCertificate: caCert)
+        )
+        try await daemon.start(advertise: false)
+        defer { Task { await daemon.stop() } }
+
+        let dialer = QUICDialer(
+            endpoint: .hostPort(host: "127.0.0.1", port: 47454),
+            parameters: .reachQUIC(
+                options: TLSBuilder.clientOptions(alpn: Wire.alpn, identity: clientIdentity, serverTrustRoots: [caCert])
+            )
+        )
+
+        // The clean close: half-close without ever sending a frame.
+        let mute = try await dialer.openStream(timeout: 45)
+        mute.finishSending()
+        try await Task.sleep(for: .milliseconds(200))
+
+        // The reset: cancel outright, which is the ending that used to throw.
+        let reset = try await dialer.openStream(timeout: 45)
+        reset.cancel()
+        try await Task.sleep(for: .milliseconds(200))
+
+        // The listener still serves.
+        let control = try await dialer.openStream(timeout: 45)
+        defer { control.cancel() }
+        var frames = control.frames.makeAsyncIterator()
+        try await control.send(Hello(client: "silent-test"))
+        let ack = try (try #require(try await frames.next())).decode(HelloAck.self)
+        #expect(ack.cluster == "silent-test")
+        try await control.send(SessionOpen(modelID: "scripted"))
+        let opened = try (try #require(try await frames.next())).decode(SessionOpened.self)
+        #expect(opened.token.isEmpty == false)
+    }
 }
