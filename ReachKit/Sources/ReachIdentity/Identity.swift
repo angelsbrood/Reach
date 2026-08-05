@@ -7,6 +7,7 @@ public enum IdentityError: Error, Sendable, CustomStringConvertible, LocalizedEr
     case importFailed(String)
     case keychainAddFailed(OSStatus)
     case identityNotFound(OSStatus)
+    case roadsUnreadable(OSStatus)
 
     public var description: String {
         switch self {
@@ -20,6 +21,12 @@ public enum IdentityError: Error, Sendable, CustomStringConvertible, LocalizedEr
             "the keychain refused the key or certificate: \(Self.name(for: status))"
         case .identityNotFound(let status):
             "no identity is stored under that label: \(Self.name(for: status))"
+        case .roadsUnreadable(let status):
+            // Not `identityNotFound`, which is what the mesh key borrows for
+            // its own miss and which would be plainly false here — there is no
+            // identity in question, and the roads are stored, they just will
+            // not read back.
+            "the cluster roads this app kept will not read back: \(Self.name(for: status))"
         }
     }
 
