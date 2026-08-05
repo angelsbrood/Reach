@@ -12,6 +12,7 @@ struct TunnelView: View {
                 Button("Start") { manager.start() }
                 Button("Stop") { manager.stop() }
             }
+            awayRoad
             ScrollView {
                 VStack(alignment: .leading, spacing: 4) {
                     ForEach(Array(manager.log.enumerated()), id: \.offset) { _, line in
@@ -21,6 +22,35 @@ struct TunnelView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
+    }
+
+    /// The person's ruling on whether this device stays reachable away from
+    /// home. Both costs are stated rather than implied: the keepalive, and
+    /// that the mesh range belongs to the tunnel while it is up.
+    @ViewBuilder private var awayRoad: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Toggle(
+                "Stay reachable away from home",
+                isOn: Binding(
+                    get: { manager.risesOnItsOwn },
+                    set: { on in Task { await manager.setRisesOnItsOwn(on) } }
+                )
+            )
+            Text("""
+                The mesh rises on its own whenever this device has a network, so a granted app can \
+                reach the cluster from anywhere — including after a restart, without opening Keeper. \
+                It costs a keepalive every 25 seconds, and while the tunnel is up the 10.86.0.0/24 \
+                range belongs to it.
+                """)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        }
+        .disabled(!isInstalled)
+    }
+
+    private var isInstalled: Bool {
+        if case .installed = manager.state { return true }
+        return false
     }
 
     @ViewBuilder private var header: some View {

@@ -18,6 +18,17 @@ final class TunnelManager {
     var state: State = .notInstalled
     var log: [String] = []
 
+    /// Whether the tunnel rises on its own whenever this device has a network.
+    ///
+    /// A cache of the authority, not a preference. The real value is
+    /// `NETunnelProviderManager.isOnDemandEnabled`, which the system owns and
+    /// which a person can change from Settings behind this app's back — so it
+    /// is re-read from the manager at every point that touches it, and never
+    /// mirrored into storage of our own. It has to be a stored property all
+    /// the same, because `NEVPNManager` is not observable and a computed one
+    /// would never move the view.
+    private(set) var risesOnItsOwn = false
+
     private var manager: NETunnelProviderManager?
     private var observer: NSObjectProtocol?
 
@@ -36,6 +47,7 @@ final class TunnelManager {
             let managers = try await NETunnelProviderManager.loadAllFromPreferences()
             manager = managers.first
             if let manager {
+                risesOnItsOwn = manager.isOnDemandEnabled
                 state = .installed(manager.connection.status)
                 observeStatus()
             } else if stagedConfig == nil {
@@ -72,10 +84,19 @@ final class TunnelManager {
             state = .installed(manager.connection.status)
             observeStatus()
             append("tunnel already carries this configuration — nothing to install")
+            // A tunnel installed before this app could rule the away road has
+            // no rules at all, and this early return is the ordinary path for
+            // it: the conf is byte-identical on a re-pair, so nothing below
+            // ever runs again. Give it the ruled default here or it would
+            // never get one.
+            if manager.onDemandRules?.isEmpty ?? true {
+                await setRisesOnItsOwn(true)
+            }
             return
         }
         do {
             let manager = self.manager ?? NETunnelProviderManager()
+            let firstInstall = self.manager == nil
             if manager.connection.status == .connected || manager.connection.status == .connecting {
                 manager.connection.stopVPNTunnel()
                 append("stopping stale tunnel before reinstall")
@@ -88,15 +109,59 @@ final class TunnelManager {
             manager.protocolConfiguration = proto
             manager.localizedDescription = "Reach"
             manager.isEnabled = true
+            // The rules are always present so the flag has something to obey.
+            // The flag itself defaults on exactly once, at first install — a
+            // person who has turned this off has ruled, and a re-pair is not a
+            // reason to overrule them.
+            manager.onDemandRules = [Self.riseOnAnyNetwork()]
+            manager.isOnDemandEnabled = firstInstall ? true : manager.isOnDemandEnabled
             try await manager.saveToPreferences()
             try await manager.loadFromPreferences()
             self.manager = manager
+            risesOnItsOwn = manager.isOnDemandEnabled
             state = .installed(manager.connection.status)
             observeStatus()
             append("tunnel installed")
         } catch {
             state = .failed("install: \(error)")
             append("install failed: \(error)")
+        }
+    }
+
+    /// Connect on any interface — the rule that makes a cold dial from a café
+    /// possible at all, because a granted app cannot raise this tunnel and
+    /// must not be able to. Something has to want the road up, and with this
+    /// rule the road is up whenever the device has a network, including after
+    /// a reboot where nobody has opened the Keeper.
+    private static func riseOnAnyNetwork() -> NEOnDemandRule {
+        let rule = NEOnDemandRuleConnect()
+        rule.interfaceTypeMatch = .any
+        return rule
+    }
+
+    /// Rules the away road up or down, without touching the configuration.
+    ///
+    /// Its own save, because `install()` is the only other path that saves and
+    /// it returns early when the staged conf is unchanged — which is the
+    /// ordinary case, so a toggle that only set the flag there would take
+    /// effect on a re-pair and never otherwise.
+    func setRisesOnItsOwn(_ on: Bool) async {
+        guard let manager else { return }
+        do {
+            manager.onDemandRules = [Self.riseOnAnyNetwork()]
+            manager.isOnDemandEnabled = on
+            try await manager.saveToPreferences()
+            try await manager.loadFromPreferences()
+            risesOnItsOwn = manager.isOnDemandEnabled
+            append(risesOnItsOwn
+                ? "away road on — the tunnel rises whenever this device has a network"
+                : "away road off — the tunnel is up only when it is started here")
+        } catch {
+            // Not `.failed`: the tunnel is installed and working, and only the
+            // ruling did not take. Say so and put the switch back where the
+            // system actually has it.
+            risesOnItsOwn = manager.isOnDemandEnabled
+            append("away road unchanged: \(error)")
         }
     }
 
