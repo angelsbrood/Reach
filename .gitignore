@@ -1,7 +1,8 @@
 # Private steering documents — on-disk working files, never in history
 # Globbed by family, not pinned per version: a rename must not silently
 # expose a draft the way reach-designnote-v3 and reach-nlnet-v3 were.
-PLAN.md
+PLAN*.md
+Completed Plans/
 JULYCUT.md
 EDIT.md
 reach-designnote-v*.md
@@ -25,6 +26,7 @@ DerivedData/
 xcuserdata/
 *.xcuserstate
 *.xcscmblueprint
+.codex/
 
 # OS noise
 .DS_Store
