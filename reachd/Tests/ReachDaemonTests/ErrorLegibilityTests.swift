@@ -31,6 +31,12 @@ import Testing
         TransportError.streamClosed,
         TransportError.connectionFailed("POSIXErrorCode(rawValue: 57): Socket is not connected"),
         TransportError.sendFailed("broken pipe"),
+        // Lands on the operator's terminal as the reason `reachd serve` would
+        // not start, which is the one moment they can still do something.
+        TransportError.listenerCouldNotBind(
+            port: 47337,
+            detail: "POSIXErrorCode(rawValue: 48): Address already in use"
+        ),
         WireError.unknownFrameType(99),
         WireError.frameTooLarge(1 << 25),
         WireError.malformedFrame("GenerateBegin: missing transcript"),

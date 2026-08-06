@@ -63,7 +63,7 @@ import X509
             grants: Daemon.GrantWiring(desk: desk, devices: devices)
         )
         try await daemon.start(advertise: false)
-        try daemon.startEnrollment(service: service, advertise: false)
+        try await daemon.startEnrollment(service: service, advertise: false)
 
         let enrollDialer = QUICDialer(
             endpoint: .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: enrollPort)!),

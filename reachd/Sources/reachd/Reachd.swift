@@ -95,7 +95,7 @@ struct Serve: AsyncParsableCommand {
             wgHost: wgHost,
             desk: desk
         )
-        try daemon.startEnrollment(service: enrollment, advertise: !noAdvertise)
+        try await daemon.startEnrollment(service: enrollment, advertise: !noAdvertise)
         print("[reachd] enrollment listening on :\(config.enrollPort), \(mesh.summary)")
         print("[reachd] grant desk open — app approvals surface on the keeper")
         print("[reachd] \(config.clusterName) serving \(config.modelID) on :\(config.port) (\(addresses.map { $0.map(String.init).joined(separator: ".") }.joined(separator: ", ")))")

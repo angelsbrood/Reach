@@ -8,6 +8,10 @@ public enum TransportError: Error, Sendable, CustomStringConvertible, LocalizedE
     case streamClosed
     case sendFailed(String)
     case listenerFailed(String)
+    /// Never bound at all — a different situation from a listener that was
+    /// serving and stopped, and a different thing to do about it, so it does
+    /// not share `listenerFailed`'s sentence.
+    case listenerCouldNotBind(port: UInt16, detail: String)
 
     public var description: String {
         switch self {
@@ -19,6 +23,8 @@ public enum TransportError: Error, Sendable, CustomStringConvertible, LocalizedE
             "the connection dropped mid-send: \(detail)"
         case .listenerFailed(let detail):
             "the listener stopped accepting connections: \(detail)"
+        case .listenerCouldNotBind(let port, let detail):
+            "nothing can be served on port \(port): \(detail) — usually another daemon already holds it, or one that has just stopped has not let go of it yet"
         }
     }
 
@@ -255,6 +261,41 @@ final class ResumeOnce<T: Sendable>: @unchecked Sendable {
     }
 }
 
+/// A one-shot result that may settle before anyone asks for it.
+///
+/// `ResumeOnce` takes its continuation up front, which is right for a call
+/// that is already waiting. Listener state is the other shape: it arrives on
+/// the network queue and routinely beats the caller to the question, so a box
+/// that only held a waiting continuation would drop the answer and hang.
+final class Latch<T: Sendable>: @unchecked Sendable {
+    private var settled: Result<T, Error>?
+    private var waiting: [CheckedContinuation<T, Error>] = []
+    private let lock = NSLock()
+
+    func settle(_ result: Result<T, Error>) {
+        lock.lock()
+        guard settled == nil else { return lock.unlock() }
+        settled = result
+        let pending = waiting
+        waiting = []
+        lock.unlock()
+        for continuation in pending { continuation.resume(with: result) }
+    }
+
+    func value() async throws -> T {
+        try await withCheckedThrowingContinuation { continuation in
+            lock.lock()
+            if let settled {
+                lock.unlock()
+                continuation.resume(with: settled)
+            } else {
+                waiting.append(continuation)
+                lock.unlock()
+            }
+        }
+    }
+}
+
 // MARK: - Listener
 
 /// The daemon's QUIC listener: yields one tunnel per inbound connection.
@@ -262,6 +303,7 @@ public final class QUICListener: Sendable {
     private let listener: NWListener
     public let tunnels: AsyncThrowingStream<QUICTunnel, Error>
     public let port: UInt16
+    private let readiness = Latch<Void>()
 
     public init(
         port: UInt16,
@@ -276,17 +318,53 @@ public final class QUICListener: Sendable {
         listener.newConnectionGroupHandler = { group in
             continuation.yield(QUICTunnel(accepted: group))
         }
+        let readiness = self.readiness
         listener.stateUpdateHandler = { state in
             switch state {
+            case .ready:
+                readiness.settle(.success(()))
             case .failed(let error):
+                // The same `.failed` covers "never bound" and "was serving
+                // and stopped"; which one it is depends only on whether
+                // `.ready` came first, and the latch keeps that for us.
+                readiness.settle(.failure(TransportError.listenerCouldNotBind(
+                    port: port, detail: "\(error)"
+                )))
                 continuation.finish(throwing: TransportError.listenerFailed("\(error)"))
             case .cancelled:
+                readiness.settle(.failure(TransportError.listenerCouldNotBind(
+                    port: port, detail: "it was cancelled before it bound"
+                )))
                 continuation.finish()
             default:
                 break
             }
         }
         listener.start(queue: transportQueue)
+    }
+
+    /// Waits until the port is actually bound, or throws saying it is not.
+    ///
+    /// `NWListener` does not fail its initializer on a port another process
+    /// holds. The refusal arrives later and asynchronously, as `.failed` —
+    /// so a caller that only checks `init` has started a listener that is
+    /// bound to nothing and will never say so. That is not a rare shape: it
+    /// is what racing a dying process for its port looks like, which is to
+    /// say it is what a restart looks like.
+    public func waitUntilReady(timeout: Duration = .seconds(10)) async throws {
+        let readiness = self.readiness
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask { try await readiness.value() }
+            let port = self.port
+            group.addTask {
+                try await Task.sleep(for: timeout)
+                throw TransportError.listenerCouldNotBind(
+                    port: port, detail: "it neither bound nor failed within \(timeout)"
+                )
+            }
+            try await group.next()
+            group.cancelAll()
+        }
     }
 
     /// Attach a Bonjour advertisement to this listener.

@@ -56,7 +56,7 @@ public final class Daemon: Sendable {
     /// Starts the ceremony's listener: server-auth-only TLS (clients have
     /// no certificate yet), the issuing chain presented so the QR's CA-hash
     /// pin — or the TXT-carried pin an app discovered — can verify it.
-    public func startEnrollment(service: EnrollmentService, advertise: Bool = true) throws {
+    public func startEnrollment(service: EnrollmentService, advertise: Bool = true) async throws {
         let options = TLSBuilder.serverOptions(
             alpn: Wire.enrollALPN,
             identity: tls.identity,
@@ -68,6 +68,10 @@ public final class Daemon: Sendable {
             idleMilliseconds: 180_000
         )
         let listener = try QUICListener(port: config.enrollPort, parameters: .reachQUIC(options: options))
+        // Same reason as the session listener: a held port fails later and
+        // silently, and here the symptom is a ceremony that never reaches
+        // the phone with nothing on the Mac to say why.
+        try await listener.waitUntilReady()
         if advertise {
             listener.advertise(name: config.clusterName, type: Wire.bonjourEnrollService)
         }
@@ -116,6 +120,16 @@ public final class Daemon: Sendable {
             clientTrustRoots: [tls.caCertificate]
         )
         let listener = try QUICListener(port: config.port, parameters: .reachQUIC(options: options))
+        // Before advertising, and before anything prints that we are serving.
+        // A listener whose port is already held does not fail here — it fails
+        // later, on the network queue, and the failure used to arrive at the
+        // accept task as one line on stderr while `start()` had already
+        // returned successfully. The operator's terminal said the cluster was
+        // serving and every client said no road reached it; both were on
+        // screen at once and one of them was a lie. Racing a dying process
+        // for its port is exactly what a restart is, so this is the shape the
+        // daemon meets most.
+        try await listener.waitUntilReady()
         if advertise {
             // The CA-hash pin rides the TXT record: an identity-less app
             // reads it here and holds the enrollment channel to it.

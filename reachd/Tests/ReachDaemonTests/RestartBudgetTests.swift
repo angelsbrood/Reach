@@ -175,4 +175,39 @@ import Testing
             "the app should not have to know its cluster restarted to ask a second question"
         )
     }
+
+    /// The daemon used to start deaf and say it was serving.
+    ///
+    /// `NWListener` does not fail its initializer on a port another process
+    /// holds; the refusal arrives later, on the network queue, as `.failed`.
+    /// It reached the accept task as one line on stderr *after* `start()` had
+    /// returned and the serving line had printed — so the operator's terminal
+    /// read `serving … on :47337` while every client read `no road reached
+    /// the cluster`, both true-looking and one of them a lie. Racing a dying
+    /// process for its port is what a restart is, so this was the daemon's
+    /// most likely bad start and the one nothing could see.
+    @Test(.timeLimit(.minutes(1)))
+    func aDaemonThatCannotTakeThePortSaysSoRatherThanServingNothing() async throws {
+        let port: UInt16 = 47482
+        let cluster = try makeCluster()
+        defer { cluster.discard() }
+        let holder = try await startDaemon(port: port, cluster: cluster)
+        defer { Task { await holder.stop() } }
+
+        do {
+            let deaf = try await startDaemon(port: port, cluster: cluster)
+            await deaf.stop()
+            Issue.record("a second daemon reported success on a port the first already holds")
+        } catch {
+            let sentence = "\(error)"
+            #expect(
+                sentence.contains("\(port)"),
+                "the refusal has to name the port, since that is the thing to go and free: \(sentence)"
+            )
+            #expect(
+                !sentence.contains("stopped accepting"),
+                "never bound and stopped serving are different situations and must not share a sentence: \(sentence)"
+            )
+        }
+    }
 }
