@@ -8,7 +8,22 @@ import Security
 public enum KeychainIdentity {
     /// Adds the private key (EC, X9.63 representation) and certificate DER
     /// under `label`, and returns the assembled identity.
-    public static func store(privateKeyX963: Data, certificateDER: Data, label: String) throws -> SecIdentity {
+    ///
+    /// ⚠️ A duplicate is tolerated and the **existing** item is returned, so
+    /// this does not refresh anything: whoever first created an item under
+    /// `label` also fixed its access, permanently. That matters because the
+    /// keychain's default access is "the exact binary that created this",
+    /// and for an ad-hoc signed executable — everything SwiftPM builds —
+    /// "exact binary" means the CDHash of one build. A caller that stores
+    /// under a **stable** label across rebuilds therefore ends up holding a
+    /// key its own binary is a stranger to, and macOS asks for a password at
+    /// the first *use* rather than here. `IdentityMaterializer` has the
+    /// account of what that cost and how the daemon avoids it.
+    public static func store(
+        privateKeyX963: Data,
+        certificateDER: Data,
+        label: String
+    ) throws -> SecIdentity {
         KeychainLock.acquire()
         defer { KeychainLock.release() }
         let keyAttributes: [String: Any] = [
