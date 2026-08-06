@@ -276,6 +276,20 @@ public final class Daemon: Sendable {
                 _ = try raw.decode(SessionOpen.self)
                 let (sessionID, token) = await registry.openSession()
                 try await stream.send(SessionOpened(sessionID: sessionID, token: token, capabilities: filling.capabilities))
+                // Which road the session was *born* on. The re-attach below
+                // has said this since the walk-out take, for a reason that
+                // applies here word for word — a 10.86.0.x on the Mac's
+                // terminal, in shot, is the difference between the claim and
+                // the evidence for it — and a cold open is the half the away
+                // claim actually rests on. It was never written, so the one
+                // scenario nobody could photograph was the headline one.
+                //
+                // It matters because the client *races* its stored roads and
+                // keeps whichever answers: a session that came over the
+                // tailnet and one that came over the mesh are indistinguishable
+                // from every other line in this log, and only one of them is
+                // the claim.
+                Log.info("session \(sessionID) opened from \(stream.remoteEndpointDescription() ?? "an unnamed path")")
             case .grantSubscribe:
                 _ = try raw.decode(GrantSubscribe.self)
                 guard let grants, let device = await adminDevice(on: stream, grants: grants) else {
