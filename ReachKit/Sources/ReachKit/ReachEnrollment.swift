@@ -170,19 +170,24 @@ public enum ReachEnrollment {
         // the exceptional one — it is the only one — and the sentence that
         // could tell a person their request is still on the desk was
         // unreachable in precisely the case that produces it every time.
-        // ⚠️ It says "usually" because the desk is the one organ in the daemon
-        // with nothing on disk: its parked requests, its held verdicts and its
-        // request index are all process memory. So the promise is true for the
-        // ending it was written for — iOS suspending this app while the
-        // operator walks to the keeper — and false if the daemon itself
-        // restarts in that window, which takes a ruling the human has already
-        // made and asks them for it again. Knocking again is still the right
-        // move in both cases; only the certainty differs, and claiming the
-        // certainty we do not have is what this sentence must not do.
+        // ⚠️ It says "usually" because the desk keeps nothing on disk: its
+        // parked requests, its held verdicts and its request index are all
+        // process memory. So the promise is true for the ending it was
+        // written for — iOS suspending this app while the operator walks to
+        // the keeper — and false in **two** cases, not one. A daemon that
+        // restarts drops the ruling outright; and a daemon that never
+        // restarts still retires it after `GrantDesk.holdWindow`, ten
+        // minutes, which is the likelier of the two for an app the operator
+        // came back to slowly. Both take a ruling the human already made and
+        // ask them for it again. Knocking again is still the right move in
+        // every case; only the certainty differs, and claiming the certainty
+        // we do not have is what this sentence must not do. The window is
+        // stated out loud because "usually" alone leaves a person guessing
+        // whether to wait or knock, and ten minutes answers that.
         let ruled = await FrameEnding.next(from: &frames)
         guard case .frame(let grantRaw) = ruled else {
             throw ReachEnrollmentError.sequence(ruled.detailing(
-                "the connection ended while the request was parked on the keeper's sheet — usually the ruling is not lost, the cluster holds it and this app's next knock collects it; if the cluster restarted in the meantime the sheet comes round once more"
+                "the connection ended while the request was parked on the keeper's sheet — usually the ruling is not lost, the cluster holds it for ten minutes and this app's next knock collects it; if the cluster restarted or that window passed, the sheet comes round once more"
             ))
         }
         if grantRaw.type == .errorFrame {
