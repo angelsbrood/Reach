@@ -5,8 +5,20 @@ import ReachWire
 /// Session residency, minimal per the named stub: generations are owned by
 /// the registry and decoupled from connections — a transport death leaves
 /// the generation running inside its residency window, and a re-attach
-/// replays the un-acked buffer then continues live. One in-flight
-/// generation per session is the tested v0 invariant; the model holds more.
+/// replays the un-acked buffer then continues live.
+///
+/// Generations are keyed by genID and nothing caps how many a session holds.
+/// A `generationAlreadyRunning` case was declared here and never thrown, so
+/// "one in-flight generation per session" was a convention no code kept;
+/// enforcing it would have been worse than dropping it, because
+/// `begin-rejected` is precisely the client's cue to discard its session and
+/// open a fresh one — a well-behaved app would have answered the refusal by
+/// silently splitting itself in two.
+///
+/// Nothing here survives the process. That is deliberate and it is the whole
+/// of what a restart costs: the transcript rides the wire on every
+/// `GenerateBegin`, so a lost session loses a round trip rather than a
+/// conversation, and the only casualty is a generation actually in flight.
 public actor SessionRegistry {
     public struct Limits: Sendable {
         public var residencyWindow: Duration = .seconds(120)
@@ -24,11 +36,34 @@ public actor SessionRegistry {
         public init() {}
     }
 
-    public enum RegistryError: Error, Sendable {
+    /// These three cross the wire verbatim — `Daemon` interpolates them into
+    /// `ErrorFrame.message`, which the asking app renders on a screen. They
+    /// went years as bare case names: `ErrorLegibilityTests` was written to
+    /// outlaw exactly that and quotes `unknownSession` as its example, but
+    /// held every error type except this one, and stood in a hand-written
+    /// message the daemon never sends. So the suite passed while the string a
+    /// person actually met after a restart read `unknownSession`.
+    ///
+    /// The daemon cannot tell a restart from a session that aged out — both
+    /// are simply a table with no such row — so none of these claims to know
+    /// which. They say what is true either way, and what to do about it.
+    public enum RegistryError: Error, Sendable, Equatable, CustomStringConvertible, LocalizedError {
         case unknownSession
         case badToken
         case unknownGeneration
-        case generationAlreadyRunning
+
+        public var description: String {
+            switch self {
+            case .unknownSession:
+                "the cluster has no session by that name — it was let go after sitting idle, or the daemon holding it restarted"
+            case .badToken:
+                "that session exists, but the token offered for it is not the one it was opened with"
+            case .unknownGeneration:
+                "the cluster has no generation by that name on this session — it ended and was let go, or it did not outlive a restart"
+            }
+        }
+
+        public var errorDescription: String? { description }
     }
 
     private struct GenerationRecord {

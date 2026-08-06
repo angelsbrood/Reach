@@ -209,6 +209,16 @@ public struct ReachExecutor: FoundationModels.LanguageModelExecutor {
                 // the open into the loop would make an ungranted app hang for
                 // two minutes instead of saying so at once.
                 if case .identityNotRegistered = error { throw error }
+                // A re-attach is only sent for a generation this call has
+                // already taken tokens from, so a refusal to one always means
+                // the same thing: what was streaming is gone. Terminal either
+                // way — re-beginning is the app's call, never the transport's,
+                // because tokens a person has read cannot be un-read and a
+                // tool that ran in the app cannot be un-run. What changes is
+                // that the ending now says which happened.
+                if case .remote(let code, let message) = error, code == "reattach-rejected" {
+                    throw ReachError.generationLost(message)
+                }
                 if case .remote = error { throw error }
                 // Which budget applies is decided by whether anything is
                 // resident to come back to, and the only evidence of that is

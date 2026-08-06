@@ -36,7 +36,25 @@ import Testing
         WireError.malformedFrame("GenerateBegin: missing transcript"),
         CAError.stateMissing("/tmp/reach/ca"),
         CAError.stateExists("/tmp/reach/ca"),
-        ReachError.remote(code: "reattach-rejected", message: "unknown generation"),
+        // The three the session registry sends across the wire. They were
+        // missing while this suite's own header quoted `unknownSession` as
+        // the thing it exists to outlaw, and the `.remote` fixture below
+        // stood in a hand-written "unknown generation" the daemon never
+        // sends — two words, so it passed, while the real string was one
+        // token. A corpus that omits the type it was written for cannot fail
+        // where it matters, so the daemon's own values go in first and the
+        // stand-in now carries what the daemon actually says.
+        SessionRegistry.RegistryError.unknownSession,
+        SessionRegistry.RegistryError.badToken,
+        SessionRegistry.RegistryError.unknownGeneration,
+        ReachError.remote(
+            code: "reattach-rejected",
+            message: "\(SessionRegistry.RegistryError.unknownGeneration)"
+        ),
+        // What a person meets when the cluster restarts mid-answer, built
+        // the way the executor builds it: the daemon's rendered reason
+        // wrapped in what it means.
+        ReachError.generationLost("\(SessionRegistry.RegistryError.unknownSession)"),
         ReachError.identityNotRegistered("reach-app-systems.reach.example"),
         ReachError.sessionRejected("token did not match"),
         ReachError.transport("no route to host"),

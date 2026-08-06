@@ -17,6 +17,17 @@ public enum ReachError: Error, Sendable, CustomStringConvertible, LocalizedError
     /// the roads and cannot use them needs its tunnel up. Those are different
     /// next actions and the coarse prefix could tell neither.
     case unreachable(roads: Int, stored: Bool)
+    /// An answer that had already begun arriving cannot be picked up again.
+    ///
+    /// Separate from `.remote` because a re-attach is only ever sent for a
+    /// generation this call has already taken tokens from, so a refusal to
+    /// one is not the cluster declining a request — it is the cluster no
+    /// longer holding what was mid-flight. Rendered as "the cluster refused
+    /// this (reattach-rejected)" it described the wrong event to the only
+    /// person who would read it, and left out the one thing they can act on.
+    /// The cluster's own reason travels through unaltered; what is added is
+    /// what it means and what to do about it.
+    case generationLost(String)
 
     public var description: String {
         switch self {
@@ -30,6 +41,8 @@ public enum ReachError: Error, Sendable, CustomStringConvertible, LocalizedError
             "the cluster refused this (\(code)): \(message)"
         case .transport(let detail):
             "could not reach the cluster: \(detail)"
+        case .generationLost(let reason):
+            "the answer stopped partway and cannot be picked up again: \(reason). Asking again starts a new one."
         case .unreachable(let roads, let stored):
             if stored {
                 "no road reached the cluster — nothing answered on \(Self.roads(roads)), and those are the addresses it last answered on. The cluster may be off, or this device may need its mesh tunnel up."

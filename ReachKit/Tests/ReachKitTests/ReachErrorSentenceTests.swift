@@ -11,6 +11,38 @@ import Testing
 /// case has to get right: it counts roads truthfully, and it tells the two
 /// situations apart, because they have different next actions.
 @Suite struct ReachErrorSentenceTests {
+    /// A restart mid-answer used to read `the cluster refused this
+    /// (reattach-rejected): unknownSession` under half an answer — the wrong
+    /// event, in the daemon's private vocabulary, with no next action. These
+    /// hold the three things the replacement has to do.
+    @Test func aLostAnswerSaysItStoppedRatherThanThatItWasRefused() {
+        let sentence = "\(ReachError.generationLost("the cluster has no session by that name"))"
+        #expect(sentence.contains("stopped partway"))
+        #expect(!sentence.contains("refused"), "the cluster did not decline anything; it stopped holding it")
+    }
+
+    @Test func aLostAnswerSaysWhatToDoNext() {
+        let sentence = "\(ReachError.generationLost("the daemon holding it restarted"))"
+        #expect(sentence.lowercased().contains("asking again"))
+    }
+
+    @Test func aLostAnswerKeepsTheClustersOwnReason() {
+        // The wire's reason beats one invented here, and it is the only part
+        // that can tell an idle eviction from a restart.
+        let reason = "it did not outlive a restart"
+        #expect("\(ReachError.generationLost(reason))".contains(reason))
+    }
+
+    @Test func aLostAnswerDoesNotReadLikeAnUnreachableCluster() {
+        // Different situations, different next actions: one is "ask again",
+        // the other is "bring a road up". A reader who confuses them does the
+        // wrong thing, so the sentences must not converge.
+        let lost = "\(ReachError.generationLost("the daemon holding it restarted"))"
+        #expect(!lost.contains("no road reached the cluster"))
+        #expect(!lost.contains("mesh tunnel"))
+        #expect(lost != "\(ReachError.unreachable(roads: 3, stored: true))")
+    }
+
     @Test func oneRoadIsNotCalledOneRoads() {
         let sentence = "\(ReachError.unreachable(roads: 1, stored: false))"
         #expect(sentence.contains("the one road it knows"))
