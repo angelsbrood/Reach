@@ -212,7 +212,16 @@ public final class Daemon: Sendable {
             switch first.type {
             case .hello:
                 _ = try first.decode(Hello.self)
-                try await controlLoop(stream: stream, iterator: &iterator)
+                let ending = try await controlLoop(stream: stream, iterator: &iterator)
+                // How a control stream ends is a decision, so it is made where
+                // the decision belongs and logged from the answer — not left
+                // to fall into the catch below, which is where it used to go.
+                if ending.peerWentAway {
+                    Log.info(ending.accountOfAControlStream)
+                } else {
+                    Log.error(ending.accountOfAControlStream)
+                }
+                stream.cancel()
             case .generateBegin:
                 let begin = try first.decode(GenerateBegin.self)
                 try await generationLoop(stream: stream, iterator: &iterator, begin: begin)
@@ -229,10 +238,23 @@ public final class Daemon: Sendable {
         }
     }
 
+    /// Serves the control stream until it ends, and returns **how** it ended.
+    ///
+    /// The ending is a return value rather than a throw for the reason
+    /// `FrameEnding` exists at all: `while let raw = try await iterator.next()`
+    /// handles a clean close and lets a reset throw straight past, into
+    /// `serve`'s catch, which logged `stream ended: <socket error>` at error
+    /// level. An app quitting with a live control stream is the most ordinary
+    /// traffic this daemon sees, and it is the traffic a restart generates
+    /// most — so the log filled with errors for nothing going wrong. That is
+    /// 7f's reading again, one shape over.
+    ///
+    /// It still throws for what genuinely fails: a send that will not go, a
+    /// frame that will not decode. Those are faults and belong in the catch.
     private func controlLoop(
         stream: ReachTransport.QUICStream,
         iterator: inout AsyncThrowingStream<RawFrame, Error>.AsyncIterator
-    ) async throws {
+    ) async throws -> FrameEnding {
         try await stream.send(HelloAck(
             cluster: config.clusterName,
             models: [ModelDescriptor(id: filling.modelID, displayName: filling.displayName, capabilities: filling.capabilities)],
@@ -244,7 +266,9 @@ public final class Daemon: Sendable {
         var admin: DeviceRegistry.Device?
         var forwarder: Task<Void, Never>?
         defer { forwarder?.cancel() }
-        while let raw = try await iterator.next() {
+        while true {
+            let next = await FrameEnding.next(from: &iterator)
+            guard case .frame(let raw) = next else { return next }
             switch raw.type {
             case .sessionOpen:
                 // Decoded so a malformed frame is still refused here; its
@@ -419,6 +443,55 @@ private actor StateBox {
         enrollListener?.cancel()
         tasks.forEach { $0.cancel() }
         tasks = []
+    }
+}
+
+/// How a served control stream ended, and whether that is news or a fault.
+///
+/// The same move `EnrollmentService` makes with `appHalfConverges` and
+/// `reason(waitingFor:)`, for the same reason: the level has to *follow* from
+/// a decision, and a decision that lives in a log line cannot be tested. Both
+/// of these are values, and the tests read the values.
+extension FrameEnding {
+    /// Whether this ending is just a peer going away.
+    ///
+    /// Two of the three are. A control stream closes cleanly when an app is
+    /// done with it, and it resets when the app is killed, suspended past its
+    /// keepalive, or loses its network — an app quitting mid-session is the
+    /// single most common thing that happens to this daemon, and after a
+    /// restart it is nearly all of the traffic. Neither is a fault and neither
+    /// costs anything: the session outlives the connection by design.
+    ///
+    /// A `WireError` is the exception, and it is the reason this is not simply
+    /// "the loop stopped". A peer whose bytes will not parse as frames is not
+    /// leaving, it is speaking something this daemon does not know — no
+    /// version negotiation exists to have refused it earlier, so this line is
+    /// where it surfaces.
+    ///
+    /// `.frame` cannot arrive here — the loop only returns on a non-frame —
+    /// but if it ever did it would mean a frame was read and dropped, which is
+    /// a fault by any reading.
+    var peerWentAway: Bool {
+        switch self {
+        case .frame: false
+        case .closed: true
+        case .broke(let error): error is TransportError
+        }
+    }
+
+    /// What to write down about it. Carries the transport's own words in the
+    /// reset case, because that is the part naming what actually happened.
+    var accountOfAControlStream: String {
+        switch self {
+        case .frame(let raw):
+            "a control stream ended holding an unread \(raw.type) — that is a fault in the loop, not in the peer"
+        case .closed:
+            "an app closed its control stream"
+        case .broke(let error) where error is TransportError:
+            "an app's control stream went away: \(error). It quit, slept, or lost its network; anything it had running is held for the residency window"
+        case .broke(let error):
+            "a control stream carried something this daemon could not read as a frame: \(error)"
+        }
     }
 }
 

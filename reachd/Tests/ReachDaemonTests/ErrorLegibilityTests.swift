@@ -211,6 +211,59 @@ import Testing
         )
     }
 
+    /// The same question one listener over, and the same answer: an app going
+    /// away is news, not a fault.
+    ///
+    /// `serve` let a control stream's ending throw past `while let raw = try
+    /// await iterator.next()` into its catch, which wrote `stream ended:
+    /// POSIXErrorCode 57` at error level. An app quitting with a live control
+    /// stream is the commonest thing that happens to this daemon and nearly
+    /// all of the traffic just after a restart, so the log filled with errors
+    /// for nothing going wrong — 7f's reading, on the listener 7f did not
+    /// reach. Now the ending is a returned value and the level follows from
+    /// it, which is what makes it assertable here at all: the daemon has no
+    /// log sink a test can read, and does not need one.
+    @Test func aControlStreamKnowsWhichEndingsAreJustSomeoneLeaving() {
+        #expect(FrameEnding.closed.peerWentAway)
+        #expect(FrameEnding.broke(
+            TransportError.connectionFailed("POSIXErrorCode(rawValue: 57): Socket is not connected")
+        ).peerWentAway)
+        // The one that is not a departure: bytes that will not parse as
+        // frames. No version negotiation exists to have refused this peer
+        // earlier, so this is where it surfaces — and it must not be filed
+        // under an app closing its laptop.
+        #expect(
+            FrameEnding.broke(WireError.unknownFrameType(99)).peerWentAway == false,
+            "a peer speaking something unparseable is not a peer leaving"
+        )
+        #expect(
+            FrameEnding.frame(RawFrame(type: Ping.frameType, body: Data())).peerWentAway == false,
+            "returning while still holding a frame is a fault in the loop"
+        )
+    }
+
+    /// What the operator reads in `~/Library/Logs/reachd.log`. Both output
+    /// streams land in that one file and neither level prints a tag, so the
+    /// sentence is the whole of the distinction a person gets.
+    @Test func aDepartingStreamSaysThatNothingWasLost() {
+        let reset = FrameEnding.broke(
+            TransportError.connectionFailed("POSIXErrorCode(rawValue: 57): Socket is not connected")
+        ).accountOfAControlStream
+        // The transport's own words, which name what happened.
+        #expect(reset.contains("Socket is not connected"))
+        // And the part that stops it reading as a loss.
+        #expect(reset.contains("residency window"))
+        #expect(reset.first?.isUppercase != true, "reads like a type name: \(reset)")
+
+        let unreadable = FrameEnding.broke(WireError.frameTooLarge(1 << 25)).accountOfAControlStream
+        #expect(unreadable.contains("could not read"))
+        // The two must not converge — one is an app leaving, the other is a
+        // peer this daemon cannot talk to, and they take different actions.
+        #expect(!unreadable.contains("quit, slept"))
+
+        #expect(FrameEnding.closed.accountOfAControlStream.contains("closed its control stream"))
+    }
+
     /// A refusal that travelled the wire keeps the daemon's own words. This
     /// is the half that matters at a venue: the Mac knows why it refused and
     /// the phone is the screen someone is looking at.
