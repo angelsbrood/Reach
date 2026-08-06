@@ -75,9 +75,12 @@ knocks at the enrollment door advertised under the same name
 ```
 
 No confirming frame here, and the asymmetry is the point rather than an
-oversight. The desk **holds** a ruled verdict, and a re-knock with the same
-app key collects it — so an app whose ceremony tears keeps a valid
-certificate and converges by asking again. The device half could not do
+oversight. The desk **holds** a ruled verdict for ten minutes, and a re-knock
+with the same app key inside that window collects it — so an app whose
+ceremony tears keeps a valid certificate and converges by asking again. Past
+ten minutes the desk retires it and the next knock is a fresh request the
+human rules again; a daemon that restarts drops it immediately, since the
+desk keeps nothing on disk. The device half could not do
 that: its authorization is a one-time token, spent the moment
 `EnrollBegin` arrives, so there was nothing to retry with and nothing to
 converge on. A frame the device half needs is one this half would only

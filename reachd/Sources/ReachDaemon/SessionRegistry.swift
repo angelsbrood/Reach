@@ -290,7 +290,17 @@ public actor SessionRegistry {
         record.bufferBytes += stamped.approximateSize
         if record.bufferBytes > limits.bufferCapBytes {
             // Beyond text-demo scale; drop the oldest un-acked rather than
-            // grow without bound. A re-attach past this point restarts.
+            // grow without bound.
+            //
+            // ⚠️ What this costs is not "a re-attach past this point
+            // restarts" — nothing implements a restart. The dropped events
+            // are simply gone, and a client re-attaching from `fromSeq` gets
+            // the replay resuming *after* the hole. Its dedupe only skips
+            // seqs at or below what it already has, so it accepts the far
+            // side of the gap without noticing one: an un-acked span past
+            // the cap yields a silently truncated answer. Un-acked is the
+            // operative word — the client acks each event as it arrives, so
+            // this needs 4 MiB in flight faster than acks return.
             record.buffer.removeFirst()
         }
         record.live?.yield(stamped)

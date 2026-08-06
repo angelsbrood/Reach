@@ -97,8 +97,10 @@ public actor GrantDesk {
 
     /// Retires what the happy path never returns for; call periodically.
     ///
-    /// The desk is the only organ in the daemon with no persistence at all,
-    /// which is exactly why nothing ever noticed it growing: there is no
+    /// The desk keeps nothing on disk — the session registry is the same
+    /// (`docs/wire.md`: "Nothing in the session registry survives the daemon
+    /// exiting"), so the desk is one of two such organs, not the only one.
+    /// That is exactly why nothing ever noticed it growing: there is no
     /// file to look at. Two tables outlived their own stated window. A
     /// verdict the human allowed is cleared by `collected`, or lazily by a
     /// later knock from the same app — and an app that crashed, was
@@ -108,8 +110,11 @@ public actor GrantDesk {
     /// was superseded left one.
     ///
     /// `holdWindow` is the desk's one retention rule and both tables now
-    /// obey it, which is also what `docs/wire.md` has been claiming all
-    /// along — that a verdict is *held* ten minutes, not kept forever.
+    /// obey it: a verdict is *held* ten minutes, not kept forever. That rule
+    /// is the desk's own and is written down nowhere else — `docs/wire.md`
+    /// names `GrantRule` in its frame table and says nothing about how long
+    /// the desk keeps one. `docs/ceremony.md` is where the promise is made
+    /// to a reader, so it is where the ten minutes has to appear.
     @discardableResult
     public func sweep() -> Int {
         let now = Date()

@@ -11,10 +11,18 @@ public enum DaemonInfo {
     public static let wireVersion = Wire.version
 
     /// Runtime state root; never inside the repository. `REACH_STATE_DIR`
-    /// overrides it — the only way to exercise the daemon end to end against
-    /// throwaway state rather than the operator's real keys, since
-    /// `applicationSupportDirectory` resolves the home directory from the
-    /// password database and ignores `HOME`.
+    /// overrides it, because `applicationSupportDirectory` resolves the home
+    /// directory from the password database and ignores `HOME`.
+    ///
+    /// It is not how the tests reach throwaway state — they pass a path in,
+    /// through `HostCheck.examine(stateDirectory:)`, `DaemonConfig`'s
+    /// `in:`/`from:`/`to:`, and `reachd doctor --state`. Nothing in the tree
+    /// sets this variable, and the generated LaunchAgent deliberately does
+    /// not: the subcommands resolve their own state root from the operator's
+    /// shell, so an override the agent alone saw would split `reachd pair`'s
+    /// CA from the one the running daemon serves. It survives as the
+    /// documented lever for the LaunchDaemon question, which
+    /// `docs/running.md` describes and §3 left at login-not-boot.
     public static var stateDirectory: URL {
         if let override = ProcessInfo.processInfo.environment["REACH_STATE_DIR"], !override.isEmpty {
             return URL(fileURLWithPath: override, isDirectory: true)

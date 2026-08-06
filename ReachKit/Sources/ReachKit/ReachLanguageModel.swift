@@ -268,8 +268,18 @@ public struct ReachExecutor: FoundationModels.LanguageModelExecutor {
                     action: .appendArguments(content, tokenCount: tokenCount)
                 )
             ))
-        case .reasoningAppend, .usage:
-            // Reserved vocabulary; the v0 daemon does not emit these.
+        case .reasoningAppend:
+            // Reserved vocabulary; the v0 daemon does not emit this.
+            break
+        case .usage:
+            // Dropped, and not because it never arrives: `MLXFilling` yields
+            // usage on every generation, so the real daemon sends this and
+            // this line throws it away. It is not wired because ReachKit has
+            // nowhere to put it — the framework's own `updateUsage` is not a
+            // surface a client library should reach for, and a ReachKit-only
+            // accessor would be the more honest home. Surfacing it is a
+            // scoped item, not a line: it wants an API on this type, and the
+            // daemon side is already done.
             break
         case .finished(let reason):
             switch reason {
