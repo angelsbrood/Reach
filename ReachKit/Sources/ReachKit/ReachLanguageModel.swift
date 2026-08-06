@@ -99,7 +99,12 @@ public struct ReachExecutor: FoundationModels.LanguageModelExecutor {
         // which takes seconds, not minutes. Spending the residency budget here
         // would turn "there is no road to the cluster" into a two-minute hang,
         // which is the opposite of saying so.
-        let coldOpenDeadline = ContinuousClock.now + .seconds(10)
+        //
+        // `var`, and re-armed wherever this call goes back to having nothing
+        // resident: as a `let` it was fixed before the event it is meant to
+        // budget for, so a reopen inherited a deadline already in the past and
+        // got no attempt at all.
+        var coldOpenDeadline = ContinuousClock.now + .seconds(10)
         var backoff: Duration = .milliseconds(250)
         // A generation that never started can be re-begun against a fresh
         // session; once tokens are flowing, only re-attach is safe.
@@ -178,14 +183,25 @@ public struct ReachExecutor: FoundationModels.LanguageModelExecutor {
                 // A session the daemon no longer knows (it restarted, or the
                 // token expired) is recoverable if nothing has streamed yet:
                 // drop the stale session, open a fresh one, begin again.
+                //
+                // Only `begin-rejected` can arrive in that state. A re-attach
+                // is sent only under `if let lastReceived`, so pairing
+                // `reattach-rejected` with `lastReceived == nil` described a
+                // reachable case that is not one — it read as a second
+                // recovery path and was none.
                 if case .remote(let code, _) = error,
-                   code == "begin-rejected" || code == "reattach-rejected",
+                   code == "begin-rejected",
                    lastReceived == nil, freshStartRetries > 0 {
                     freshStartRetries -= 1
                     await ReachConnectionHub.shared.invalidateSession(for: configuration)
                     // Dropped, not reopened here — the top of the loop opens
-                    // it, so the fresh start gets the same budget too.
+                    // it, so the fresh start gets the same budget too. Both
+                    // halves of "the same budget" are re-armed here: the
+                    // deadline, and the backoff that would otherwise arrive
+                    // already doubled and eat it.
                     session = nil
+                    coldOpenDeadline = ContinuousClock.now + .seconds(10)
+                    backoff = .milliseconds(250)
                     continue
                 }
                 // An app that was never granted access does not become granted
@@ -194,9 +210,18 @@ public struct ReachExecutor: FoundationModels.LanguageModelExecutor {
                 // two minutes instead of saying so at once.
                 if case .identityNotRegistered = error { throw error }
                 if case .remote = error { throw error }
+                // Which budget applies is decided by whether anything is
+                // resident to come back to, and the only evidence of that is
+                // an event this call has already received. It used to be
+                // decided by `session == nil` — but the hub caches a session
+                // handle across calls and hands it back without dialling, so a
+                // handle for a daemon that is no longer running still read as
+                // "connected". A fresh ask with nothing resident therefore
+                // spent the full residency window in silence: measured at
+                // 118.6 s against a comment promising it could not happen.
                 try await waitBeforeRetry(
                     &backoff,
-                    deadline: session == nil ? coldOpenDeadline : reconnectDeadline,
+                    deadline: lastReceived == nil ? coldOpenDeadline : reconnectDeadline,
                     cause: error
                 )
             } catch is CancellationError {
@@ -204,7 +229,7 @@ public struct ReachExecutor: FoundationModels.LanguageModelExecutor {
             } catch {
                 try await waitBeforeRetry(
                     &backoff,
-                    deadline: session == nil ? coldOpenDeadline : reconnectDeadline,
+                    deadline: lastReceived == nil ? coldOpenDeadline : reconnectDeadline,
                     cause: error
                 )
             }

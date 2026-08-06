@@ -38,7 +38,41 @@ struct Selftest: AsyncParsableCommand {
     @Option(name: .long, help: "Model id for the MLX filling.")
     var model = "default"
 
+    /// Kill a real daemon process mid-generation and report what the app is
+    /// told, and how long it waited to be told it. See `SelftestRestart.swift`
+    /// for why this is a child process and not a second in-process `Daemon`.
+    @Flag(name: .long, help: "Kill the daemon mid-generation and observe the ending.")
+    var restart = false
+
+    /// Seconds to wait before bringing the daemon back, simulating a
+    /// supervisor. Negative leaves it down — which is what an unsupervised
+    /// host does today, and a different experiment.
+    @Option(name: .customLong("relaunch-after"), help: "Seconds after the kill to relaunch the daemon (-1 to leave it down).")
+    var relaunchAfter: Double = -1
+
+    /// Warm the cached session handle, kill the daemon, then ask something
+    /// new. Nothing is resident, so the refusal should be quick.
+    @Flag(name: .customLong("cold-ask"), help: "Ask a fresh question with the daemon down and the session handle cached.")
+    var coldAsk = false
+
+    @Flag(name: .customLong("restart-serve"), help: .hidden)
+    var restartServe = false
+
+    @Option(name: .customLong("state-dir"), help: .hidden)
+    var stateDir: String?
+
+    @Option(name: .customLong("server-label"), help: .hidden)
+    var serverLabel = "reach-restart-server"
+
     func run() async throws {
+        if restartServe {
+            try await runRestartServe()
+            return
+        }
+        if restart {
+            try await runRestartRig()
+            return
+        }
         let clock = ContinuousClock()
         let ca = try ClusterCA.create(commonName: "Reach Selftest CA")
         let server = try ca.issueServer(commonName: "localhost", dnsNames: ["localhost"], ipAddresses: [[127, 0, 0, 1]])
