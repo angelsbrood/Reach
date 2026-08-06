@@ -105,18 +105,22 @@ private func roundTrip<F: WireFrame>(_ frame: F) throws -> F {
         #expect(decoded.port == nil)
     }
 
+    /// `SessionResume`/`SessionResumed` were round-tripped here and nowhere
+    /// else — this was their only exercise in the whole tree, and a codec test
+    /// is not a client. They are deleted; their type bytes stay reserved.
     @Test func sessionFramesRoundTrip() throws {
         let opened = SessionOpened(sessionID: UUID(), token: "tok", capabilities: ["text"])
         #expect(try roundTrip(opened) == opened)
+    }
 
-        let resume = SessionResume(
-            sessionID: UUID(), token: "tok",
-            generations: [.init(genID: UUID(), lastReceivedSeq: 41)]
-        )
-        #expect(try roundTrip(resume) == resume)
-
-        let resumed = SessionResumed(generations: [.init(genID: UUID(), state: .streaming)])
-        #expect(try roundTrip(resumed) == resumed)
+    /// 5 and 6 belonged to the deleted resume frames and must not be handed to
+    /// anything else: a v0 daemon still reads those bytes as a resume, so a
+    /// reuse would be decoded as the wrong frame rather than refused as an
+    /// unknown one. `FrameType` throws on unrecognized bytes, which is what
+    /// makes reserving them safe and reusing them silent.
+    @Test func theRetiredResumeTypeBytesStayRetired() {
+        #expect(FrameType(rawValue: 5) == nil)
+        #expect(FrameType(rawValue: 6) == nil)
     }
 
     @Test func grantFramesRoundTrip() throws {

@@ -78,58 +78,20 @@ public struct SessionOpened: WireFrame, Equatable {
     }
 }
 
-public struct SessionResume: WireFrame, Equatable {
-    public static let frameType = FrameType.sessionResume
-
-    public struct GenerationCursor: Codable, Sendable, Equatable {
-        public var genID: UUID
-        public var lastReceivedSeq: UInt64?
-
-        public init(genID: UUID, lastReceivedSeq: UInt64?) {
-            self.genID = genID
-            self.lastReceivedSeq = lastReceivedSeq
-        }
-    }
-
-    public var sessionID: UUID
-    public var token: String
-    public var generations: [GenerationCursor]
-
-    public init(sessionID: UUID, token: String, generations: [GenerationCursor]) {
-        self.sessionID = sessionID
-        self.token = token
-        self.generations = generations
-    }
-}
-
+/// How a generation ended, or that it has not.
+///
+/// This outlived the two frames it was written for (`SessionResume` and
+/// `SessionResumed`, deleted — see `FrameType`). It is not on the wire at all
+/// now; the session registry keeps it as the state of a generation record,
+/// which is the one use it ever had. `unknown` went with the frames: nothing
+/// could produce it, and it was not a decoding fallback either — the raw
+/// values decode strictly, so an unrecognized state throws rather than
+/// arriving here.
 public enum WireGenerationState: String, Codable, Sendable, Equatable {
     case streaming
     case complete
     case failed
     case cancelled
-    case unknown
-}
-
-public struct SessionResumed: WireFrame, Equatable {
-    public static let frameType = FrameType.sessionResumed
-
-    public struct GenerationStatus: Codable, Sendable, Equatable {
-        public var genID: UUID
-        public var state: WireGenerationState
-        public var finalSeq: UInt64?
-
-        public init(genID: UUID, state: WireGenerationState, finalSeq: UInt64? = nil) {
-            self.genID = genID
-            self.state = state
-            self.finalSeq = finalSeq
-        }
-    }
-
-    public var generations: [GenerationStatus]
-
-    public init(generations: [GenerationStatus]) {
-        self.generations = generations
-    }
 }
 
 public struct Ping: WireFrame, Equatable {

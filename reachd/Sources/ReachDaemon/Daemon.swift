@@ -252,14 +252,6 @@ public final class Daemon: Sendable {
                 _ = try raw.decode(SessionOpen.self)
                 let (sessionID, token) = await registry.openSession()
                 try await stream.send(SessionOpened(sessionID: sessionID, token: token, capabilities: filling.capabilities))
-            case .sessionResume:
-                let resume = try raw.decode(SessionResume.self)
-                do {
-                    let status = try await registry.resumeStatus(sessionID: resume.sessionID, token: resume.token)
-                    try await stream.send(SessionResumed(generations: status))
-                } catch {
-                    try await stream.send(ErrorFrame(code: "resume-rejected", message: "\(error)"))
-                }
             case .grantSubscribe:
                 _ = try raw.decode(GrantSubscribe.self)
                 guard let grants, let device = await adminDevice(on: stream, grants: grants) else {

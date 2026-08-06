@@ -33,8 +33,7 @@ and yields whole frames, one instance per stream direction.
 | **2** | `HelloAck` | version, cluster, models, **addrs**, port |
 | **3** | `SessionOpen` | model id |
 | **4** | `SessionOpened` | session id, resume token, capabilities |
-| **5** | `SessionResume` | session id, token, per-generation cursors |
-| **6** | `SessionResumed` | per-generation state and final sequence |
+| **5, 6** | *reserved* | retired; see below |
 | **7** | `GrantSubscribe` | admin device only |
 | **8** | `GrantEvent` | a parked app request, for the sheet |
 | **9** | `GrantRule` | the human's verdict |
@@ -143,11 +142,14 @@ reconnects late still collects its ending. Re-attach is therefore not a retry:
   Ev{seq: fromSeq+1, …}                      daemon ──► client   (replay, then live)
 ```
 
-`SessionResume`/`SessionResumed` exist for a client that wants to ask what
-became of several generations before choosing one to re-attach. **ReachKit does
-not use them** — it re-attaches the single generation it is holding, and the
-frames are served but unexercised. Read that as a shape the wire allows, not a
-step in the normal path.
+Frame types **5 and 6 are reserved, not free.** They were `SessionResume` and
+`SessionResumed`, a preamble for asking what became of several generations
+before choosing one to re-attach. No client ever sent one, and re-attach does
+the whole job in a single trip: it is a lossless handover, not a probe that
+costs the generation something, so there was nothing a status call bought
+first. The frames are deleted; the two type bytes stay retired, because a
+daemon of this version still reads them as a resume and reusing them would be
+silently misparsed rather than refused.
 
 A `GenerateBegin` carrying a genID the daemon already knows is treated as a
 re-attach from sequence 0 — which makes losing the very first frame

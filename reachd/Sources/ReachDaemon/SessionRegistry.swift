@@ -133,13 +133,35 @@ public actor SessionRegistry {
         sessions[sessionID] = record
     }
 
-    public func resumeStatus(sessionID: UUID, token: String) throws -> [SessionResumed.GenerationStatus] {
+    /// What became of each generation in a session.
+    ///
+    /// This used to return the payload of a `SessionResumed` frame. No client
+    /// ever sent the `SessionResume` that asked for one, so both frames are
+    /// gone and this is registry-local now — it survives because it is the
+    /// only way to observe a generation's terminal state from outside, which
+    /// is how `aCancelledGenerationReachesATerminalState` caught `cancel`
+    /// leaving records `.streaming` forever.
+    public struct GenerationStatus: Sendable, Equatable {
+        public var genID: UUID
+        public var state: WireGenerationState
+        /// The seq of the last event, once there is a last event.
+        ///
+        /// ⚠️ As a wire cursor this was off by one — `ingest` stamps
+        /// `Ev(seq: nextSeq)` and *then* increments, so `nextSeq` is one past
+        /// the final event and a client re-attaching from it would have got
+        /// nothing. Nobody noticed because nobody read it. Kept as-is and
+        /// described honestly: it is "how many events there were", not "the
+        /// last one's seq", and only tests read it.
+        public var eventsIssued: UInt64?
+    }
+
+    public func resumeStatus(sessionID: UUID, token: String) throws -> [GenerationStatus] {
         try validate(sessionID: sessionID, token: token)
         return sessions[sessionID]!.generations.map { id, record in
-            SessionResumed.GenerationStatus(
+            GenerationStatus(
                 genID: id,
                 state: record.state,
-                finalSeq: record.state == .streaming ? nil : record.nextSeq
+                eventsIssued: record.state == .streaming ? nil : record.nextSeq
             )
         }
     }

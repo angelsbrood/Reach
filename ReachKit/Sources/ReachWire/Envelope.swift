@@ -7,8 +7,13 @@ public enum FrameType: UInt8, Codable, Sendable, CaseIterable {
     case helloAck = 2
     case sessionOpen = 3
     case sessionOpened = 4
-    case sessionResume = 5
-    case sessionResumed = 6
+    // 5 and 6 were `SessionResume`/`SessionResumed` and are reserved rather
+    // than reused. Nothing ever sent one: the frames, their per-generation
+    // cursors and `WireGenerationState.unknown` were daemon-side only, and
+    // `SessionResumed.finalSeq` was off by one against the Ev sequence space
+    // — a cursor no client could have resumed from, which is how we know none
+    // ever tried. `GenerateReattach` does the whole job in one trip.
+    // Renumbering would make a v0 daemon read a new frame as a resume.
     case grantSubscribe = 7
     case grantEvent = 8
     case grantRule = 9
