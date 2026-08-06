@@ -4,10 +4,30 @@ import ReachIdentity
 import Security
 import X509
 
-/// Turns issued key+cert material into a `SecIdentity`. The keychain is
-/// the production path; when the process lacks keychain access
-/// (errSecMissingEntitlement — CI/harness sandboxes), falls back to an
-/// openssl-assembled PKCS#12, which `SecPKCS12Import` accepts everywhere.
+/// Turns issued key+cert material into a `SecIdentity`.
+///
+/// ⚠️ **The keychain branch below is not the path anything here actually
+/// takes**, and believing otherwise cost an afternoon. `SecItemAdd` needs a
+/// keychain-access entitlement that a plain SwiftPM executable does not
+/// carry, so `reachd` — and every `swift test` bundle, and any scratch
+/// script — gets `errSecMissingEntitlement` and lands in `viaPKCS12`. The
+/// openssl route is not a fallback for CI; **it is the production path**, on
+/// the daemon, on every start.
+///
+/// Two things follow, both of which have bitten:
+///
+/// 1. The PKCS#12 defect `IdentityError.pkcs12EmptyItemList` describes is not
+///    an unlucky corner — every identity in this project is minted through the
+///    call that exhibits it, which is why it dominates red runs.
+/// 2. `SecPKCS12Import` used to leave the key in the login keychain, where its
+///    access list could never match an ad-hoc signed binary. That produced a
+///    password dialog on the operator's Mac at the first client connection,
+///    invisible to the log and to `doctor`. `kSecImportToMemoryOnly` in
+///    `IdentityStore.importOnce` is what stops it; the account is there.
+///
+/// The keychain branch is kept because an entitled host — a signed app bundle
+/// rather than a bare executable — would take it, and the ceremony on device
+/// does store into the keychain directly.
 public enum IdentityMaterializer {
     /// Materializing an identity is several Security-framework calls in a
     /// row — a keychain add, or an openssl subprocess and a PKCS#12 import —
@@ -25,51 +45,6 @@ public enum IdentityMaterializer {
             privateKey: issued.privateKey,
             label: label
         )
-    }
-
-    /// The listener identity, re-derived on every start and made usable
-    /// without a password dialog.
-    ///
-    /// `serve` stores this under a fixed label, so the item outlives every
-    /// binary that ever ran — and the keychain's default ACL trusts exactly
-    /// the binary that created it. `reachd` is **ad-hoc signed**, so "that
-    /// binary" means the CDHash of one build: every rebuild made the running
-    /// daemon a stranger to its own key, and the dialog appeared at the first
-    /// client handshake rather than at start, so the log read `serving` while
-    /// the cluster was unreachable to anyone who was not sitting at the Mac.
-    /// "Always Allow" recorded a hash the next build invalidated, which is
-    /// why it never stuck.
-    ///
-    /// **The fix is the removal, not a wider ACL.** An item's access is fixed
-    /// when it is created, and the creator is whoever called `SecItemAdd` — so
-    /// deleting the predecessor and letting *this* build make a fresh one
-    /// leaves the default ACL pointing at the program that is actually going
-    /// to use the key. Nothing is widened, nothing is shared, and the key
-    /// stays restricted to one binary; it is simply the right one now.
-    ///
-    /// The obvious alternative — keep the item and widen its ACL to any
-    /// application — was tried first and abandoned: `kSecAttrAccess` is a
-    /// legacy file-keychain attribute that `SecItemAdd` rejects with
-    /// `errSecParam` when the key is supplied by reference, and it would have
-    /// meant four deprecated `SecKeychain` calls to weaken a guarantee this
-    /// does not need to weaken at all.
-    ///
-    /// ⚠️ **No test holds this, and none can from `swift test`.** The test
-    /// bundle has no keychain entitlement — `SecItemAdd` returns
-    /// `errSecMissingEntitlement` (-34018) — so every identity a test
-    /// materializes takes the openssl/PKCS#12 fallback below and the keychain
-    /// branch above is never executed. A test written against this passes on
-    /// the fallback and proves nothing about the path the daemon uses, which
-    /// is rule 6 with extra steps. The verification is on the host: reinstall,
-    /// connect a client, and watch for the absence of a password dialog.
-    ///
-    /// The same fact is worth knowing on its own — **the production identity
-    /// path has no automated coverage at all**, and the PKCS#12 defect that
-    /// dominates red runs is dominant partly because tests reach it every
-    /// single time.
-    public static func materializeListener(_ issued: ClusterCA.Issued, label: String) throws -> SecIdentity {
-        KeychainIdentity.remove(label: label)
-        return try materialize(issued, label: label)
     }
 
     /// The client-held-key variant: certificate as issued over the wire,

@@ -69,7 +69,7 @@ struct Serve: AsyncParsableCommand {
             ipAddresses: addresses,
             days: 30
         )
-        let identity = try IdentityMaterializer.materializeListener(server, label: "reachd-server")
+        let identity = try IdentityMaterializer.materialize(server, label: "reachd-server")
         let caCert = try IdentityStore.certificate(fromDER: ca.certificateDER())
 
         let filling = MLXFilling(modelID: config.modelID)

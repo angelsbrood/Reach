@@ -107,7 +107,36 @@ public enum IdentityStore {
 
     private static func importOnce(_ data: Data, passphrase: String) throws -> SecIdentity {
         var items: CFArray?
-        let options = [kSecImportExportPassphrase as String: passphrase] as CFDictionary
+        // ⚠️ `kSecImportToMemoryOnly` is load-bearing, and its absence was a
+        // defect a person met rather than a tidiness point.
+        //
+        // On macOS `SecPKCS12Import` writes the key into the login keychain as
+        // a side effect — labelled "Imported Private Key", because the archive
+        // carries no friendlyName — with an access list naming the importing
+        // binary. `reachd` is ad-hoc signed, so there is no stable designated
+        // requirement to record and macOS can only pin one build's CDHash.
+        // Every use of the key then raised
+        //
+        //     reachd wants to sign using key "Imported Private Key"
+        //
+        // on the operator's Mac, at the *first client connection* rather than
+        // at start — so the log read `serving`, `doctor` passed every check,
+        // and the cluster was unreachable to anyone not sitting at the machine.
+        // "Always Allow" wrote a hash the next build invalidated, so it could
+        // never stick however many times it was clicked.
+        //
+        // The keychain was never wanted here. This identity is re-derived from
+        // `ca/server-key.raw` on every start and needs to live exactly as long
+        // as the process. Memory-only also ends the accumulation the comment on
+        // `KeychainIdentity.remove` describes: a login keychain that had
+        // collected hundreds of these, 36 under "localhost" from one
+        // afternoon's test runs alone.
+        //
+        // Already the default on iOS; on macOS it must be asked for.
+        let options = [
+            kSecImportExportPassphrase as String: passphrase,
+            kSecImportToMemoryOnly as String: kCFBooleanTrue as Any,
+        ] as CFDictionary
         let status = KeychainLock.withLock { SecPKCS12Import(data as CFData, options, &items) }
         // Four different failures used to arrive as pkcs12ImportFailed(0),
         // which reads as "bad archive" and is not what any of them mean.
