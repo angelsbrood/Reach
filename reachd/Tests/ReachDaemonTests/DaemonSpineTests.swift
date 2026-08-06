@@ -46,7 +46,7 @@ struct ScriptedFilling: SlotFilling {
     /// ever ingested is a question about the filling, not about `cancel`.
     @Test func aCancelledGenerationReachesATerminalState() async throws {
         let registry = SessionRegistry()
-        let (sessionID, token) = await registry.openSession(modelID: "scripted")
+        let (sessionID, token) = await registry.openSession()
         let genID = UUID()
         let filling = ScriptedFilling(words: Array(repeating: "tick ", count: 60), delayMilliseconds: 40)
         let (stream, epoch) = try await registry.begin(
@@ -75,7 +75,7 @@ struct ScriptedFilling: SlotFilling {
 
     @Test func generationSurvivesDetachAndReplaysFromSeq() async throws {
         let registry = SessionRegistry()
-        let (sessionID, token) = await registry.openSession(modelID: "scripted")
+        let (sessionID, token) = await registry.openSession()
         try await registry.validate(sessionID: sessionID, token: token)
 
         let filling = ScriptedFilling()
@@ -144,7 +144,7 @@ struct ScriptedFilling: SlotFilling {
     /// after.
     @Test func aStaleConnectionsLateDetachCannotEndTheLiveOne() async throws {
         let registry = SessionRegistry()
-        let (sessionID, token) = await registry.openSession(modelID: "scripted")
+        let (sessionID, token) = await registry.openSession()
         try await registry.validate(sessionID: sessionID, token: token)
 
         let filling = ScriptedFilling()
@@ -172,7 +172,7 @@ struct ScriptedFilling: SlotFilling {
     /// that already lost the generation would kill it outright.
     @Test func aStaleConnectionCannotCancelTheLiveGeneration() async throws {
         let registry = SessionRegistry()
-        let (sessionID, token) = await registry.openSession(modelID: "scripted")
+        let (sessionID, token) = await registry.openSession()
         try await registry.validate(sessionID: sessionID, token: token)
 
         let filling = ScriptedFilling()
@@ -191,7 +191,7 @@ struct ScriptedFilling: SlotFilling {
 
     @Test func beginIsIdempotentForKnownGeneration() async throws {
         let registry = SessionRegistry()
-        let (sessionID, _) = await registry.openSession(modelID: "scripted")
+        let (sessionID, _) = await registry.openSession()
         let genID = UUID()
         let request = WireGenerationRequest(id: UUID(), transcript: Transcript())
         let filling = ScriptedFilling()
@@ -227,7 +227,7 @@ struct ScriptedFilling: SlotFilling {
         limits.idleSessionRetention = .milliseconds(40)
         let registry = SessionRegistry(limits: limits)
 
-        for _ in 0..<5 { _ = await registry.openSession(modelID: "scripted") }
+        for _ in 0..<5 { _ = await registry.openSession() }
         #expect(await registry.residentSessions == 5)
 
         // Not yet: a session is addressable until it has been idle its whole
@@ -247,7 +247,7 @@ struct ScriptedFilling: SlotFilling {
         limits.idleSessionRetention = .milliseconds(20)
         limits.completedRetention = .seconds(600)
         let registry = SessionRegistry(limits: limits)
-        let (sessionID, _) = await registry.openSession(modelID: "scripted")
+        let (sessionID, _) = await registry.openSession()
 
         let request = WireGenerationRequest(id: UUID(), transcript: Transcript())
         let filling = ScriptedFilling()
@@ -265,7 +265,7 @@ struct ScriptedFilling: SlotFilling {
         var limits = SessionRegistry.Limits()
         limits.residencyWindow = .milliseconds(60)
         let registry = SessionRegistry(limits: limits)
-        let (sessionID, _) = await registry.openSession(modelID: "scripted")
+        let (sessionID, _) = await registry.openSession()
         let genID = UUID()
         var slow = ScriptedFilling()
         slow.delayMilliseconds = 500
@@ -284,7 +284,7 @@ struct ScriptedFilling: SlotFilling {
 
     @Test func badTokenRejected() async throws {
         let registry = SessionRegistry()
-        let (sessionID, _) = await registry.openSession(modelID: "scripted")
+        let (sessionID, _) = await registry.openSession()
         await #expect(throws: SessionRegistry.RegistryError.self) {
             try await registry.validate(sessionID: sessionID, token: "wrong")
         }

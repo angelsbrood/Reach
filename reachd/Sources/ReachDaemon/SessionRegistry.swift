@@ -88,7 +88,6 @@ public actor SessionRegistry {
 
     private struct SessionRecord {
         var tokenHash: SHA256Digest
-        var modelID: String
         var generations: [UUID: GenerationRecord] = [:]
         var lastSeen: ContinuousClock.Instant
     }
@@ -103,12 +102,25 @@ public actor SessionRegistry {
 
     // MARK: Sessions
 
-    public func openSession(modelID: String) -> (sessionID: UUID, token: String) {
+    /// Opens a session and returns what proves it.
+    ///
+    /// This took a `modelID` and stored it, and nothing ever read the field —
+    /// not the registry, not `Daemon`, not a test. Both went, rather than
+    /// leaving a public function taking an argument it discards, which is the
+    /// worse of the two artefacts. A daemon serves one filling, so a session
+    /// has no model to disambiguate.
+    ///
+    /// ⚠️ What that leaves visible: `SessionOpen.modelID` still crosses the
+    /// wire and is now read by nothing at all, so a client asking for a model
+    /// this daemon does not serve is answered by the one it does, silently.
+    /// `HelloAck.models` is how a client is meant to know, but nothing
+    /// enforces it. That is a refusal the daemon does not have rather than a
+    /// claim it breaks, so it is logged, not fixed here.
+    public func openSession() -> (sessionID: UUID, token: String) {
         let sessionID = UUID()
         let token = Data((0..<32).map { _ in UInt8.random(in: .min ... .max) }).base64EncodedString()
         sessions[sessionID] = SessionRecord(
             tokenHash: SHA256.hash(data: Data(token.utf8)),
-            modelID: modelID,
             lastSeen: clock.now
         )
         return (sessionID, token)

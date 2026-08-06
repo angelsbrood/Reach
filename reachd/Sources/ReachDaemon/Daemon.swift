@@ -247,8 +247,10 @@ public final class Daemon: Sendable {
         while let raw = try await iterator.next() {
             switch raw.type {
             case .sessionOpen:
-                let open = try raw.decode(SessionOpen.self)
-                let (sessionID, token) = await registry.openSession(modelID: open.modelID)
+                // Decoded so a malformed frame is still refused here; its
+                // `modelID` is read by nothing — see `openSession`.
+                _ = try raw.decode(SessionOpen.self)
+                let (sessionID, token) = await registry.openSession()
                 try await stream.send(SessionOpened(sessionID: sessionID, token: token, capabilities: filling.capabilities))
             case .sessionResume:
                 let resume = try raw.decode(SessionResume.self)
