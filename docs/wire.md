@@ -138,12 +138,16 @@ residency window; completed generations are held 600 s so a client that
 reconnects late still collects its ending. Re-attach is therefore not a retry:
 
 ```
-  SessionResume{sessionID, token,
-                [{genID, lastReceivedSeq}]}  client ──► daemon
-  SessionResumed{[{genID, state, finalSeq}]} daemon ──► client
-  GenerateReattach{genID, fromSeq}           client ──► daemon
+  GenerateReattach{sessionID, token,
+                   genID, fromSeq}           client ──► daemon
   Ev{seq: fromSeq+1, …}                      daemon ──► client   (replay, then live)
 ```
+
+`SessionResume`/`SessionResumed` exist for a client that wants to ask what
+became of several generations before choosing one to re-attach. **ReachKit does
+not use them** — it re-attaches the single generation it is holding, and the
+frames are served but unexercised. Read that as a shape the wire allows, not a
+step in the normal path.
 
 A `GenerateBegin` carrying a genID the daemon already knows is treated as a
 re-attach from sequence 0 — which makes losing the very first frame
@@ -152,8 +156,47 @@ recoverable instead of fatal.
 `GenerateCancel` ends it early; the client's own task cancellation is what
 sends it, and the generation finishes `.cancelled` rather than vanishing.
 
-One in-flight generation per session is the tested v0 invariant. The registry
-holds more; nothing above it has needed to yet.
+A session holds any number of generations, keyed by generation id, and nothing
+caps them. One in flight at a time is what every client does and what the tests
+cover — it is a convention, not an invariant the daemon keeps.
+
+### What a daemon restart does
+
+Residency is a promise about a *process*. Nothing in the session registry
+survives the daemon exiting, and that is the design rather than a gap: the
+transcript, the tool definitions and the schema ride the wire on **every**
+`GenerateBegin`, so the daemon holds no conversation between generations. A
+restart therefore costs a round trip, not a conversation.
+
+- **Identity, grants, the CA and the mesh survive** — they are on disk.
+- **Sessions do not.** A `GenerateBegin` on a session the daemon no longer
+  knows is refused `begin-rejected`, and the client opens a fresh session and
+  begins again. Nothing reaches the person. This is also the ordinary path when
+  a session simply ages out, which it does after 900 s idle.
+- **A generation in flight is lost, and cannot be resumed.** Its buffer went
+  with the process. The re-attach is refused `reattach-rejected`, and because a
+  re-attach is only ever sent for a generation the client has already taken
+  tokens from, that refusal is terminal: **the transport never silently
+  re-begins an answer a person may have read, or one whose tool already ran in
+  the app.** Re-asking is the app's call.
+
+The daemon cannot tell a restart from a session that aged out — both are a
+table with no such row — so it does not claim to. It says what is true either
+way, and the client says what it means:
+
+```
+  the answer stopped partway and cannot be picked up again: the cluster has
+  no session by that name — it was let go after sitting idle, or the daemon
+  holding it restarted. Asking again starts a new one.
+```
+
+**Seam, named rather than implied:** a generation that outlives the process
+would need per-generation durability, which is not built and is not the same
+item as remembering a session. Measured on the rig at the time of writing: with
+a supervisor putting the daemon back, an app learns its answer ended about ten
+seconds after the process died; with nothing restarting the daemon, the client
+spends its full residency window first, because from its side an absent cluster
+and a walk out of range are the same thing.
 
 ## The event vocabulary
 

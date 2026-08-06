@@ -225,6 +225,14 @@ public actor ReachConnectionHub {
         guard let addrs = ack.addrs, let port = ack.port,
               let nwPort = NWEndpoint.Port(rawValue: port) else { return }
         entries[configuration]?.candidates = endpoints(from: addrs, port: nwPort, for: configuration)
+        // Being answered is exactly what `knewStoredRoads` is asking about,
+        // and it was only ever set when an entry was seeded from disk. So an
+        // app that had just been answered — that had streamed tokens — was
+        // still told, when its cluster later went away, that it "has not been
+        // answered before" and should go and open it once on the cluster's
+        // own network. False, and it points at the wrong next action. A
+        // restart mid-answer is how that sentence gets read most.
+        entries[configuration]?.knewStoredRoads = true
         // Writing them down is what lets the next cold launch dial at all —
         // this is the one moment the app is certainly being answered, so it is
         // the only moment the roads are certainly true. Failing to write them

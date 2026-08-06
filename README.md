@@ -27,7 +27,8 @@ inspectable; there is no account anywhere.
   grant sheet
 - `Example/` — a sample app that links ReachKit and nothing privileged
 - `docs/` — [the wire](docs/wire.md), [the ceremony](docs/ceremony.md), [the
-  demo](docs/demo.md), and [spike verdicts](docs/spikes.md)
+  demo](docs/demo.md), [running the daemon](docs/running.md), and [spike
+  verdicts](docs/spikes.md)
 
 ## Building
 

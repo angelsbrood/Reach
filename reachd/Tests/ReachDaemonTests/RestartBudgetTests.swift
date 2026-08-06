@@ -125,13 +125,26 @@ import Testing
         let clock = ContinuousClock()
         let asked = clock.now
         let cold = LanguageModelSession(model: ReachLanguageModel(configuration: configuration))
-        await #expect(throws: (any Error).self) {
+        var sentence = ""
+        do {
             _ = try await cold.respond(to: "Go again.")
+            Issue.record("a stopped daemon answered")
+        } catch {
+            sentence = "\(error)"
         }
         let waited = clock.now - asked
         #expect(
             waited < Self.residencyWindow / 3,
             "a fresh ask with nothing resident waited \(waited) — the residency window is for generations that are still there"
+        )
+        // The other half of the same moment: what it says when it gives up.
+        // `knewStoredRoads` was set only when an entry was seeded from disk,
+        // never when the cluster actually answered — so an app that had just
+        // streamed tokens was told it had never been answered, and sent to
+        // the cluster's own network for a cluster it had been talking to.
+        #expect(
+            !sentence.contains("has not been answered before"),
+            "this app was answered moments ago: \(sentence)"
         )
     }
 
