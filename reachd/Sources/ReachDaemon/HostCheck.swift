@@ -130,8 +130,35 @@ public enum HostCheck {
         findings.append(contentsOf: wireGuard.findings)
         findings.append(await checkDevices(in: stateDirectory, peers: wireGuard.peers))
         findings.append(contentsOf: portFindings)
+        findings.append(checkSupervision(daemonUp: daemonUp))
 
         return Report(findings: findings)
+    }
+
+    /// Whether anything brings the daemon back.
+    ///
+    /// A `wait` rather than a `fail`: running `serve` by hand in a terminal
+    /// is a legitimate way to work and is how every demo has been shot. What
+    /// it is not is a service, and the difference only shows on the day the
+    /// process dies with nobody watching — so it belongs somewhere a person
+    /// can read it before that day rather than after.
+    static func checkSupervision(daemonUp: Bool, home: URL? = nil) -> Finding {
+        let plist = LaunchAgent.plistURL(home: home)
+        guard FileManager.default.fileExists(atPath: plist.path) else {
+            return Finding(
+                level: .wait,
+                title: "supervision",
+                detail: daemonUp
+                    ? "no launchd agent — the daemon is running, but nothing restarts it"
+                    : "no launchd agent — nothing starts the daemon at login or restarts it",
+                action: "reachd service install, from a copy of the binary somewhere permanent. It starts at login, not at boot: the cluster's identity lives in the login keychain."
+            )
+        }
+        return Finding(
+            level: .pass,
+            title: "supervision",
+            detail: "launchd agent installed at \(plist.path)"
+        )
     }
 
     // MARK: - Checks

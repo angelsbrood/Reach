@@ -577,3 +577,48 @@ import Testing
         #expect(HostCheck.checkClusterCA(in: directory, config: nil).level == .pass)
     }
 }
+
+/// Whether anything brings the daemon back after it dies.
+///
+/// The design note said "a launchd service on the Mac today" while there was
+/// no plist anywhere in the tree, so `doctor` — the one place that reports
+/// what the host actually is — had nothing to say about it either.
+@Suite struct SupervisionCheckTests {
+    private func emptyHome() throws -> URL {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("reach-supervision-\(UUID())", isDirectory: true)
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        return home
+    }
+
+    @Test func noAgentIsAWaitAndNotAFailure() throws {
+        let home = try emptyHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let finding = HostCheck.checkSupervision(daemonUp: false, home: home)
+        #expect(finding.level == .wait, "running serve by hand is a way to work, not a fault")
+        #expect(finding.action?.contains("reachd service install") == true)
+    }
+
+    /// A running daemon and a supervised daemon are different states, and the
+    /// gap between them is the whole point of the check.
+    @Test func aRunningDaemonWithNoAgentStillSaysNothingRestartsIt() throws {
+        let home = try emptyHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let finding = HostCheck.checkSupervision(daemonUp: true, home: home)
+        #expect(finding.level == .wait)
+        #expect(finding.detail.contains("nothing restarts it"))
+    }
+
+    @Test func anInstalledAgentPasses() throws {
+        let home = try emptyHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let agents = home.appendingPathComponent("Library/LaunchAgents", isDirectory: true)
+        try FileManager.default.createDirectory(at: agents, withIntermediateDirectories: true)
+        try "<plist/>".write(
+            to: agents.appendingPathComponent("systems.reach.reachd.plist"),
+            atomically: true,
+            encoding: .utf8
+        )
+        #expect(HostCheck.checkSupervision(daemonUp: true, home: home).level == .pass)
+    }
+}

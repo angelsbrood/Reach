@@ -8,7 +8,7 @@ struct Reachd: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "reachd",
         abstract: "The Reach serving daemon: a slot host fronting self-hosted open weights with the Foundation Models framework's native semantics.",
-        subcommands: [Serve.self, Pair.self, Status.self, Doctor.self, CA.self, Selftest.self]
+        subcommands: [Serve.self, Pair.self, Status.self, Doctor.self, CA.self, Selftest.self, Service.self]
     )
 }
 

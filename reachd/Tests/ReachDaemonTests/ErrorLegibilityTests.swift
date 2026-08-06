@@ -74,6 +74,10 @@ import Testing
             tool: "current_time",
             reason: "its parameters did not encode as a JSON object"
         ),
+        // The operator's terminal, at the one moment they can still act.
+        ServiceError.buildPath("/Users/x/Library/Caches/reach-spm/reachd/out/Products/Debug/reachd"),
+        ServiceError.notExecutable("/usr/local/bin/reachd"),
+        ServiceError.launchctlRefused("Load failed: 5: Input/output error"),
         ReachEnrollmentError.badCAHash,
         ReachEnrollmentError.refused(code: "grant-denied", message: "the ruling was no"),
         ReachEnrollmentError.sequence("expected EnrollGrant"),
