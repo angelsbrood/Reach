@@ -38,6 +38,32 @@ struct ScriptedFilling: SlotFilling {
 }
 
 @Suite struct SessionRegistryTests {
+    /// Does a cancelled generation actually reach a terminal state?
+    ///
+    /// `docs/wire.md` says "the generation finishes `.cancelled` rather than
+    /// vanishing". `cancel` only cancels the ingest task, and a cancelled
+    /// `for await` stops iterating — so whether `.finished(.cancelled)` is
+    /// ever ingested is a question about the filling, not about `cancel`.
+    @Test func aCancelledGenerationReachesATerminalState() async throws {
+        let registry = SessionRegistry()
+        let (sessionID, token) = await registry.openSession(modelID: "scripted")
+        let genID = UUID()
+        let filling = ScriptedFilling(words: Array(repeating: "tick ", count: 60), delayMilliseconds: 40)
+        let (stream, epoch) = try await registry.begin(
+            sessionID: sessionID, genID: genID, events: { filling.generate(.init(id: UUID(), transcript: .init())) }
+        )
+        var seen = 0
+        for await _ in stream {
+            seen += 1
+            if seen == 2 { break }
+        }
+        await registry.cancel(sessionID: sessionID, genID: genID, epoch: epoch)
+        try await Task.sleep(for: .milliseconds(500))
+        let status = try await registry.resumeStatus(sessionID: sessionID, token: token)
+        #expect(status.count == 1)
+        #expect(status.first?.state != .streaming, "a cancelled generation is still reported as streaming: \(String(describing: status.first?.state))")
+    }
+
     private func drain(_ stream: AsyncStream<Ev>, until predicate: @escaping ([Ev]) -> Bool) async -> [Ev] {
         var collected: [Ev] = []
         for await ev in stream {

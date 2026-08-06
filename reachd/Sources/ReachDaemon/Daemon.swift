@@ -313,6 +313,11 @@ public final class Daemon: Sendable {
             )
         } catch {
             try await stream.send(ErrorFrame(code: "begin-rejected", message: "\(error)"))
+            // Cancelled for the same reason the silent-opening path above
+            // cancels: a stream this side is done with and does not close
+            // leaks the connection. Refusals are the traffic a restart
+            // generates most, so this is the leak that would grow fastest.
+            stream.cancel()
             return
         }
         try await pump(events: events, stream: stream, iterator: &iterator, sessionID: begin.sessionID, genID: begin.genID, epoch: epoch)
@@ -330,6 +335,7 @@ public final class Daemon: Sendable {
             (events, epoch) = try await registry.attach(sessionID: frame.sessionID, genID: frame.genID, fromSeq: frame.fromSeq)
         } catch {
             try await stream.send(ErrorFrame(code: "reattach-rejected", message: "\(error)"))
+            stream.cancel()
             return
         }
         // Which road the generation came back on. Nothing else records it:

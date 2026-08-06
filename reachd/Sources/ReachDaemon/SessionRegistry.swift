@@ -222,6 +222,16 @@ public actor SessionRegistry {
               let record = session.generations[genID],
               record.epoch == epoch else { return }
         record.task?.cancel()
+        // Cancelling the task is not an ending. Its `for await` stops
+        // iterating the instant it is cancelled, so the filling's own
+        // `.finished` is yielded into a loop that has already stopped
+        // reading — nothing ingests it, the record stays `.streaming` for
+        // the life of the process, and `resumeStatus` reports a generation
+        // that was deliberately stopped as one still running. `wire.md` said
+        // "the generation finishes `.cancelled` rather than vanishing"; it
+        // did neither. The ending has to be written here, where the decision
+        // is actually made.
+        _ = ingest(sessionID: sessionID, genID: genID, event: .finished(.cancelled))
     }
 
     /// Expiry sweep; call periodically. Returns how many generations were
@@ -268,6 +278,11 @@ public actor SessionRegistry {
     private func ingest(sessionID: UUID, genID: UUID, event: WireEvent) -> Bool {
         guard var session = sessions[sessionID],
               var record = session.generations[genID] else { return true }
+        // Nothing follows the ending. `cancel` writes a `.finished` while the
+        // filling may still have one of its own in flight, and two endings on
+        // one generation would hand a re-attaching client two different final
+        // sequences for the same answer.
+        guard record.state == .streaming else { return true }
 
         let stamped = Ev(seq: record.nextSeq, event: event)
         record.nextSeq += 1
