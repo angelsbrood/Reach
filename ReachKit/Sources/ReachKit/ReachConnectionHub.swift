@@ -10,13 +10,13 @@ public enum ReachError: Error, Sendable, CustomStringConvertible, LocalizedError
     case sessionRejected(String)
     case remote(code: String, message: String)
     case transport(String)
-    /// Every road dialed and none of them led anywhere. `stored` is whether
-    /// any of them came from the calling card an earlier session left, and it
-    /// is what makes the sentence actionable: an app that has never been
-    /// answered needs the cluster's own network once, and an app that knows
-    /// the roads and cannot use them needs its tunnel up. Those are different
-    /// next actions and the coarse prefix could tell neither.
-    case unreachable(roads: Int, stored: Bool)
+    /// Every road dialed and none of them led anywhere. `stored` is what the
+    /// calling card an earlier session left had to say, and it is what makes
+    /// the sentence actionable: an app that has never been answered needs the
+    /// cluster's own network once, and an app that knows the roads and cannot
+    /// use them needs its tunnel up. Those are different next actions and the
+    /// coarse prefix could tell neither.
+    case unreachable(roads: Int, stored: StoredRoads)
     /// An answer that had already begun arriving cannot be picked up again.
     ///
     /// Separate from `.remote` because a re-attach is only ever sent for a
@@ -44,10 +44,13 @@ public enum ReachError: Error, Sendable, CustomStringConvertible, LocalizedError
         case .generationLost(let reason):
             "the answer stopped partway and cannot be picked up again: \(reason). Asking again starts a new one."
         case .unreachable(let roads, let stored):
-            if stored {
+            switch stored {
+            case .known:
                 "no road reached the cluster — nothing answered on \(Self.roads(roads)), and those are the addresses it last answered on. The cluster may be off, or this device may need its mesh tunnel up."
-            } else {
+            case .none:
                 "no road reached the cluster — nothing answered on \(Self.roads(roads)), and this app has not been answered before, so it knows no way there but the one it was configured with. Open it once on the cluster's own network and it will keep the way back."
+            case .unreadable:
+                "no road reached the cluster — nothing answered on \(Self.roads(roads)). This app has been answered before, but the roads it wrote down will not read back: the keychain holding them is locked or the entry is damaged. Opening it on the cluster's own network again will not help until that is sorted, because that is where the next set would be written too."
             }
         }
     }
@@ -57,6 +60,26 @@ public enum ReachError: Error, Sendable, CustomStringConvertible, LocalizedError
     }
 
     public var errorDescription: String? { description }
+}
+
+/// What the app's road store had to say — three answers, not two.
+///
+/// `ClusterRoads.load` goes to deliberate trouble to tell *absent* from
+/// *unreadable*, for the reason its own note gives; the hub then collapsed
+/// them with a `try?` and a `Bool`. The dialing was right to collapse them —
+/// there is nothing dialable either way — but the refusal is not. Read as
+/// `none`, an unreadable store makes the app say "has not been answered
+/// before" and tell the person to open it once on the cluster's network. Both
+/// halves are false, and the instruction loops: the next set of roads would
+/// be written to the same store that will not read back.
+public enum StoredRoads: Sendable, Equatable {
+    /// Nothing has ever been written down for this app.
+    case none
+    /// Roads read back, or the cluster has answered this process.
+    case known
+    /// Something is stored and will not read back — a locked keychain, or an
+    /// entry that no longer decodes.
+    case unreadable
 }
 
 /// One hub per executor configuration: the shared `NWParameters` (one QUIC
@@ -97,10 +120,11 @@ public actor ReachConnectionHub {
         /// Not folded into `dirty`, whose meaning above is "the path changed
         /// or an open failed". A fresh entry is neither of those things.
         var proven = false
-        /// Whether this entry started from roads a previous process wrote
-        /// down. Only the refusal reads it, and only to tell "never been
-        /// answered" apart from "knows the roads and none of them worked".
-        var knewStoredRoads = false
+        /// What the store said when this entry was seeded. Only the refusal
+        /// reads it, and only to tell "never been answered" apart from "knows
+        /// the roads and none of them worked" apart from "wrote roads down and
+        /// cannot read them back".
+        var storedRoads: StoredRoads = .none
     }
 
     private var entries: [ReachExecutor.Configuration: Entry] = [:]
@@ -225,14 +249,16 @@ public actor ReachConnectionHub {
         guard let addrs = ack.addrs, let port = ack.port,
               let nwPort = NWEndpoint.Port(rawValue: port) else { return }
         entries[configuration]?.candidates = endpoints(from: addrs, port: nwPort, for: configuration)
-        // Being answered is exactly what `knewStoredRoads` is asking about,
-        // and it was only ever set when an entry was seeded from disk. So an
-        // app that had just been answered — that had streamed tokens — was
-        // still told, when its cluster later went away, that it "has not been
-        // answered before" and should go and open it once on the cluster's
-        // own network. False, and it points at the wrong next action. A
-        // restart mid-answer is how that sentence gets read most.
-        entries[configuration]?.knewStoredRoads = true
+        // Being answered is exactly what `storedRoads` is asking about, and it
+        // was only ever set when an entry was seeded from disk. So an app that
+        // had just been answered — that had streamed tokens — was still told,
+        // when its cluster later went away, that it "has not been answered
+        // before" and should go and open it once on the cluster's own network.
+        // False, and it points at the wrong next action. A restart mid-answer
+        // is how that sentence gets read most. This also correctly overrides
+        // `.unreadable`: whatever the store can or cannot do, being answered
+        // is the stronger fact about the roads now in hand.
+        entries[configuration]?.storedRoads = .known
         // Writing them down is what lets the next cold launch dial at all —
         // this is the one moment the app is certainly being answered, so it is
         // the only moment the roads are certainly true. Failing to write them
@@ -323,7 +349,7 @@ public actor ReachConnectionHub {
             entries[configuration]?.dirty = true
             throw ReachError.unreachable(
                 roads: endpoints.count,
-                stored: entries[configuration]?.knewStoredRoads ?? false
+                stored: entries[configuration]?.storedRoads ?? .none
             )
         }
         entries[configuration]?.dialer = dialers[index]
@@ -355,17 +381,24 @@ public actor ReachConnectionHub {
         // LAN wins that race on latency without being told to; away, the mesh
         // does.
         //
-        // A store that will not read back is treated as a store that holds
-        // nothing: there is nothing dialable either way, and claiming the
-        // refusal tried "the addresses it last answered on" would then be
-        // false.
-        if let roads = try? ClusterRoads.load(for: configuration.identityLabel),
-           let nwPort = NWEndpoint.Port(rawValue: roads.port) {
-            let stored = endpoints(from: roads.addrs, port: nwPort, for: configuration)
-            if !stored.isEmpty {
-                entry.candidates = stored
-                entry.knewStoredRoads = true
+        // A store that will not read back yields nothing dialable, exactly as
+        // an empty one does — so the candidate set is the same either way, and
+        // claiming the refusal tried "the addresses it last answered on" would
+        // be false. But the two are not the same thing to *say*, and reading
+        // the second as the first is what made the app tell a person to go and
+        // pair it again over a keychain it cannot open. The dial collapses
+        // them; the sentence must not.
+        do {
+            if let roads = try ClusterRoads.load(for: configuration.identityLabel),
+               let nwPort = NWEndpoint.Port(rawValue: roads.port) {
+                let stored = endpoints(from: roads.addrs, port: nwPort, for: configuration)
+                if !stored.isEmpty {
+                    entry.candidates = stored
+                    entry.storedRoads = .known
+                }
             }
+        } catch {
+            entry.storedRoads = .unreadable
         }
         entries[configuration] = entry
         return entry

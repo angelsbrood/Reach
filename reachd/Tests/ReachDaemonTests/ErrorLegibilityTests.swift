@@ -65,8 +65,9 @@ import Testing
         ReachError.sessionRejected("token did not match"),
         ReachError.transport("no route to host"),
         // Both branches: they render differently and both reach a screen.
-        ReachError.unreachable(roads: 4, stored: true),
-        ReachError.unreachable(roads: 1, stored: false),
+        ReachError.unreachable(roads: 4, stored: .known),
+        ReachError.unreachable(roads: 1, stored: .none),
+        ReachError.unreachable(roads: 1, stored: .unreadable),
         // A tool the model could not be told about: the filling turns this
         // throw into `.finished(.error(…))`, which crosses the wire and lands
         // on the asking app's screen.

@@ -40,23 +40,23 @@ import Testing
         let lost = "\(ReachError.generationLost("the daemon holding it restarted"))"
         #expect(!lost.contains("no road reached the cluster"))
         #expect(!lost.contains("mesh tunnel"))
-        #expect(lost != "\(ReachError.unreachable(roads: 3, stored: true))")
+        #expect(lost != "\(ReachError.unreachable(roads: 3, stored: .known))")
     }
 
     @Test func oneRoadIsNotCalledOneRoads() {
-        let sentence = "\(ReachError.unreachable(roads: 1, stored: false))"
+        let sentence = "\(ReachError.unreachable(roads: 1, stored: .none))"
         #expect(sentence.contains("the one road it knows"))
         #expect(!sentence.contains("1 roads"))
     }
 
     @Test func severalRoadsAreCounted() {
-        let sentence = "\(ReachError.unreachable(roads: 4, stored: true))"
+        let sentence = "\(ReachError.unreachable(roads: 4, stored: .known))"
         #expect(sentence.contains("any of the 4 roads it knows"))
     }
 
     /// An app that knows the roads and cannot use them has a tunnel problem.
     @Test func anAppThatKeptRoadsIsPointedAtTheTunnel() {
-        let sentence = "\(ReachError.unreachable(roads: 3, stored: true))"
+        let sentence = "\(ReachError.unreachable(roads: 3, stored: .known))"
         #expect(sentence.contains("mesh tunnel"))
         #expect(!sentence.contains("has not been answered before"))
     }
@@ -65,22 +65,45 @@ import Testing
     /// has never learned a road to have a problem with. Sending it to check
     /// the tunnel would be advice that cannot help.
     @Test func anAppThatNeverKeptRoadsIsSentHomeOnce() {
-        let sentence = "\(ReachError.unreachable(roads: 1, stored: false))"
+        let sentence = "\(ReachError.unreachable(roads: 1, stored: .none))"
         #expect(sentence.contains("the cluster's own network"))
         #expect(!sentence.contains("mesh tunnel"))
     }
 
-    @Test func theTwoSituationsDoNotReadTheSame() {
-        #expect(
-            "\(ReachError.unreachable(roads: 2, stored: true))"
-                != "\(ReachError.unreachable(roads: 2, stored: false))"
+    /// An app whose store will not read back has been answered before, and
+    /// sending it home to be answered again is the one instruction that cannot
+    /// work — the next set of roads goes to the same store.
+    ///
+    /// This was a `Bool`, so there were two sentences for three situations and
+    /// `unreadable` fell into `none`. The app then said "this app has not been
+    /// answered before" to an app that had, and told the person to open it on
+    /// the cluster's own network, which writes roads to a keychain that will
+    /// not open. `ClusterRoads.load` had the distinction and threw it; the hub
+    /// caught it with a `try?`.
+    @Test func anAppWhoseStoreWillNotOpenIsNotSentHomeAgain() {
+        let sentence = "\(ReachError.unreachable(roads: 1, stored: .unreadable))"
+        #expect(sentence.contains("will not read back"))
+        #expect(!sentence.contains("has not been answered before"))
+        #expect(!sentence.contains("mesh tunnel"))
+        // The instruction that would loop.
+        #expect(!sentence.contains("Open it once on the cluster's own network"))
+    }
+
+    @Test func theThreeSituationsDoNotReadTheSame() {
+        let sentences = Set(
+            [StoredRoads.known, .none, .unreadable].map {
+                "\(ReachError.unreachable(roads: 2, stored: $0))"
+            }
         )
+        #expect(sentences.count == 3)
     }
 
     /// The house rule the legibility harness enforces across every error type,
     /// asserted here too so a wording change fails in the file it was made in.
-    @Test func bothBranchesReadAsSentences() {
-        for stored in [true, false] {
+    /// Driven off the case list rather than a literal pair, so a fourth state
+    /// cannot be added without arriving here.
+    @Test func everyBranchReadsAsASentence() {
+        for stored in [StoredRoads.known, .none, .unreadable] {
             let sentence = "\(ReachError.unreachable(roads: 2, stored: stored))"
             #expect(sentence.contains(" "))
             #expect(sentence.first?.isUppercase != true)

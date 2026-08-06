@@ -126,6 +126,52 @@ import Testing
         #expect(ContinuousClock.now - started < .seconds(30))
     }
 
+    /// A store that will not read back must not be read as a store that holds
+    /// nothing — and this is the test that says the difference is *reachable*,
+    /// not merely spellable.
+    ///
+    /// `ReachError.unreachable` carried a `Bool`, so three situations shared
+    /// two sentences and an unreadable store fell into "never answered". The
+    /// app then told a person it "has not been answered before" and to open it
+    /// once on the cluster's own network — which writes the next set of roads
+    /// to the same keychain that will not open, so the advice loops. The
+    /// sentence tests next door hold the wording; this holds that the hub
+    /// actually produces the state, because `ClusterRoads.load` had the
+    /// distinction all along and the hub caught it with a `try?`. A wording
+    /// test alone would be a sentence written for a case nothing reaches,
+    /// which is the defect this suite's sibling was built to outlaw.
+    @Test func aStoreThatWillNotOpenIsNotReadAsAnEmptyOne() async throws {
+        defer { IdentityTrash.drain() }
+        let (daemon, configuration) = try await startDaemon(
+            port: 47419, host: "198.51.100.1", connectTimeout: 5
+        )
+        defer { Task { await daemon.stop() } }
+        defer { try? ClusterRoads.forget(for: configuration.identityLabel) }
+
+        // Bytes that are stored and will not decode — the second half of
+        // `ClusterRoads.load`'s absent-versus-unreadable ruling.
+        let add: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: ClusterRoads.service,
+            kSecAttrAccount as String: configuration.identityLabel,
+            kSecValueData as String: Data("not json".utf8),
+        ]
+        #expect(SecItemAdd(add as CFDictionary, nil) == errSecSuccess)
+
+        let session = LanguageModelSession(
+            model: ReachLanguageModel(configuration: configuration),
+            instructions: "Scripted."
+        )
+        do {
+            for try await _ in session.streamResponse(to: "Go.") {}
+            Issue.record("the dial was supposed to fail — TEST-NET-2 answered")
+        } catch {
+            let sentence = "\(error)"
+            #expect(sentence.contains("will not read back"), "got: \(sentence)")
+            #expect(!sentence.contains("has not been answered before"), "got: \(sentence)")
+        }
+    }
+
     @Test func sessionStreamsThroughTheDaemon() async throws {
         defer { IdentityTrash.drain() }
         let (daemon, configuration) = try await startDaemon(port: 47414)
