@@ -8,6 +8,21 @@ public enum IdentityError: Error, Sendable, CustomStringConvertible, LocalizedEr
     case keychainAddFailed(OSStatus)
     case identityNotFound(OSStatus)
     case roadsUnreadable(OSStatus)
+    /// `SecPKCS12Import` reporting success and handing back nothing.
+    ///
+    /// Its own case, and the only error in this file allowed more than one
+    /// sentence, because of who reads it and when. This is the dominant
+    /// failure mode of the whole test tree — measured at three red runs in
+    /// nine full `reachd` runs, roughly 0.40% per materialization — and it
+    /// arrives as a throw out of a fixture, so the suite it is attributed to
+    /// is whichever one lost the coin flip. Under `importFailed` it read as
+    /// a plain assembly failure and every red run cost someone a diagnosis
+    /// of a test that had nothing to do with it.
+    ///
+    /// So the error says what it is. It is not retried — three attempts over
+    /// twenty runs recovered zero times, and a run that goes quiet is not a
+    /// run that got fixed.
+    case pkcs12EmptyItemList(bytes: Int)
 
     public var description: String {
         switch self {
@@ -27,6 +42,8 @@ public enum IdentityError: Error, Sendable, CustomStringConvertible, LocalizedEr
             // identity in question, and the roads are stored, they just will
             // not read back.
             "the cluster roads this app kept will not read back: \(Self.name(for: status))"
+        case .pkcs12EmptyItemList(let bytes):
+            "the known SecPKCS12Import defect: it returned success and an empty item list for \(bytes) bytes of valid archive. This is the framework, not your change and not these bytes — the archive is kept on disk and reads back fine under LibreSSL, and it strikes about one materialization in 250. Whichever test reported this is almost certainly innocent; run it again. It is deliberately not retried, because three attempts over twenty runs recovered zero times."
         }
     }
 
@@ -101,14 +118,19 @@ public enum IdentityStore {
             throw IdentityError.pkcs12ImportFailed(status)
         }
         guard let array = items as? [[String: Any]] else {
+            // `nil` is the characterized defect wearing its other face — the
+            // framework hands back no array at all rather than an empty one.
+            // An array of the wrong shape has never been seen and would be
+            // something else, so it stays a plain assembly failure.
+            if items == nil {
+                throw IdentityError.pkcs12EmptyItemList(bytes: data.count)
+            }
             throw IdentityError.importFailed(
-                "SecPKCS12Import returned errSecSuccess with \(items == nil ? "no item array at all" : "an item array of an unexpected shape") (\(data.count) bytes in)"
+                "SecPKCS12Import returned errSecSuccess with an item array of an unexpected shape (\(data.count) bytes in)"
             )
         }
         guard let first = array.first else {
-            throw IdentityError.importFailed(
-                "SecPKCS12Import returned errSecSuccess and an EMPTY item list (\(data.count) bytes in)"
-            )
+            throw IdentityError.pkcs12EmptyItemList(bytes: data.count)
         }
         guard let identityRef = first[kSecImportItemIdentity as String] else {
             throw IdentityError.importFailed(

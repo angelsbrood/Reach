@@ -83,6 +83,10 @@ import Testing
         ReachEnrollmentError.badCAHash,
         ReachEnrollmentError.refused(code: "grant-denied", message: "the ruling was no"),
         ReachEnrollmentError.sequence("expected EnrollGrant"),
+        // The one that reaches a person most often, by a wide margin — three
+        // red runs in nine. It reaches a *reader of this suite*, which is a
+        // kind of person this corpus had not been asked to serve before.
+        IdentityError.pkcs12EmptyItemList(bytes: 894),
     ]
 
     @Test func everyErrorThatReachesAPersonReadsAsASentence() {
@@ -113,6 +117,41 @@ import Testing
             )
             #expect(localized == "\(error)")
         }
+    }
+
+    /// The failure this suite's own readers meet most, and the one it was
+    /// worst at serving them on.
+    ///
+    /// `SecPKCS12Import` returns `errSecSuccess` with an empty item list on
+    /// about one materialization in 250 — three red runs in nine full `reachd`
+    /// runs, the dominant failure mode in this tree. It throws out of a
+    /// fixture, so swift-testing records `errorCaught` against whichever suite
+    /// lost the coin flip, and that suite is innocent. Twice in one afternoon
+    /// it named `cancellationPropagates` and then `aSpentTokenSaysWhatToDoAboutIt`,
+    /// neither of which had been touched.
+    ///
+    /// Under `importFailed` it read as an ordinary assembly failure and cost
+    /// someone a diagnosis every time. Now the error clears the suite it
+    /// landed on, and this holds the clearing. The string checked is the one
+    /// swift-testing interpolates into `Caught error:`.
+    ///
+    /// `withKnownIssue` is the tool that suggests itself here and it is the
+    /// wrong one: it absorbs the failure and the run goes green. A quiet run
+    /// is not a fixed run. This stays red and explains itself.
+    @Test func theKnownPKCS12FailureClearsWhateverTestItLandedOn() {
+        let sentence = "\(IdentityError.pkcs12EmptyItemList(bytes: 894))"
+        // What it is, so nobody re-derives it.
+        #expect(sentence.contains("SecPKCS12Import"))
+        // Who is not at fault — the two readings that cost the most time.
+        #expect(sentence.contains("not your change"))
+        #expect(sentence.contains("innocent"))
+        // That it is rare rather than deterministic, so a re-run is worth it.
+        #expect(sentence.contains("run it again"))
+        // And that the silence of a retry is not on offer.
+        #expect(sentence.contains("not retried"))
+        // It must not be mistaken for a malformed archive, which is what the
+        // old wording implied and what sends a reader after the bytes.
+        #expect(!sentence.contains("would not import"))
     }
 
     /// The reason a confirming frame never arrived reaches a person too — it
