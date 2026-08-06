@@ -131,6 +131,16 @@ Sequences start at 0 and are per-generation. `EvAck` is **cumulative** —
 everything at or below that sequence is received — and it trims the daemon's
 replay buffer, which is capped at 4 MiB per generation.
 
+**The cap is a bound on replay, not on the answer.** A generation that outruns
+it while nobody is acking loses its oldest un-acked events, and a re-attach
+asking for a sequence inside that loss is **refused** — `reattach-rejected`,
+carrying a sentence about what happened — rather than served the far side of
+the gap. Serving it would hand back a shorter answer than the one that was
+generated, with nothing in the stream to say so. Reaching the cap needs 4 MiB
+in flight faster than acks return, which is past text scale; what happens to
+the cap itself at image or audio scale is residency-depth work and is not
+settled here.
+
 The generation is owned by the session registry, not by the connection that
 started it. When the transport dies the generation **keeps running** for a 120 s
 residency window; completed generations are held 600 s so a client that

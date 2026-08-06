@@ -110,6 +110,132 @@ struct ScriptedFilling: SlotFilling {
         #expect(text == ScriptedFilling().words.joined())
     }
 
+    /// Runs a generation whose events outgrow `cap` with nothing acked, and
+    /// hands back what a re-attaching client would hold: the generation, and
+    /// the last seq it was issued.
+    ///
+    /// **No acks anywhere in here on purpose** — un-acked is the whole
+    /// precondition. An ack trims the buffer legitimately, and a run that
+    /// acked would never reach the cap at all.
+    private func overflowed(
+        cap: Int
+    ) async throws -> (registry: SessionRegistry, sessionID: UUID, genID: UUID, lastSeq: UInt64) {
+        var limits = SessionRegistry.Limits()
+        limits.bufferCapBytes = cap
+        let registry = SessionRegistry(limits: limits)
+        let (sessionID, token) = await registry.openSession()
+        try await registry.validate(sessionID: sessionID, token: token)
+
+        let genID = UUID()
+        let filling = ScriptedFilling(words: Array(repeating: "tick ", count: 20), delayMilliseconds: 0)
+        let (stream, _) = try await registry.begin(sessionID: sessionID, genID: genID) {
+            filling.generate(WireGenerationRequest(id: UUID(), transcript: Transcript()))
+        }
+        var lastSeq: UInt64 = 0
+        for await ev in stream {
+            lastSeq = ev.seq
+            if case .finished = ev.event { break }
+        }
+        return (registry, sessionID, genID, lastSeq)
+    }
+
+    /// The silent truncation, stated as the invariant rather than as a number.
+    ///
+    /// Past the buffer cap the registry drops the **oldest** un-acked event,
+    /// and the client's dedupe only skips seqs at or below what it already has
+    /// — so it accepted the far side of a gap without noticing one and rendered
+    /// a short answer as a whole one. Nothing in the tree exercised the cap at
+    /// all: `bufferCapBytes` had zero test references, so this branch was, as
+    /// far as the suite was concerned, dead code.
+    ///
+    /// Sweeping every `fromSeq` states the property exactly and needs no
+    /// arithmetic against `approximateSize`, which would rot: **a replay is
+    /// either refused or contiguous, never served with a hole.** The two
+    /// counts at the end are what stop it passing vacuously — a guard that
+    /// refuses everything and a guard that refuses nothing both fail here.
+    ///
+    /// Fails on the old code, which serves the gapped replays.
+    @Test func aReplayThatWouldSkipAHoleIsRefusedRatherThanServed() async throws {
+        let (registry, sessionID, genID, lastSeq) = try await overflowed(cap: 200)
+
+        var refused = 0
+        var served = 0
+        for fromSeq in 0..<lastSeq {
+            do {
+                let (replay, _) = try await registry.attach(sessionID: sessionID, genID: genID, fromSeq: fromSeq)
+                var seqs: [UInt64] = []
+                for await ev in replay { seqs.append(ev.seq) }
+                served += 1
+                #expect(
+                    seqs == Array((fromSeq + 1)...lastSeq),
+                    "a replay served from \(fromSeq) had a hole in it: \(seqs)"
+                )
+            } catch SessionRegistry.RegistryError.replayOutgrewTheBuffer {
+                refused += 1
+            }
+        }
+        #expect(refused > 0, "nothing was refused, so the buffer never overflowed and this proved nothing")
+        #expect(served > 0, "every replay was refused, so the guard is not telling a hole from a buffer")
+    }
+
+    /// The positive control at the top of the buffer: the last event issued is
+    /// never the one dropped, so a client holding everything but it must be
+    /// served — and served exactly it.
+    ///
+    /// Passes on the old code too, deliberately. It is not evidence of the fix;
+    /// it is what stops the fix being "refuse every re-attach", which would
+    /// satisfy the test above on its own.
+    @Test func aReplayThatIsStillWholeIsServedUnchanged() async throws {
+        let (registry, sessionID, genID, lastSeq) = try await overflowed(cap: 200)
+        let (replay, _) = try await registry.attach(sessionID: sessionID, genID: genID, fromSeq: lastSeq - 1)
+        var seqs: [UInt64] = []
+        for await ev in replay { seqs.append(ev.seq) }
+        #expect(seqs == [lastSeq], "the top of the buffer was refused or came back wrong: \(seqs)")
+    }
+
+    /// An acked span is not a hole, and the buffer cannot tell you which it is.
+    ///
+    /// After an ack and after a cap drop, `buffer.first!.seq` reads exactly the
+    /// same — above zero, with events missing below it. The difference is that
+    /// an acked event is one the client already holds. So the floor has to be
+    /// recorded at the drop site and nowhere else; anything that infers it from
+    /// the buffer, or that lets `ack` write it, turns every ordinary re-attach
+    /// after an ack into a refusal.
+    ///
+    /// Also passes on the old code — this one guards the new code against the
+    /// mistake, rather than evidencing the defect.
+    @Test func anAckedSpanIsNotAHole() async throws {
+        let registry = SessionRegistry()
+        let (sessionID, token) = await registry.openSession()
+        try await registry.validate(sessionID: sessionID, token: token)
+
+        let filling = ScriptedFilling()
+        let genID = UUID()
+        let (first, epoch) = try await registry.begin(sessionID: sessionID, genID: genID) {
+            filling.generate(WireGenerationRequest(id: UUID(), transcript: Transcript()))
+        }
+        let received = await drain(first) { $0.count >= 4 }
+        #expect(received.map(\.seq) == [0, 1, 2, 3])
+
+        // Everything at or below 2 is received, so the registry trims it —
+        // and the client's next re-attach names 3, the last one it took.
+        await registry.ack(sessionID: sessionID, genID: genID, seq: 2, epoch: epoch)
+        await registry.detach(sessionID: sessionID, genID: genID, epoch: epoch)
+
+        let (second, _) = try await registry.attach(sessionID: sessionID, genID: genID, fromSeq: 3)
+        var tail: [Ev] = []
+        for await ev in second {
+            tail.append(ev)
+            if case .finished = ev.event { break }
+        }
+        #expect(tail.first?.seq == 4, "a trimmed buffer was read as a lost one")
+        let text = (received + tail).compactMap { ev -> String? in
+            if case .responseAppend(_, let t, _, _) = ev.event { return t }
+            return nil
+        }.joined()
+        #expect(text == ScriptedFilling().words.joined())
+    }
+
     /// Does this attachment reach `.finished` before the deadline? A stream
     /// that has been quietly killed never will, and never ending is the
     /// symptom — so the wait is bounded and a timeout reads as a failure.
@@ -458,5 +584,108 @@ struct ScriptedFilling: SlotFilling {
         try await control.send(SessionOpen(modelID: "scripted"))
         let opened = try (try #require(try await frames.next())).decode(SessionOpened.self)
         #expect(opened.token.isEmpty == false)
+    }
+
+    /// The truncation, over a real wire, as the app meets it.
+    ///
+    /// The registry half is held at `SessionRegistryTests`; this is the rest of
+    /// the path — that the refusal reaches a client as `reattach-rejected` with
+    /// the sentence intact, which is what makes the client render
+    /// `ReachError.generationLost` rather than a bare case name. `Daemon`
+    /// accepts an injected registry, so the cap can be small enough to reach in
+    /// a test without a filling that produces four megabytes.
+    ///
+    /// The client here acks **nothing**, which is the precondition — and is a
+    /// thing a real client does, since it acks in batches of sixteen and this
+    /// generation is longer than that between one ack and the walk-out.
+    ///
+    /// ⚠️ Port 47455, checked clear. `grep -rioE 'port[a-z]*:? ?=? ?47[0-9]{3}'`
+    /// — a case-sensitive grep misses `sessionPort:`.
+    @Test func aReattachPastTheBufferIsRefusedInWordsAndNotServedShort() async throws {
+        let ca = try ClusterCA.create(commonName: "Reach Truncation CA")
+        let server = try ca.issueServer(commonName: "localhost", dnsNames: ["localhost"], ipAddresses: [[127, 0, 0, 1]])
+        let client = try ca.issueClient(commonName: "trunc-client", uri: "reach://device/trunc")
+        let serverIdentity = try IdentityMaterializer.materialize(server, label: "reach-trunc-server-\(UUID())")
+        let clientIdentity = try IdentityMaterializer.materialize(client, label: "reach-trunc-client-\(UUID())")
+        let boxes = [IdentityBox(serverIdentity), IdentityBox(clientIdentity)]
+        defer { for box in boxes { KeychainIdentity.remove(identity: box.identity) } }
+        let caCert = try IdentityStore.certificate(fromDER: ca.certificateDER())
+
+        var limits = SessionRegistry.Limits()
+        limits.bufferCapBytes = 200
+        var config = DaemonConfig()
+        config.port = 47455
+        config.clusterName = "trunc-test"
+        let daemon = Daemon(
+            config: config,
+            // Long enough to outgrow the cap several times over while the
+            // client is away, slow enough that the client gets a head first.
+            filling: ScriptedFilling(words: Array(repeating: "tick ", count: 40), delayMilliseconds: 10),
+            identity: Daemon.ListenerIdentity(identity: serverIdentity, caCertificate: caCert),
+            registry: SessionRegistry(limits: limits)
+        )
+        try await daemon.start(advertise: false)
+        defer { Task { await daemon.stop() } }
+
+        let dialer = QUICDialer(
+            endpoint: .hostPort(host: "127.0.0.1", port: 47455),
+            parameters: .reachQUIC(
+                options: TLSBuilder.clientOptions(alpn: Wire.alpn, identity: clientIdentity, serverTrustRoots: [caCert])
+            )
+        )
+        let control = try await dialer.openStream(timeout: 45)
+        defer { control.cancel() }
+        var controlFrames = control.frames.makeAsyncIterator()
+        try await control.send(Hello(client: "trunc-test"))
+        _ = try (try #require(try await controlFrames.next())).decode(HelloAck.self)
+        try await control.send(SessionOpen(modelID: "scripted"))
+        let opened = try (try #require(try await controlFrames.next())).decode(SessionOpened.self)
+
+        let genID = UUID()
+        let gen1 = try await dialer.openStream(timeout: 45)
+        var head: [Ev] = []
+        try await gen1.send(GenerateBegin(
+            sessionID: opened.sessionID,
+            genID: genID,
+            request: WireGenerationRequest(id: UUID(), transcript: Transcript())
+        ))
+        for try await raw in gen1.frames {
+            guard raw.type == .ev else { continue }
+            head.append(try raw.decode(Ev.self))
+            if head.count == 3 { break }
+        }
+        gen1.cancel()   // the walk out the door, with nothing acked
+
+        // Long enough for the rest of the answer to arrive and push the head
+        // out of the buffer.
+        try await Task.sleep(for: .milliseconds(900))
+
+        let gen2 = try await dialer.openStream(timeout: 45)
+        defer { gen2.cancel() }
+        try await gen2.send(GenerateReattach(
+            sessionID: opened.sessionID,
+            token: opened.token,
+            genID: genID,
+            fromSeq: head.last!.seq
+        ))
+        var refusal: ErrorFrame?
+        var served: [Ev] = []
+        for try await raw in gen2.frames {
+            if raw.type == .errorFrame {
+                refusal = try raw.decode(ErrorFrame.self)
+                break
+            }
+            if raw.type == .ev { served.append(try raw.decode(Ev.self)) }
+        }
+
+        #expect(served.isEmpty, "the answer was served short instead of refused: \(served.map(\.seq))")
+        let frame = try #require(refusal, "nothing came back at all")
+        // The code is what routes the client to `generationLost` rather than
+        // to the generic "the cluster refused this".
+        #expect(frame.code == "reattach-rejected")
+        #expect(
+            frame.message == "\(SessionRegistry.RegistryError.replayOutgrewTheBuffer)",
+            "the sentence did not survive the wire: \(frame.message)"
+        )
     }
 }

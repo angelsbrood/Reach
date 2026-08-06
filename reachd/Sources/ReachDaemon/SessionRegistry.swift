@@ -36,7 +36,7 @@ public actor SessionRegistry {
         public init() {}
     }
 
-    /// These three cross the wire verbatim — `Daemon` interpolates them into
+    /// These cross the wire verbatim — `Daemon` interpolates them into
     /// `ErrorFrame.message`, which the asking app renders on a screen. They
     /// went years as bare case names: `ErrorLegibilityTests` was written to
     /// outlaw exactly that and quotes `unknownSession` as its example, but
@@ -51,6 +51,14 @@ public actor SessionRegistry {
         case unknownSession
         case badToken
         case unknownGeneration
+        /// The replay this re-attach asked for begins inside a span the buffer
+        /// cap dropped, so serving it would hand back an answer with a hole in
+        /// the middle and no way to say so.
+        ///
+        /// Deliberately carries no numbers. How many events went is a fact
+        /// about the daemon's bookkeeping, and the person reading this can act
+        /// on none of it.
+        case replayOutgrewTheBuffer
 
         public var description: String {
             switch self {
@@ -60,6 +68,8 @@ public actor SessionRegistry {
                 "that session exists, but the token offered for it is not the one it was opened with"
             case .unknownGeneration:
                 "the cluster has no generation by that name on this session — it ended and was let go, or it did not outlive a restart"
+            case .replayOutgrewTheBuffer:
+                "it outgrew what the cluster holds for an app that is away — what already arrived is real, but what came after it is gone"
             }
         }
 
@@ -79,6 +89,15 @@ public actor SessionRegistry {
         var epoch: UInt64 = 0
         var buffer: [Ev] = []
         var bufferBytes = 0
+        /// The highest seq the buffer cap discarded, or nil if it never has.
+        ///
+        /// The floor of `buffer` cannot answer this. An ack trims from the
+        /// bottom too, and after either one `buffer.first!.seq` reads the
+        /// same — but an acked event is one the client already holds, and a
+        /// dropped one is a hole. Only the drop site knows which happened, so
+        /// only the drop site can record it. Never cleared: a generation that
+        /// has lost events has lost them for as long as it exists.
+        var droppedThrough: UInt64?
         var nextSeq: UInt64 = 0
         var state: WireGenerationState = .streaming
         var task: Task<Void, Never>?
@@ -203,9 +222,26 @@ public actor SessionRegistry {
 
     /// Re-attach a live or buffered generation, replaying from `fromSeq`
     /// (exclusive); nil replays everything still buffered.
+    ///
+    /// Throws `replayOutgrewTheBuffer` rather than serving a replay that
+    /// begins inside a span the cap dropped — see the guard below.
     public func attach(sessionID: UUID, genID: UUID, fromSeq: UInt64?) throws -> (stream: AsyncStream<Ev>, epoch: UInt64) {
         guard var session = sessions[sessionID] else { throw RegistryError.unknownSession }
         guard var record = session.generations[genID] else { throw RegistryError.unknownGeneration }
+        // A client holding through `fromSeq` needs `fromSeq + 1` onward, and
+        // the lowest seq that survived the cap is `droppedThrough + 1`. So the
+        // replay is whole exactly when `fromSeq >= droppedThrough`. `nil` is
+        // `begin`'s idempotency path asking for everything from 0, which is
+        // whole only if nothing was ever dropped.
+        //
+        // ⚠️ Ahead of the epoch bump on purpose. A refusal must leave the
+        // record untouched: bumping and then throwing would lock the serving
+        // connection's own `detach` out of its epoch guard, so `detachedAt`
+        // would never be set and the residency sweep would never reap the
+        // generation this call just declined to serve.
+        let whole = fromSeq.map { seq in record.droppedThrough.map { seq >= $0 } ?? true }
+            ?? (record.droppedThrough == nil)
+        guard whole else { throw RegistryError.replayOutgrewTheBuffer }
 
         record.epoch += 1
         record.live?.finish()
@@ -322,19 +358,33 @@ public actor SessionRegistry {
         record.nextSeq += 1
         record.buffer.append(stamped)
         record.bufferBytes += stamped.approximateSize
-        if record.bufferBytes > limits.bufferCapBytes {
-            // Beyond text-demo scale; drop the oldest un-acked rather than
-            // grow without bound.
-            //
-            // ⚠️ What this costs is not "a re-attach past this point
-            // restarts" — nothing implements a restart. The dropped events
-            // are simply gone, and a client re-attaching from `fromSeq` gets
-            // the replay resuming *after* the hole. Its dedupe only skips
-            // seqs at or below what it already has, so it accepts the far
-            // side of the gap without noticing one: an un-acked span past
-            // the cap yields a silently truncated answer. Un-acked is the
-            // operative word — the client acks each event as it arrives, so
-            // this needs 4 MiB in flight faster than acks return.
+        // Beyond text-demo scale; drop the oldest un-acked rather than grow
+        // without bound, and write down how far the loss reaches so `attach`
+        // can refuse a replay that would begin inside it.
+        //
+        // ⚠️ This was an `if` that did not decrement `bufferBytes`, which made
+        // the cap two things it is not. The counter kept every dropped event's
+        // size forever, so past the first overflow it only ever overstated and
+        // "4 MiB" was maintained by accident — one drop per append, whatever
+        // the sizes. And a single append larger than the overflow could not
+        // bring the buffer back under. A `while` that pays down the counter is
+        // the bound the constant has always claimed.
+        //
+        // What the loss costs is not "a re-attach past this point restarts" —
+        // nothing implements a restart, and sequence 0 is precisely what goes
+        // first. Before `droppedThrough`, a client re-attaching from `fromSeq`
+        // got the replay resuming *after* the hole; its dedupe only skips seqs
+        // at or below what it already has (`ReachLanguageModel.swift`), so it
+        // accepted the far side without noticing one and rendered a silently
+        // truncated answer. Now the re-attach is refused and says so.
+        //
+        // Un-acked is the operative word, and the client acks in batches of
+        // sixteen rather than one at a time — so this needs 4 MiB in flight
+        // faster than acks return, which is past text scale and inside image
+        // or audio scale.
+        while record.bufferBytes > limits.bufferCapBytes, let oldest = record.buffer.first {
+            record.bufferBytes -= oldest.approximateSize
+            record.droppedThrough = oldest.seq
             record.buffer.removeFirst()
         }
         record.live?.yield(stamped)

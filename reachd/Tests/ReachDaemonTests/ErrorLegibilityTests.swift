@@ -53,6 +53,7 @@ import Testing
         SessionRegistry.RegistryError.unknownSession,
         SessionRegistry.RegistryError.badToken,
         SessionRegistry.RegistryError.unknownGeneration,
+        SessionRegistry.RegistryError.replayOutgrewTheBuffer,
         ReachError.remote(
             code: "reattach-rejected",
             message: "\(SessionRegistry.RegistryError.unknownGeneration)"
@@ -61,6 +62,11 @@ import Testing
         // the way the executor builds it: the daemon's rendered reason
         // wrapped in what it means.
         ReachError.generationLost("\(SessionRegistry.RegistryError.unknownSession)"),
+        // The other way a re-attach is refused, and the one where the two
+        // halves of the sentence have to agree with each other: the wrapper
+        // already ends "Asking again starts a new one", so the reason must
+        // not offer the remedy a second time.
+        ReachError.generationLost("\(SessionRegistry.RegistryError.replayOutgrewTheBuffer)"),
         ReachError.identityNotRegistered("reach-app-systems.reach.example"),
         ReachError.sessionRejected("token did not match"),
         ReachError.transport("no route to host"),
@@ -152,6 +158,33 @@ import Testing
         // It must not be mistaken for a malformed archive, which is what the
         // old wording implied and what sends a reader after the bytes.
         #expect(!sentence.contains("would not import"))
+    }
+
+    /// An answer that outgrew the buffer says which of the two things it is.
+    ///
+    /// A person meeting this has a half-answer on screen and one question:
+    /// is what I am reading real? It is — the loss is on the far side of it —
+    /// and that is the clause the wording exists for. The registry's reason is
+    /// rendered inside `generationLost`'s wrapper, so the two are held together
+    /// here: the wrapper already ends "Asking again starts a new one", and a
+    /// reason that offered the remedy again would read as a stutter.
+    @Test func anAnswerThatOutgrewTheBufferSaysWhatSurvivedIt() {
+        let reason = "\(SessionRegistry.RegistryError.replayOutgrewTheBuffer)"
+        // What happened, in terms of the cluster rather than of a buffer.
+        #expect(reason.contains("outgrew"))
+        #expect(reason.contains("away"))
+        // The half a person can act on: the text above the sentence is good.
+        #expect(reason.contains("what already arrived is real"))
+        // Not a fault, and not the app's: no blame, no socket, no numbers.
+        #expect(!reason.lowercased().contains("error"))
+        #expect(!reason.contains("buffer"))
+        #expect(reason.allSatisfy { !$0.isNumber })
+
+        let whole = "\(ReachError.generationLost(reason))"
+        #expect(whole.contains("stopped partway"))
+        #expect(whole.contains(reason), "the cluster's own reason did not survive the wrapping")
+        // Said once, at the end, by the wrapper — never twice.
+        #expect(whole.components(separatedBy: "sking again").count == 2, "the remedy is offered twice: \(whole)")
     }
 
     /// The reason a confirming frame never arrived reaches a person too — it
