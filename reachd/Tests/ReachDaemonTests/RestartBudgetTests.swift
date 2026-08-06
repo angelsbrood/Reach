@@ -84,17 +84,31 @@ import Testing
         )
     }
 
-    private func configuration(port: UInt16, label: String) -> ReachExecutor.Configuration {
+    /// The cold-open budget, as `ReachExecutor.respond` sets it. Anything at
+    /// or near it here is the promise being kept; anything past it is not.
+    private static let coldOpenBudget: Duration = .seconds(10)
+
+    private func configuration(
+        port: UInt16,
+        label: String,
+        connectTimeout: Double = 2
+    ) -> ReachExecutor.Configuration {
         ReachExecutor.Configuration(
             host: "127.0.0.1",
             port: port,
             modelID: ScriptedFilling().modelID,
             identityLabel: label,
-            // Short on purpose: one dial attempt costs the cached dialer's
-            // timeout and then the race's, so this bounds a single attempt
-            // at roughly four seconds and leaves the budget as the only
-            // thing that could stretch the wait.
-            connectTimeout: 2
+            // Short by default, because most tests here are about *which*
+            // budget gets picked and want the dials out of the way.
+            //
+            // ⚠️ It was short for a worse reason, and the comment said so: one
+            // attempt cost the cached dialer's timeout and then the race's, so
+            // 2 held a single attempt to about four seconds "and left the
+            // budget as the only thing that could stretch the wait". That is a
+            // measurement arranged so the defect it was measuring could not
+            // show up in it — rule 6, in the suite that exists to time this.
+            // `aColdAskRefusesAtItsBudgetAndNotAtTwiceIt` passes a real one.
+            connectTimeout: connectTimeout
         )
     }
 
@@ -149,6 +163,70 @@ import Testing
         )
     }
 
+    /// The budget bounds the attempt, not just the pause before the next one.
+    ///
+    /// `waitBeforeRetry` checks the deadline before *sleeping*, so a single
+    /// attempt could spend far more than the whole budget and never consult
+    /// it. `ReachConnectionHub.openStream` tries the cached dialer for the
+    /// full `connectTimeout` and then hands the same timeout to every racer,
+    /// and `respond` opens twice per iteration — up to 4× the configured
+    /// timeout, 80 s at `Configuration`'s default 20, against a 10 s promise.
+    ///
+    /// The rest of this suite runs at `connectTimeout: 2`, which is small
+    /// enough that the doubling fits under every assertion in it. **This one
+    /// passes 30 on purpose**: the budget has to be the binding constraint or
+    /// the measurement is of nothing. On the old code the wait was ~60 s.
+    ///
+    /// Warming first is not incidental — the doubling only happens on a
+    /// *proven* entry, so an app that has never connected pays one race and a
+    /// cold ask after a restart pays two. The second is the shape a person
+    /// meets, and the shape the rig measured.
+    @Test(.timeLimit(.minutes(2)))
+    func aColdAskRefusesAtItsBudgetAndNotAtTwiceIt() async throws {
+        let port: UInt16 = 47483
+        let cluster = try makeCluster()
+        defer { cluster.discard() }
+        let daemon = try await startDaemon(port: port, cluster: cluster)
+        let configuration = configuration(port: port, label: cluster.label, connectTimeout: 30)
+        await ReachIdentityRegistry.shared.register(
+            label: cluster.label,
+            material: .init(identity: cluster.clientIdentity, caCertificate: cluster.caCert)
+        )
+
+        let warm = LanguageModelSession(model: ReachLanguageModel(configuration: configuration))
+        _ = try await warm.respond(to: "Go.")
+        await daemon.stop()
+
+        let clock = ContinuousClock()
+        let asked = clock.now
+        let cold = LanguageModelSession(model: ReachLanguageModel(configuration: configuration))
+        var thrown: (any Error)?
+        do {
+            _ = try await cold.respond(to: "Go again.")
+            Issue.record("a stopped daemon answered")
+        } catch {
+            thrown = error
+        }
+        let waited = clock.now - asked
+
+        // Tolerance, not slack: the budget is 10 s and one dial is allowed to
+        // be in flight when it expires. Twice the budget is the defect.
+        #expect(
+            waited < Self.coldOpenBudget * 2,
+            "a cold ask with a 10 s budget waited \(waited) against a 30 s connect timeout"
+        )
+        // What it says at the budget matters as much as when. `.unreachable`
+        // is D4's sentence and names which situation this app is in; the two
+        // wrong answers are a bare cancellation, which says nothing, and
+        // `.transport`, which describes a socket rather than a cluster.
+        let error = try #require(thrown)
+        #expect(!(error is CancellationError), "the deadline was reported as a cancelled request")
+        guard case .unreachable = error as? ReachError else {
+            Issue.record("the refusal at the budget was not the one written for it: \(error)")
+            return
+        }
+    }
+
     /// The recovery nothing tested. A daemon that restarts has an empty
     /// registry, so the session the app still holds is refused — and the app
     /// is meant to notice, discard it, open a fresh one and ask again without
@@ -187,6 +265,66 @@ import Testing
         #expect(
             !answer.content.isEmpty,
             "the app should not have to know its cluster restarted to ask a second question"
+        )
+    }
+
+    /// The segment no connect timeout can bound: a cluster that answers the
+    /// dial and then says nothing.
+    ///
+    /// `ReachConnectionHub.session` sends `Hello` and then *reads*, twice, with
+    /// no deadline on either — so a listener that completes mTLS and never
+    /// speaks holds an app until QUIC's own idle timeout, about 30 s, three
+    /// times the cold-open budget. This is why the fix is a deadline around
+    /// the open rather than a connect timeout threaded down to the dial:
+    /// threading would have left this exactly as it was, while making the
+    /// budget look kept.
+    ///
+    /// The listener here accepts tunnels and drops them on the floor. That is
+    /// not a contrived shape — it is a daemon wedged after `start()`, and it
+    /// is what a half-open NAT mapping looks like from this side.
+    ///
+    /// ⚠️ Port 47484.
+    @Test(.timeLimit(.minutes(2)))
+    func aClusterThatAnswersAndThenGoesQuietStillRefusesAtTheBudget() async throws {
+        let port: UInt16 = 47484
+        let cluster = try makeCluster()
+        defer { cluster.discard() }
+
+        let listener = try QUICListener(
+            port: port,
+            parameters: .reachQUIC(options: TLSBuilder.serverOptions(
+                alpn: Wire.alpn,
+                identity: cluster.serverIdentity,
+                clientTrustRoots: [cluster.caCert]
+            ))
+        )
+        defer { listener.cancel() }
+        // Accept everything, answer nothing. Holding the streams is the point:
+        // dropping them would close the connection and produce an ending.
+        let mute = Task {
+            var held: [ReachTransport.QUICStream] = []
+            for try await tunnel in listener.tunnels {
+                for await stream in tunnel.inboundStreams { held.append(stream) }
+            }
+        }
+        defer { mute.cancel() }
+
+        let configuration = configuration(port: port, label: cluster.label, connectTimeout: 30)
+        await ReachIdentityRegistry.shared.register(
+            label: cluster.label,
+            material: .init(identity: cluster.clientIdentity, caCertificate: cluster.caCert)
+        )
+
+        let clock = ContinuousClock()
+        let asked = clock.now
+        let session = LanguageModelSession(model: ReachLanguageModel(configuration: configuration))
+        await #expect(throws: (any Error).self) {
+            _ = try await session.respond(to: "Go.")
+        }
+        let waited = clock.now - asked
+        #expect(
+            waited < Self.coldOpenBudget * 2,
+            "a cluster that went quiet held the app for \(waited) against a 10 s budget"
         )
     }
 

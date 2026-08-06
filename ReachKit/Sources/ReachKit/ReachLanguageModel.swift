@@ -111,6 +111,20 @@ public struct ReachExecutor: FoundationModels.LanguageModelExecutor {
         var freshStartRetries = 1
 
         while true {
+            // Which budget applies is decided once per attempt, and then
+            // bounds both halves of it: the opens below, and the pause before
+            // the next iteration. It used to be computed only at the two
+            // `waitBeforeRetry` calls, which is why it bounded only the pauses.
+            //
+            // The evidence is whether anything is resident to come back to,
+            // and the only evidence of that is an event this call has already
+            // received. It used to be `session == nil` — but the hub caches a
+            // session handle across calls and hands it back without dialling,
+            // so a handle for a daemon that is no longer running still read as
+            // "connected". A fresh ask with nothing resident therefore spent
+            // the full residency window in silence: measured at 118.6 s
+            // against a comment promising it could not happen.
+            let deadline = lastReceived == nil ? coldOpenDeadline : reconnectDeadline
             do {
                 // Epoch read precedes the open: a path change that lands
                 // mid-dial still trips the watcher rather than being missed.
@@ -122,14 +136,19 @@ public struct ReachExecutor: FoundationModels.LanguageModelExecutor {
                 // backoff and no retry — which is exactly the shape a phone
                 // that has just rebooted is in, and the one case "reach it
                 // from anywhere" most has to survive.
+                let configuration = configuration
                 let live: ReachConnectionHub.SessionHandle
                 if let session {
                     live = session
                 } else {
-                    live = try await ReachConnectionHub.shared.session(for: configuration)
+                    live = try await openingBy(deadline) {
+                        try await ReachConnectionHub.shared.session(for: configuration)
+                    }
                     session = live
                 }
-                let stream = try await ReachConnectionHub.shared.openGenerationStream(for: configuration)
+                let stream = try await openingBy(deadline) {
+                    try await ReachConnectionHub.shared.openGenerationStream(for: configuration)
+                }
                 defer { stream.cancel() }
                 // A path change (an SSID hop, Wi-Fi loss) cancels the live
                 // stream so the retry loop re-dials now — the hub then races
@@ -220,28 +239,11 @@ public struct ReachExecutor: FoundationModels.LanguageModelExecutor {
                     throw ReachError.generationLost(message)
                 }
                 if case .remote = error { throw error }
-                // Which budget applies is decided by whether anything is
-                // resident to come back to, and the only evidence of that is
-                // an event this call has already received. It used to be
-                // decided by `session == nil` — but the hub caches a session
-                // handle across calls and hands it back without dialling, so a
-                // handle for a daemon that is no longer running still read as
-                // "connected". A fresh ask with nothing resident therefore
-                // spent the full residency window in silence: measured at
-                // 118.6 s against a comment promising it could not happen.
-                try await waitBeforeRetry(
-                    &backoff,
-                    deadline: lastReceived == nil ? coldOpenDeadline : reconnectDeadline,
-                    cause: error
-                )
+                try await waitBeforeRetry(&backoff, deadline: deadline, cause: error)
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
-                try await waitBeforeRetry(
-                    &backoff,
-                    deadline: lastReceived == nil ? coldOpenDeadline : reconnectDeadline,
-                    cause: error
-                )
+                try await waitBeforeRetry(&backoff, deadline: deadline, cause: error)
             }
         }
     }
@@ -304,5 +306,65 @@ public struct ReachExecutor: FoundationModels.LanguageModelExecutor {
         }
         try? await Task.sleep(for: backoff)
         backoff = min(backoff * 2, .seconds(2))
+    }
+
+    /// Runs `open` and gives up at `deadline`, so the budget bounds the
+    /// attempt and not merely the pause before the next one.
+    ///
+    /// `waitBeforeRetry` above checks the deadline before *sleeping*, which
+    /// bounds the gaps between dials and nothing else. A single iteration can
+    /// spend far more than the whole budget inside one attempt, and did:
+    /// `ReachConnectionHub.openStream` tries the cached dialer for the full
+    /// `connectTimeout` and then hands the same timeout to every racer, so a
+    /// warm hub pays it twice per call and this function is called twice per
+    /// iteration — up to 4× the configured timeout, 80 s at the default 20,
+    /// against a 10 s promise. Both existing measurements of this hid it by
+    /// choosing a tiny `connectTimeout`.
+    ///
+    /// **On expiry the hub's own error is what surfaces, not one invented
+    /// here.** Cancelling reaches `NWConnection` (the transport tears a
+    /// cancelled open down), the race collects no winner, and the hub throws
+    /// `ReachError.unreachable(roads:stored:)` — the sentence that says which
+    /// of "never been answered" and "knows the roads" this app is in. Making
+    /// one up here would have to guess both.
+    ///
+    /// This also bounds the control exchange inside `session(for:)`, which no
+    /// connect timeout can: those are reads, and a cluster that accepts the
+    /// connection and then goes quiet hangs there to the QUIC idle timeout.
+    private func openingBy<T: Sendable>(
+        _ deadline: ContinuousClock.Instant,
+        _ open: @escaping @Sendable () async throws -> T
+    ) async throws -> T {
+        do {
+            return try await withThrowingTaskGroup(of: T?.self) { group in
+                group.addTask { try await open() }
+                group.addTask {
+                    try await Task.sleep(until: deadline, clock: ContinuousClock())
+                    return nil
+                }
+                defer { group.cancelAll() }
+                while let next = try await group.next() {
+                    if let value = next {
+                        return value
+                    }
+                    // The deadline won. Cancel the open and keep waiting, so
+                    // what propagates is its account of why it had not
+                    // finished rather than a bare timeout.
+                    group.cancelAll()
+                }
+                // It unwound without throwing and without a stream, which
+                // leaves nothing to report but the cancellation itself.
+                throw CancellationError()
+            }
+        } catch {
+            // ⚠️ An app that cancelled its own request must not be told there
+            // was no road. The hub turns a cancelled dial into `.unreachable`
+            // — correct for a dead network, and a lie to someone who just
+            // closed the view — and whether that or the timer's own
+            // `CancellationError` arrives first is a race. Decided here, where
+            // the difference is knowable.
+            if Task.isCancelled { throw CancellationError() }
+            throw error
+        }
     }
 }
