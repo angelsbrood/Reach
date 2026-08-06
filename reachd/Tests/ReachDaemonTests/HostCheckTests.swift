@@ -622,3 +622,74 @@ import Testing
         #expect(HostCheck.checkSupervision(daemonUp: true, home: home).level == .pass)
     }
 }
+
+/// What `service install` refuses, and why each refusal exists.
+///
+/// Both were met for real while installing the agent on 5 Aug: the binary
+/// went to a bin directory on its own, launchd started it, it printed that
+/// it was serving, bound the port, and died on the metallib.
+@Suite struct LaunchAgentInstallTests {
+    private func stage(_ files: [String]) throws -> URL {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("reach-agent-\(UUID())", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        for file in files {
+            let url = directory.appendingPathComponent(file)
+            if file.hasSuffix(".bundle") {
+                try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+            } else {
+                try Data().write(to: url)
+                try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+            }
+        }
+        return directory
+    }
+
+    @Test func aBinaryWithoutItsBundlesIsRefused() throws {
+        let directory = try stage(["reachd"])
+        defer { try? FileManager.default.removeItem(at: directory) }
+        #expect(throws: ServiceError.missingResources(
+            directory.appendingPathComponent("reachd").resolvingSymlinksInPath().path
+        )) {
+            _ = try LaunchAgent.executablePath(directory.appendingPathComponent("reachd").path)
+        }
+    }
+
+    @Test func aBinaryBesideItsBundlesIsAccepted() throws {
+        let directory = try stage(["reachd", "mlx-swift_Cmlx.bundle"])
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let path = try LaunchAgent.executablePath(directory.appendingPathComponent("reachd").path)
+        #expect(path.hasSuffix("/reachd"))
+    }
+
+    @Test func somethingThatIsNotThereIsRefusedBeforeAnythingElse() throws {
+        #expect(throws: ServiceError.self) {
+            _ = try LaunchAgent.executablePath("/nowhere/reachd")
+        }
+    }
+
+    /// The plist is the contract with launchd, and the first draft of it was
+    /// wrong in a way only an install could show.
+    ///
+    /// It said `KeepAlive: {Crashed: true}` — and a `kill -9` against the
+    /// installed agent did not bring the daemon back, because launchd counts
+    /// a crash as the SIGSEGV/SIGABRT family and not a deliberate signal.
+    /// That also misses the kernel's own `SIGKILL` under memory pressure,
+    /// which is the likeliest unplanned death of a process holding several
+    /// gigabytes of weights. A supervisor cannot be selective about which
+    /// deaths count.
+    @Test func theAgentComesBackFromAnyDeath() {
+        let plist = LaunchAgent.plist(executable: "/usr/local/bin/reachd")
+        #expect(
+            !plist.contains("<key>Crashed</key>"),
+            "Crashed does not cover SIGKILL, which is how this daemon most plausibly dies"
+        )
+        #expect(!plist.contains("SuccessfulExit"))
+        #expect(plist.contains("<key>KeepAlive</key>\n    <true/>"))
+        #expect(
+            plist.contains("<key>ThrottleInterval</key>"),
+            "unconditional restart needs a floor, or a permanently held port spins"
+        )
+        #expect(plist.contains("<key>StandardOutPath</key>"), "print goes nowhere under launchd otherwise")
+    }
+}

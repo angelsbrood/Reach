@@ -54,17 +54,39 @@ public enum LaunchAgent {
         if resolved.contains("/Library/Caches/") || resolved.contains("/.build/") {
             throw ServiceError.buildPath(resolved)
         }
+        // `reachd` is not a single file. SwiftPM emits resource bundles beside
+        // the executable and MLX finds its Metal library by looking there, so
+        // a binary copied on its own starts, prints that it is serving, binds
+        // the port, and *then* dies on the first thing that touches the GPU.
+        // Under launchd that is a crash loop at every login, and the only
+        // clue is a metallib path deep inside a build directory. Caught here
+        // instead, at the moment someone is still looking at a terminal.
+        let beside = URL(fileURLWithPath: resolved)
+            .deletingLastPathComponent()
+            .appendingPathComponent("mlx-swift_Cmlx.bundle")
+        guard FileManager.default.fileExists(atPath: beside.path) else {
+            throw ServiceError.missingResources(resolved)
+        }
         return resolved
     }
 
-    /// `Crashed`, deliberately, and not `SuccessfulExit: false`.
+    /// `KeepAlive: true`, and the first draft of this was wrong.
     ///
-    /// The daemon now refuses to start when it cannot take its port, and
-    /// exits non-zero saying so. Under `SuccessfulExit: false` that refusal
-    /// becomes an endless respawn against a port that is never coming free,
-    /// with the reason scrolling past ten seconds at a time. `Crashed`
-    /// restarts what died — a signal, a `kill -9`, a real fault — and leaves
-    /// a considered refusal standing where someone can read it.
+    /// It shipped as `Crashed: true`, reasoning that the daemon's considered
+    /// non-zero exit on a held port should not become a respawn loop. Then
+    /// the agent was installed and the daemon `kill -9`'d to see it come
+    /// back, **and it did not** — launchd counts a crash as the
+    /// SIGSEGV/SIGABRT family, not a deliberate signal. Which also means it
+    /// misses the kernel's own `SIGKILL` under memory pressure: the likeliest
+    /// unplanned death of a process holding several gigabytes of weights.
+    ///
+    /// A supervisor whose whole job is that the cluster is there cannot be
+    /// selective about which deaths count. Unconditional, with
+    /// `ThrottleInterval` bounding the retry: a genuinely held port then
+    /// re-attempts every ten seconds and heals itself the moment the port
+    /// frees — which is the restart race, and the common case — while a
+    /// permanently occupied one writes the reason to the log at the same
+    /// pace. That is a log worth having, not noise to design around.
     ///
     /// Both output paths are set because every line the daemon writes is
     /// `print` or stderr, and under launchd those go nowhere by default.
@@ -84,10 +106,7 @@ public enum LaunchAgent {
             <key>RunAtLoad</key>
             <true/>
             <key>KeepAlive</key>
-            <dict>
-                <key>Crashed</key>
-                <true/>
-            </dict>
+            <true/>
             <key>ThrottleInterval</key>
             <integer>10</integer>
             <key>StandardOutPath</key>
@@ -105,6 +124,7 @@ public enum LaunchAgent {
 public enum ServiceError: Error, Sendable, Equatable, CustomStringConvertible, LocalizedError {
     case notExecutable(String)
     case buildPath(String)
+    case missingResources(String)
     case launchctlRefused(String)
 
     public var description: String {
@@ -112,7 +132,9 @@ public enum ServiceError: Error, Sendable, Equatable, CustomStringConvertible, L
         case .notExecutable(let path):
             "there is no runnable reachd at \(path) — pass --executable with the path to the built binary"
         case .buildPath(let path):
-            "\(path) is inside a build directory, and macOS purges those without asking — copy reachd somewhere permanent such as /usr/local/bin and install from there"
+            "\(path) is inside a build directory, and macOS purges those without asking — copy reachd somewhere permanent and install from there"
+        case .missingResources(let path):
+            "\(path) has no mlx-swift_Cmlx.bundle beside it — reachd is not a single file, and without its resource bundles it starts, says it is serving, and then dies loading the model. Copy the whole build directory's bundles alongside the binary, not just the binary"
         case .launchctlRefused(let detail):
             "launchd would not take the agent: \(detail)"
         }

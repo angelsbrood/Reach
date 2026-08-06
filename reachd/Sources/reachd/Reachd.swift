@@ -24,6 +24,15 @@ struct Serve: AsyncParsableCommand {
     var noAdvertise = false
 
     func run() async throws {
+        // stdout to a *file* is block-buffered, and a daemon that prints four
+        // lines at startup never fills a 4 KB buffer — so under launchd,
+        // where `StandardOutPath` is the only way to read those lines at all,
+        // the log stayed empty for as long as the daemon was healthy and
+        // filled only when it died and flushed. A log you can read after the
+        // crash and not before is the wrong way round. `Log.error` already
+        // goes to stderr, which is unbuffered; this puts `Log.info` on equal
+        // footing.
+        setvbuf(stdout, nil, _IOLBF, 0)
         // A config read successfully is left exactly as the operator wrote it.
         // Write only to materialize a first run, or to record a --model
         // override — rewriting on every start is how a typo gets erased before
