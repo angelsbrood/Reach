@@ -67,8 +67,9 @@ import Testing
         let client = try ca.issueClient(commonName: "budget-app", uri: "reach://device/budget-app")
         let serverIdentity = try IdentityMaterializer.materialize(server, label: "reach-budget-server-\(UUID())")
         let clientIdentity = try IdentityMaterializer.materialize(client, label: "reach-budget-client-\(UUID())")
-        // Owned cleanup rather than the global `IdentityTrash` bin, whose
-        // `drain()` empties it for every concurrent suite at once.
+        // Owned cleanup. This suite declined the old global `IdentityTrash`
+        // bin, whose `drain()` emptied it for every concurrent suite at once;
+        // the bin is gone and this is now what every suite does.
         let boxes = [IdentityBox(serverIdentity), IdentityBox(clientIdentity)]
         let discard: @Sendable () -> Void = {
             for box in boxes { KeychainIdentity.remove(identity: box.identity) }

@@ -12,6 +12,12 @@ import Testing
 /// times the gemma-3 weights this used to name, so it is a deliberate download
 /// and not something to discover on a recording day; skipped where the GPU or
 /// cache is absent by failing prewarm.
+///
+/// ⚠️ Uses 47470, moved off 47416 where it sat on top of `SpineTests`. The
+/// clash was invisible for as long as this suite stayed gated: set
+/// `REACH_MLX_TESTS=1` and the two race for one port, and the loser reports
+/// `ReachError.unreachable` — which reads like a real cold-start failure. The
+/// gate that hid it is also what would have made it hardest to believe.
 @Suite(.serialized) struct MLXIntegrationTests {
     @Test(
         .enabled(if: ProcessInfo.processInfo.environment["REACH_MLX_TESTS"] == "1",
@@ -27,13 +33,14 @@ import Testing
         let client = try ca.issueClient(commonName: "mlx-app", uri: "reach://device/mlx-app")
         let serverIdentity = try IdentityMaterializer.materialize(server, label: "reach-mlx-server-\(UUID())")
         let clientIdentity = try IdentityMaterializer.materialize(client, label: "reach-mlx-client-\(UUID())")
-        IdentityTrash.add(serverIdentity)
-        IdentityTrash.add(clientIdentity)
-        defer { IdentityTrash.drain() }
+        // Owned rather than the old global bin, whose `drain()` emptied one
+        // bin for every concurrent suite at once.
+        let boxes = [IdentityBox(serverIdentity), IdentityBox(clientIdentity)]
+        defer { for box in boxes { KeychainIdentity.remove(identity: box.identity) } }
         let caCert = try IdentityStore.certificate(fromDER: ca.certificateDER())
 
         var config = DaemonConfig()
-        config.port = 47416
+        config.port = 47470
         config.clusterName = "mlx-spine"
         config.modelID = "gemma-4-e2b"
         let daemon = Daemon(
@@ -52,7 +59,7 @@ import Testing
         let session = LanguageModelSession(
             model: ReachLanguageModel(configuration: ReachExecutor.Configuration(
                 host: "127.0.0.1",
-                port: 47416,
+                port: 47470,
                 modelID: "gemma-4-e2b",
                 identityLabel: label,
                 connectTimeout: 45

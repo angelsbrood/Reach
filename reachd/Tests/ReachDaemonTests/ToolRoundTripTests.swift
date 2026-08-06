@@ -100,12 +100,14 @@ import Testing
 
     /// Cleans up exactly the two identities this suite minted.
     ///
-    /// Deliberately NOT `IdentityTrash`: that is a single global bin whose
-    /// `drain()` empties it entirely, and `.serialized` only orders a suite
-    /// against itself — so one suite's teardown can delete an identity a
-    /// concurrent suite is still handshaking with. That is a latent hazard in
-    /// the existing suites rather than something observed here, and this one
-    /// simply declines to join it: owning the cleanup costs a closure.
+    /// This suite declined the old global `IdentityTrash` bin, whose `drain()`
+    /// emptied it entirely — and since `.serialized` orders a suite against
+    /// itself only, one suite's teardown could delete an identity a concurrent
+    /// suite was still handshaking with. The bin is gone now and every suite
+    /// owns what it minted, so this is the ordinary shape rather than an
+    /// exception; the note stays because the capture list *is* the ownership
+    /// boundary, and a closure that reaches wider than what it created is the
+    /// defect coming back.
     ///
     /// ⚠️ Ports are hand-picked literals scattered across test files, and the
     /// first pair chosen here silently collided with `GrantTests`' 47440–47453

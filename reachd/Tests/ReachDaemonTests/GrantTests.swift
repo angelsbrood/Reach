@@ -24,6 +24,12 @@ import X509
         let caCert: SecCertificate
         let sessionPort: UInt16
         let enrollDialer: QUICDialer
+        /// Identities this fixture mints *after* it exists — the device's and
+        /// the app's, both issued mid-test by the ceremony halves below. A
+        /// captured cleanup closure cannot grow to hold them, which is why
+        /// this was reaching for the global bin; an instance answers for its
+        /// own fixture and nobody else's.
+        let bin: IdentityBin
         let cleanup: @Sendable () -> Void
     }
 
@@ -40,6 +46,7 @@ import X509
         // Materialized identities land in the login keychain via
         // SecPKCS12Import; the fixture owns removing what it made.
         let serverBox = IdentityBox(serverIdentity)
+        let bin = IdentityBin()
         let caCert = try IdentityStore.certificate(fromDER: caDER)
 
         let tokens = TokenStore(directory: stateDir)
@@ -72,10 +79,11 @@ import X509
         return Fixture(
             ca: ca, caHash: caHash, tokens: tokens, devices: devices, desk: desk,
             daemon: daemon, caCert: caCert, sessionPort: sessionPort, enrollDialer: enrollDialer,
+            bin: bin,
             cleanup: {
                 Task { await daemon.stop() }
                 KeychainIdentity.remove(identity: serverBox.identity)
-                IdentityTrash.drain()
+                bin.drain()
                 try? FileManager.default.removeItem(at: stateDir)
             }
         )
@@ -109,7 +117,7 @@ import X509
             privateKey: deviceKey,
             label: "reach-grant-device-\(UUID())"
         )
-        IdentityTrash.add(identity)
+        fixture.bin.add(identity)
         return (grant, identity)
     }
 
@@ -247,7 +255,7 @@ import X509
             privateKey: appKey,
             label: "reach-grant-app-\(UUID())"
         )
-        IdentityTrash.add(appIdentity)
+        fixture.bin.add(appIdentity)
         let options = TLSBuilder.clientOptions(alpn: Wire.alpn, identity: appIdentity, serverTrustRoots: [fixture.caCert])
         let dialer = QUICDialer(
             endpoint: .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: fixture.sessionPort)!),

@@ -131,21 +131,29 @@ struct IdentityBox: @unchecked Sendable {
 /// Identities materialized in the middle of a test, waiting to be removed.
 ///
 /// `SecPKCS12Import` adds to the login keychain as a side effect, so every
-/// identity a test makes outlives the run unless something deletes it — which
-/// nothing did, for as long as this suite has existed. Fixtures own the ones
-/// they create; this holds the ones created mid-test, and fixture teardown
+/// identity a test makes outlives the run unless something deletes it. This
+/// holds the ones a fixture creates after it exists, and fixture teardown
 /// drains it.
-enum IdentityTrash {
-    private static let lock = NSLock()
-    private nonisolated(unsafe) static var held: [IdentityBox] = []
+///
+/// **One bin per fixture, and that is the whole point.** This was a `static`
+/// bin shared by the target, so `drain()` deleted every identity *any*
+/// concurrent suite had deposited — and `.serialized` orders a suite against
+/// itself only, so one suite's teardown could pull an identity out from under
+/// another suite mid-handshake. Latent rather than observed, but two suites
+/// had already declined to join it and written down why, which is a defect
+/// being routed around rather than fixed. An instance cannot answer for
+/// anyone else's identities, so the question stops being askable.
+final class IdentityBin: @unchecked Sendable {
+    private let lock = NSLock()
+    private var held: [IdentityBox] = []
 
-    static func add(_ identity: SecIdentity) {
+    func add(_ identity: SecIdentity) {
         lock.lock()
         defer { lock.unlock() }
         held.append(IdentityBox(identity))
     }
 
-    static func drain() {
+    func drain() {
         lock.lock()
         let boxes = held
         held.removeAll()

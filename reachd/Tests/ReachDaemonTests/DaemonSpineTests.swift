@@ -301,9 +301,10 @@ struct ScriptedFilling: SlotFilling {
         let client = try ca.issueClient(commonName: "spine-client", uri: "reach://device/spine")
         let serverIdentity = try IdentityMaterializer.materialize(server, label: "reach-spine-server-\(UUID())")
         let clientIdentity = try IdentityMaterializer.materialize(client, label: "reach-spine-client-\(UUID())")
-        IdentityTrash.add(serverIdentity)
-        IdentityTrash.add(clientIdentity)
-        defer { IdentityTrash.drain() }
+        // Owned rather than the old global bin, whose `drain()` emptied one
+        // bin for every concurrent suite at once.
+        let boxes = [IdentityBox(serverIdentity), IdentityBox(clientIdentity)]
+        defer { for box in boxes { KeychainIdentity.remove(identity: box.identity) } }
         let caCert = try IdentityStore.certificate(fromDER: ca.certificateDER())
 
         var config = DaemonConfig()
@@ -413,9 +414,10 @@ struct ScriptedFilling: SlotFilling {
         let client = try ca.issueClient(commonName: "silent-client", uri: "reach://device/silent")
         let serverIdentity = try IdentityMaterializer.materialize(server, label: "reach-silent-server-\(UUID())")
         let clientIdentity = try IdentityMaterializer.materialize(client, label: "reach-silent-client-\(UUID())")
-        IdentityTrash.add(serverIdentity)
-        IdentityTrash.add(clientIdentity)
-        defer { IdentityTrash.drain() }
+        // Owned rather than the old global bin, whose `drain()` emptied one
+        // bin for every concurrent suite at once.
+        let boxes = [IdentityBox(serverIdentity), IdentityBox(clientIdentity)]
+        defer { for box in boxes { KeychainIdentity.remove(identity: box.identity) } }
         let caCert = try IdentityStore.certificate(fromDER: ca.certificateDER())
 
         var config = DaemonConfig()

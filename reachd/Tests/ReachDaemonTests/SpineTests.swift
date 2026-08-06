@@ -11,19 +11,50 @@ import Testing
 /// `ReachLanguageModel` streams a generation served by the in-process
 /// daemon over loopback with mutual TLS. This is Phase 1's acceptance
 /// sentence minus the second machine.
+///
+/// ⚠️ **Ports here are hand-picked literals and nothing checks them.** This
+/// suite owns 47414–47416 and 47418–47420. `.serialized` orders it against
+/// itself only, so every other suite in this target runs concurrently with it
+/// and a clash surfaces as `ReachError.unreachable` — a *product* error about
+/// roads, which reads as a cold-start regression and is not one.
+///
+/// Two clashes were live and are now fixed: 47416 was shared with
+/// `MLXIntegrationTests` (invisible only because that suite is gated behind
+/// `REACH_MLX_TESTS`), and 47417 was `reachd selftest`'s default `--port`, so
+/// a selftest running beside `swift test` took this suite's listener. The
+/// allocator that would make the whole class impossible is a named roadmap
+/// item with its design attached; until it lands, a new port here means
+/// grepping the target first.
 @Suite(.serialized) struct SpineTests {
+    /// Cleans up exactly the two identities this call minted.
+    ///
+    /// Was the global `IdentityTrash` bin, whose `drain()` emptied one bin for
+    /// every concurrent suite at once. The returned closure's capture list is
+    /// the ownership boundary: it is structurally incapable of deleting
+    /// anything another suite made.
+    ///
+    /// The `discarded` flag is the part the global bin was accidentally
+    /// getting right. If this function throws after minting — `daemon.start`
+    /// on a port already taken is the live case — the caller never receives
+    /// the closure and the identities would be stranded in the login keychain
+    /// forever, where the old pre-registered `drain()` would still have swept
+    /// them. So the failure path discards them itself.
     private func startDaemon(
         port: UInt16,
         host: String = "127.0.0.1",
         connectTimeout: Double = 45
-    ) async throws -> (Daemon, ReachExecutor.Configuration) {
+    ) async throws -> (Daemon, ReachExecutor.Configuration, @Sendable () -> Void) {
         let ca = try ClusterCA.create(commonName: "Reach Spine CA")
         let server = try ca.issueServer(commonName: "localhost", dnsNames: ["localhost"], ipAddresses: [[127, 0, 0, 1]])
         let client = try ca.issueClient(commonName: "spine-app", uri: "reach://device/spine-app")
         let serverIdentity = try IdentityMaterializer.materialize(server, label: "reach-spine2-server-\(UUID())")
         let clientIdentity = try IdentityMaterializer.materialize(client, label: "reach-spine2-client-\(UUID())")
-        IdentityTrash.add(serverIdentity)
-        IdentityTrash.add(clientIdentity)
+        let boxes = [IdentityBox(serverIdentity), IdentityBox(clientIdentity)]
+        let discard: @Sendable () -> Void = {
+            for box in boxes { KeychainIdentity.remove(identity: box.identity) }
+        }
+        var handedOff = false
+        defer { if !handedOff { discard() } }
         let caCert = try IdentityStore.certificate(fromDER: ca.certificateDER())
 
         var config = DaemonConfig()
@@ -49,7 +80,8 @@ import Testing
             identityLabel: label,
             connectTimeout: connectTimeout
         )
-        return (daemon, configuration)
+        handedOff = true
+        return (daemon, configuration, discard)
     }
 
     /// Writes the store the way a previous process would have, bypassing
@@ -79,12 +111,12 @@ import Testing
     /// true. (The real topology — a café, the tunnel, the mesh — is hardware
     /// acceptance; this proves the machinery: store read, seeded race, win.)
     @Test func aSessionIsBornAwayFromTheRoadsItKept() async throws {
-        defer { IdentityTrash.drain() }
-        let (daemon, configuration) = try await startDaemon(port: 47417, host: "198.51.100.1")
+        let (daemon, configuration, discard) = try await startDaemon(port: 47420, host: "198.51.100.1")
+        defer { discard() }
         defer { Task { await daemon.stop() } }
         defer { try? ClusterRoads.forget(for: configuration.identityLabel) }
 
-        try seedRoads(["127.0.0.1"], port: 47417, for: configuration.identityLabel)
+        try seedRoads(["127.0.0.1"], port: 47420, for: configuration.identityLabel)
 
         let session = LanguageModelSession(
             model: ReachLanguageModel(configuration: configuration),
@@ -107,12 +139,12 @@ import Testing
     /// residency budget, because before the first session there is nothing
     /// resident to wait for and the wait is all a person gets.
     @Test func withoutStoredRoadsTheSameDialFails() async throws {
-        defer { IdentityTrash.drain() }
         // Short, because the whole point is to wait out a dial that never
         // lands: TEST-NET-2 looks routable, so it hangs rather than refusing.
-        let (daemon, configuration) = try await startDaemon(
+        let (daemon, configuration, discard) = try await startDaemon(
             port: 47418, host: "198.51.100.1", connectTimeout: 5
         )
+        defer { discard() }
         defer { Task { await daemon.stop() } }
 
         let session = LanguageModelSession(
@@ -141,10 +173,10 @@ import Testing
     /// test alone would be a sentence written for a case nothing reaches,
     /// which is the defect this suite's sibling was built to outlaw.
     @Test func aStoreThatWillNotOpenIsNotReadAsAnEmptyOne() async throws {
-        defer { IdentityTrash.drain() }
-        let (daemon, configuration) = try await startDaemon(
+        let (daemon, configuration, discard) = try await startDaemon(
             port: 47419, host: "198.51.100.1", connectTimeout: 5
         )
+        defer { discard() }
         defer { Task { await daemon.stop() } }
         defer { try? ClusterRoads.forget(for: configuration.identityLabel) }
 
@@ -173,8 +205,8 @@ import Testing
     }
 
     @Test func sessionStreamsThroughTheDaemon() async throws {
-        defer { IdentityTrash.drain() }
-        let (daemon, configuration) = try await startDaemon(port: 47414)
+        let (daemon, configuration, discard) = try await startDaemon(port: 47414)
+        defer { discard() }
         defer { Task { await daemon.stop() } }
 
         let session = LanguageModelSession(
@@ -202,8 +234,8 @@ import Testing
     /// acceptance; this proves the client machinery: watcher, race,
     /// re-attach, replay dedupe.)
     @Test func generationSurvivesAPathChange() async throws {
-        defer { IdentityTrash.drain() }
-        let (daemon, configuration) = try await startDaemon(port: 47416)
+        let (daemon, configuration, discard) = try await startDaemon(port: 47416)
+        defer { discard() }
         defer { Task { await daemon.stop() } }
 
         let session = LanguageModelSession(
@@ -225,8 +257,8 @@ import Testing
     }
 
     @Test func cancellationPropagates() async throws {
-        defer { IdentityTrash.drain() }
-        let (daemon, configuration) = try await startDaemon(port: 47415)
+        let (daemon, configuration, discard) = try await startDaemon(port: 47415)
+        defer { discard() }
         defer { Task { await daemon.stop() } }
 
         let session = LanguageModelSession(model: ReachLanguageModel(configuration: configuration))
