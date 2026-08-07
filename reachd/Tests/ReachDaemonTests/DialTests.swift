@@ -14,6 +14,13 @@ import X509
 /// else in this target until the allocator graduates; a new port here means
 /// running the roadmap's uniqueness one-liner first.
 ///
+/// It also mentions **47337** — production — and the uniqueness checker reports
+/// that as a clash with `ErrorLegibilityTests`. Both are fixture data inside
+/// `Outcome` literals, never a bind, and both are deliberate: a finding about
+/// the real port is what a person actually reads. Every bind here is in the
+/// 4749x range. ⚠️ If a test in this file ever *binds* 47337 it will fight the
+/// launchd agent for the operator's own cluster.
+///
 /// The suite is deliberately mixed. Half of it is pure — `dialFindings` and
 /// the log reader take values and return values, and every sentence a person
 /// reads is assertable without a socket. The other half stands up a real
