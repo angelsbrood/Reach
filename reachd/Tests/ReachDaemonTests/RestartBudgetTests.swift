@@ -67,19 +67,28 @@ import Testing
         let client = try ca.issueClient(commonName: "budget-app", uri: "reach://device/budget-app")
         let serverIdentity = try IdentityMaterializer.materialize(server, label: "reach-budget-server-\(UUID())")
         let clientIdentity = try IdentityMaterializer.materialize(client, label: "reach-budget-client-\(UUID())")
+        let label = "budget-\(UUID().uuidString)"
         // Owned cleanup. This suite declined the old global `IdentityTrash`
         // bin, whose `drain()` emptied it for every concurrent suite at once;
         // the bin is gone and this is now what every suite does.
+        //
+        // The roads belong to the same closure because they are filed under
+        // the same label, and every test here warms the hub on purpose — which
+        // is exactly the moment `ClusterRoads.save` runs, so a suite about
+        // what happens *after* a cluster goes away was leaving a record of
+        // where it had been. 94 `budget-<uuid>` entries, none of them asked
+        // for by anything in this file.
         let boxes = [IdentityBox(serverIdentity), IdentityBox(clientIdentity)]
         let discard: @Sendable () -> Void = {
             for box in boxes { KeychainIdentity.remove(identity: box.identity) }
+            try? ClusterRoads.forget(for: label)
         }
         return Cluster(
             ca: ca,
             serverIdentity: serverIdentity,
             clientIdentity: clientIdentity,
             caCert: try IdentityStore.certificate(fromDER: ca.certificateDER()),
-            label: "budget-\(UUID().uuidString)",
+            label: label,
             discard: discard
         )
     }

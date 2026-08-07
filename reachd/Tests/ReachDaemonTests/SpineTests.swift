@@ -26,19 +26,30 @@ import Testing
 /// item with its design attached; until it lands, a new port here means
 /// grepping the target first.
 @Suite(.serialized) struct SpineTests {
-    /// Cleans up exactly the two identities this call minted.
+    /// Cleans up exactly what this call put in the keychain: the two
+    /// identities it minted, and the roads filed under the label it minted
+    /// them for.
     ///
     /// Was the global `IdentityTrash` bin, whose `drain()` emptied one bin for
     /// every concurrent suite at once. The returned closure's capture list is
     /// the ownership boundary: it is structurally incapable of deleting
     /// anything another suite made.
     ///
-    /// The `discarded` flag is the part the global bin was accidentally
+    /// The roads are the same class of leak one keychain item over, and they
+    /// arrive without anyone here asking: the hub calls `ClusterRoads.save`
+    /// on every `HelloAck`, so a test that opens a session at all writes an
+    /// item under its own label — 199 `spine-<uuid>` entries had accumulated
+    /// in the login keychain by the time anyone looked. The label is the
+    /// account name for both kinds of item, which is why one closure can own
+    /// both and why it is minted here rather than by each test.
+    ///
+    /// The `handedOff` flag is the part the global bin was accidentally
     /// getting right. If this function throws after minting — `daemon.start`
     /// on a port already taken is the live case — the caller never receives
     /// the closure and the identities would be stranded in the login keychain
     /// forever, where the old pre-registered `drain()` would still have swept
-    /// them. So the failure path discards them itself.
+    /// them. So the failure path discards them itself. It has no roads to
+    /// forget: the throw is above the label, and nothing has been dialled.
     private func startDaemon(
         port: UInt16,
         host: String = "127.0.0.1",
@@ -81,7 +92,10 @@ import Testing
             connectTimeout: connectTimeout
         )
         handedOff = true
-        return (daemon, configuration, discard)
+        return (daemon, configuration, {
+            discard()
+            try? ClusterRoads.forget(for: label)
+        })
     }
 
     /// Writes the store the way a previous process would have, bypassing
@@ -114,7 +128,6 @@ import Testing
         let (daemon, configuration, discard) = try await startDaemon(port: 47420, host: "198.51.100.1")
         defer { discard() }
         defer { Task { await daemon.stop() } }
-        defer { try? ClusterRoads.forget(for: configuration.identityLabel) }
 
         try seedRoads(["127.0.0.1"], port: 47420, for: configuration.identityLabel)
 
@@ -178,7 +191,6 @@ import Testing
         )
         defer { discard() }
         defer { Task { await daemon.stop() } }
-        defer { try? ClusterRoads.forget(for: configuration.identityLabel) }
 
         // Bytes that are stored and will not decode — the second half of
         // `ClusterRoads.load`'s absent-versus-unreadable ruling.

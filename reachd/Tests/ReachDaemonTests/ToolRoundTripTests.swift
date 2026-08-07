@@ -98,7 +98,16 @@ import Testing
         }
     }
 
-    /// Cleans up exactly the two identities this suite minted.
+    /// Cleans up exactly what this suite put in the keychain: the two
+    /// identities it minted, and the roads filed under the label it minted
+    /// them for.
+    ///
+    /// The roads arrive without this suite asking for them — the hub calls
+    /// `ClusterRoads.save` on every `HelloAck`, so opening a session at all
+    /// writes an item under `label`, and 97 `tools-<uuid>` entries had piled
+    /// up in the login keychain before anyone looked. Same ownership rule as
+    /// the identities, one item over, which is why the same closure carries
+    /// it.
     ///
     /// This suite declined the old global `IdentityTrash` bin, whose `drain()`
     /// emptied it entirely — and since `.serialized` orders a suite against
@@ -153,7 +162,10 @@ import Testing
             modelID: filling.modelID,
             identityLabel: label,
             connectTimeout: 45
-        ), discard)
+        ), {
+            discard()
+            try? ClusterRoads.forget(for: label)
+        })
     }
 
     @Test(.timeLimit(.minutes(1)))
