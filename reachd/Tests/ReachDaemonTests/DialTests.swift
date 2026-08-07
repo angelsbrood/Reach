@@ -120,6 +120,61 @@ import X509
         #expect(findings.first?.detail.contains("127.0.0.1:47490") == true)
     }
 
+    /// A daemon that has been stopped does not answer a client.
+    ///
+    /// ⚠️ **Found by this pass and it was a real defect.** `stop()` cancelled
+    /// the listener and the accept task; the per-tunnel work is spawned as a
+    /// bare `Task {}` inside the accept loop's body, and an unstructured task
+    /// does not care that the task it was created from was cancelled. So every
+    /// established tunnel went on being served by a daemon that had been told
+    /// to stop.
+    ///
+    /// It is invisible in production — `stop()` is only ever called by
+    /// `selftest`, in a process about to exit — and it surfaced in
+    /// `RestartBudgetTests` as **"a stopped daemon answered"**, intermittently,
+    /// on runs with enough concurrent load to keep the old tunnel alive. Three
+    /// tests there already depended on this being true; none of them asserted
+    /// it, so the failure moved around the suite instead of naming itself.
+    ///
+    /// ⚠️ **Tunnel reuse is the whole probe, and the first draft of this test
+    /// missed it.** `ClusterDial` mints a fresh label per run, so two dials in
+    /// a row build two hub entries and two dialers and never reuse a tunnel —
+    /// that version passed against the unfixed daemon and proved nothing.
+    /// What the failing suite actually does is ask *twice through one
+    /// configuration*, which is what makes the hub reuse its proven dialer and
+    /// the system coalesce the second connection onto the tunnel the daemon is
+    /// still serving. So this holds one configuration across the stop.
+    @Test(.timeLimit(.minutes(1)))
+    func aStoppedDaemonStopsAnsweringClients() async throws {
+        let directory = try stateDirectory()
+        let (daemon, config, discard) = try await startDaemon(in: directory, port: 47493)
+        defer { discard() }
+
+        let label = "reach-dial-stop-\(UUID().uuidString)"
+        let material = try ClusterDial.mint(stateDirectory: directory, label: label)
+        await ReachIdentityRegistry.shared.register(label: label, material: material)
+        defer { try? ClusterRoads.forget(for: label) }
+
+        let configuration = ReachExecutor.Configuration(
+            host: "127.0.0.1",
+            port: config.port,
+            modelID: config.modelID,
+            identityLabel: label,
+            connectTimeout: 4
+        )
+        _ = try await ReachConnectionHub.shared.session(for: configuration)
+
+        await daemon.stop()
+
+        // The hub's entry is now proven, so this reuses the dialer rather than
+        // racing — which is exactly the path a person takes when they ask a
+        // second question after the cluster has gone away.
+        await ReachConnectionHub.shared.invalidateSession(for: configuration)
+        await #expect(throws: (any Error).self, "a stopped daemon answered") {
+            _ = try await ReachConnectionHub.shared.session(for: configuration)
+        }
+    }
+
     /// ⚠️ **The headline.** `probePort` binds `INADDR_ANY`, so it reports that
     /// *something* holds the port and can never report that the something
     /// answers — which is exactly how the guard set went green five times on

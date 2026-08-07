@@ -83,13 +83,15 @@ public final class Daemon: Sendable {
         if advertise {
             listener.advertise(name: config.clusterName, type: Wire.bonjourEnrollService)
         }
-        let accept = Task {
+        let accept = Task { [state] in
             do {
                 for try await tunnel in listener.tunnels {
                     Task {
+                        let id = await state.track(tunnel)
                         for await stream in tunnel.inboundStreams {
                             Task { await service.serve(stream: stream) }
                         }
+                        await state.untrack(id)
                     }
                 }
             } catch {
@@ -153,7 +155,7 @@ public final class Daemon: Sendable {
             do {
                 for try await tunnel in tunnels {
                     guard let self else { return }
-                    Task { await self.handle(tunnel: tunnel) }
+                    Task { await self.serve(tunnel: tunnel) }
                 }
             } catch {
                 Log.error("listener terminated: \(error)")
@@ -182,6 +184,14 @@ public final class Daemon: Sendable {
     }
 
     // MARK: Streams
+
+    /// One accepted tunnel, held for as long as it is being served so that
+    /// `stop()` has something to reach. See `StateBox.tunnels`.
+    private func serve(tunnel: ReachTransport.QUICTunnel) async {
+        let id = await state.track(tunnel)
+        await handle(tunnel: tunnel)
+        await state.untrack(id)
+    }
 
     private func handle(tunnel: ReachTransport.QUICTunnel) async {
         for await stream in tunnel.inboundStreams {
@@ -439,6 +449,42 @@ private actor StateBox {
     private var enrollListener: QUICListener?
     private var tasks: [Task<Void, Never>] = []
 
+    /// Tunnels this daemon accepted and is still serving.
+    ///
+    /// ⚠️ **`stop()` did not stop the daemon, and this is what it was
+    /// missing.** It cancelled the listener and the accept task — but the
+    /// per-tunnel work is spawned as a bare `Task {}` inside the accept
+    /// loop's body, and an unstructured task does not care that the task it
+    /// was created from was cancelled. So a stopped daemon went on serving
+    /// every tunnel a client had already established, and a client whose hub
+    /// entry was `proven` reused that tunnel rather than dialing the listener
+    /// that was gone.
+    ///
+    /// Invisible in production, where `stop()` is only called by `selftest` in
+    /// a process about to exit. Visible in `RestartBudgetTests` as **"a
+    /// stopped daemon answered"** — intermittently, on runs with enough
+    /// concurrent load to keep the old tunnel warm, and moving between three
+    /// tests that all depended on the guarantee and none of which asserted it.
+    /// `DialTests.aStoppedDaemonStopsAnsweringClients` now does, in 0.07 s.
+    ///
+    /// Cancelling the *tunnel* rather than the task is both smaller and truer:
+    /// it closes the connection, which ends the stream iteration in `handle`
+    /// and the frame iteration in every `serve` below it, instead of
+    /// abandoning tasks that still hold a live socket. Each entry removes
+    /// itself when its tunnel finishes, so a daemon serving for weeks holds
+    /// one entry per *live* connection rather than per connection it ever had.
+    private var tunnels: [UUID: ReachTransport.QUICTunnel] = [:]
+
+    func track(_ tunnel: ReachTransport.QUICTunnel) -> UUID {
+        let id = UUID()
+        tunnels[id] = tunnel
+        return id
+    }
+
+    func untrack(_ id: UUID) {
+        tunnels[id] = nil
+    }
+
     func store(listener: QUICListener) {
         self.listener = listener
     }
@@ -457,6 +503,9 @@ private actor StateBox {
         enrollListener?.cancel()
         tasks.forEach { $0.cancel() }
         tasks = []
+        // Established connections, which the two lines above never reached.
+        for tunnel in tunnels.values { tunnel.cancel() }
+        tunnels = [:]
     }
 }
 
