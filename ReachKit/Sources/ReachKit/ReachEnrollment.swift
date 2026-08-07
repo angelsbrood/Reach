@@ -99,6 +99,12 @@ public enum ReachEnrollment {
         )
         // One key for the whole ceremony — it IS the request's name at the
         // desk across every knock.
+        // ⚠️ Deliberately NOT `SigningKey.mint()`, and the reason is worth one
+        // line because the three-doors record tells readers to hunt bare mints.
+        // This key is stored through `KeychainIdentity.store` on a device that
+        // has the entitlement — it never becomes a PKCS#12 archive, so the
+        // LibreSSL leading-zero defect cannot reach it. Every mint that CAN
+        // reach `viaPKCS12` goes through the guard; this one cannot.
         let key = P256.Signing.PrivateKey()
 
         // Attempts, not wall time: while this app is suspended no attempts

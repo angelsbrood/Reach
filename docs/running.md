@@ -37,10 +37,15 @@ A daemon that is simply not running is `WAIT`. A daemon that is running and
 cannot answer is `FAIL`, and only `FAIL` gates the exit status.
 
 `--via <address>` dials one chosen road instead of loopback, which is how you
-prove a road from the host side before asking a device to use it. ⚠️ **A
-tunnel address is the exception**: this host cannot dial its own mesh address
-— plain UDP and ICMP to it are dropped the same way — so `--via` the mesh
-address must be run from the other end of the tunnel, not from the cluster.
+prove a road from the host side before asking a device to use it, and
+`--dial-budget <seconds>` (default 10) bounds the whole attempt — the dial gets
+half of it and the exchange on the far side gets the rest, so both halves stay
+inside the number you asked for.
+
+⚠️ **A tunnel address is the exception**: this host cannot dial its own mesh
+address — plain UDP and ICMP to it are dropped the same way — so `--via` the
+mesh address must be run from the other end of the tunnel, not from the
+cluster.
 
 ## As a service
 
