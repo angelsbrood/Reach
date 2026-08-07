@@ -575,7 +575,7 @@ enum Log {
     /// the writer's line is defined in terms of it, so a reworded line moves
     /// both at once — a test holding a hand-written copy of this format would
     /// have gone on passing while `doctor --dial` quietly stopped finding the
-    /// road, which is precisely the shape of defect §7's second corollary is
+    /// road, which is precisely the shape of defect R2's second corollary is
     /// about.
     static func roadPrefix(session: UUID) -> String {
         "session \(session) opened from "

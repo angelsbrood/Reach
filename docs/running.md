@@ -7,6 +7,41 @@ granted app on every device sees a cluster that is simply not there.
 
 `reachd doctor` says which of the two you have, under **supervision**.
 
+## Whether the cluster can actually answer
+
+`doctor` on its own is about the host: the state directory, the config, the
+CA, the ports being held, the agent being installed. All of it can be green
+over a cluster that cannot serve a client — the port check binds `INADDR_ANY`
+and can only tell you that *something* holds the port, never that the
+something answers.
+
+```
+reachd doctor --dial
+```
+
+opens a real session against the running daemon with the ordinary client
+stack, and reports the road the daemon says it came in on:
+
+```
+PASS  dial              a session opened over 127.0.0.1:47337 in 38 ms — the cluster answers a client
+PASS  road              the daemon logged the session: opened from 127.0.0.1:65246
+```
+
+It mints an ephemeral identity from the cluster's own CA — five minutes,
+`reach://diagnostic/…`, never stored, never in the keychain — and asks for no
+tokens: `reachd selftest --mlx` already proves generation end to end, and the
+model prewarms asynchronously at every login, so a dial that wanted a token
+would fail on a healthy cluster that had just started.
+
+A daemon that is simply not running is `WAIT`. A daemon that is running and
+cannot answer is `FAIL`, and only `FAIL` gates the exit status.
+
+`--via <address>` dials one chosen road instead of loopback, which is how you
+prove a road from the host side before asking a device to use it. ⚠️ **A
+tunnel address is the exception**: this host cannot dial its own mesh address
+— plain UDP and ICMP to it are dropped the same way — so `--via` the mesh
+address must be run from the other end of the tunnel, not from the cluster.
+
 ## As a service
 
 ⚠️ **`reachd` is not a single file.** SwiftPM emits resource bundles beside the
@@ -34,6 +69,29 @@ needs no `sudo`; either works. `service install` refuses a binary with no
 `~/Library/Caches` is purgeable — macOS reclaims it under disk pressure
 without asking — so an agent pointed there works until the day it silently
 does not.
+
+### ⚠️ Reinstalling can quietly destroy the cluster
+
+A `serve` that cannot find its CA does not fail — it **mints a fresh one**,
+which orphans every paired device and voids every grant, unattended, at
+ten-second intervals under `KeepAlive`. So a reinstall is guarded rather than
+just done:
+
+1. Back up `~/Library/Application Support/Reach` and record
+   `shasum ~/Library/Application\ Support/Reach/ca/*` — four files.
+2. Build the release, as above.
+3. `launchctl bootout gui/$(id -u)/systems.reach.reachd` — **before** copying.
+   Never copy over a running binary. (`reachd service install` does its own
+   bootout and bootstrap and is the supported path; by hand is for watching
+   each step.)
+4. Copy the binary **and the bundles**. Count what lands: eight items.
+5. `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/systems.reach.reachd.plist`
+6. Then seven checks, and it is not installed until all seven pass:
+   `grep -c "cluster CA created" ~/Library/Logs/reachd.log` is **0**; the four
+   CA fingerprints are unchanged; `doctor` says `PASS supervision`; and
+   **`doctor --dial` says the cluster answers**. The first six are about the
+   host and were all green, five separate times on 6 August 2026, over a
+   cluster that could not serve a client.
 
 `reachd service status` reports whether it is installed and loaded;
 `reachd service uninstall` removes it. Output goes to
