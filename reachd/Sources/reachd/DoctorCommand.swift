@@ -21,6 +21,17 @@ struct Doctor: AsyncParsableCommand {
     @Option(name: .long, help: "wg-quick config to inspect.")
     var wgConf = HostCheck.defaultWireGuardConf
 
+    /// Opt-in, because every other check here is read-only and this one opens
+    /// a real session with a real certificate. Bare `doctor` is unchanged.
+    @Flag(name: .long, help: "Open a session against the running daemon and report the road it came in on.")
+    var dial = false
+
+    @Option(name: .long, help: "Dial this address instead of loopback — proves one chosen road from the host side.")
+    var via: String?
+
+    @Option(name: .long, help: "Seconds the dial gets to complete or refuse.")
+    var dialBudget: Double = 10
+
     func run() async throws {
         let directory = state.map { URL(fileURLWithPath: $0) } ?? DaemonInfo.stateDirectory
 
@@ -29,7 +40,8 @@ struct Doctor: AsyncParsableCommand {
         let report = await HostCheck.examine(
             stateDirectory: directory,
             wireGuardConf: wgConf,
-            addresses: LocalAddresses.ipv4()
+            addresses: LocalAddresses.ipv4(),
+            dial: dial ? HostCheck.Dial(via: via, budget: .seconds(dialBudget)) : nil
         )
 
         for finding in report.findings {

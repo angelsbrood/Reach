@@ -77,6 +77,30 @@ public enum HostCheck {
     /// so the path has a single name here rather than a literal per caller.
     public static let defaultWireGuardConf = "/opt/homebrew/etc/wireguard/reach0.conf"
 
+    /// Asking the cluster to answer, rather than inferring that it would.
+    ///
+    /// Off by default and opt-in at the command line, because every other
+    /// check here is read-only and this one opens a real session with a real
+    /// certificate. `nil` means the report stays the report it has always
+    /// been.
+    public struct Dial: Sendable {
+        /// The road to dial, or nil for loopback. A chosen road is how this
+        /// doubles as the away instrument.
+        public var via: String?
+        public var budget: Duration
+        public var supervision: ClusterDial.Supervision
+
+        public init(
+            via: String? = nil,
+            budget: Duration = .seconds(10),
+            supervision: ClusterDial.Supervision = .launchAgent
+        ) {
+            self.via = via
+            self.budget = budget
+            self.supervision = supervision
+        }
+    }
+
     /// `wireGuardConf` and `addresses` are required rather than defaulted on
     /// purpose. A default would let a test read the developer's live conf and
     /// live interface list without saying so, which is how a suite becomes
@@ -86,7 +110,8 @@ public enum HostCheck {
         stateDirectory: URL,
         wireGuardConf: String,
         addresses: [[UInt8]],
-        portIsHeld: @Sendable (UInt16) -> Bool = HostCheck.probePort
+        portIsHeld: @Sendable (UInt16) -> Bool = HostCheck.probePort,
+        dial: Dial? = nil
     ) async -> Report {
         var findings: [Finding] = []
 
@@ -132,7 +157,186 @@ public enum HostCheck {
         findings.append(contentsOf: portFindings)
         findings.append(checkSupervision(daemonUp: daemonUp))
 
+        // Last, and deliberately: everything above says the host is dressed,
+        // and this says whether the cluster answers. When the two disagree,
+        // reading them in that order is what makes the disagreement legible.
+        if let dial {
+            findings.append(contentsOf: await checkDial(
+                dial,
+                stateDirectory: stateDirectory,
+                config: config,
+                daemonUp: daemonUp,
+                addresses: addresses
+            ))
+        }
+
         return Report(findings: findings)
+    }
+
+    /// A config that will not parse deletes the dial too, and says so —
+    /// the same ruling `checkPorts` and `checkMeshEndpoint` already make.
+    /// Dialing `DaemonConfig()`'s defaults instead would be a check against
+    /// a port nobody configured, reported as though it were this cluster.
+    static func checkDial(
+        _ dial: Dial,
+        stateDirectory: URL,
+        config: DaemonConfig?,
+        daemonUp: Bool,
+        addresses: [[UInt8]]
+    ) async -> [Finding] {
+        guard let config else {
+            return [Finding(
+                level: .warn,
+                title: "dial",
+                detail: "not attempted — config.json did not parse",
+                action: "The port to dial lives in that file. Fix the config and run doctor --dial again."
+            )]
+        }
+        let outcome = await ClusterDial.dial(
+            stateDirectory: stateDirectory,
+            config: config,
+            via: dial.via,
+            budget: dial.budget,
+            supervision: dial.supervision
+        )
+        return dialFindings(outcome, daemonUp: daemonUp, addresses: addresses)
+    }
+
+    /// The dial's verdict in doctor's own grammar, and nothing else — pure,
+    /// so every sentence below is assertable without a socket.
+    ///
+    /// The WAIT/FAIL split is the whole point of the check and it turns on
+    /// `daemonUp`. **A daemon that is not running is a runbook step nobody
+    /// has taken; a daemon that is running and will not answer a client is
+    /// the failure five green reports missed on 6 August.** They are the same
+    /// dial result and opposite verdicts, and the difference is one boolean
+    /// `examine` already computes.
+    ///
+    /// ⚠️ **`daemonUp` is evidence about loopback and about nothing else.**
+    /// It comes from a local `bind`, so on a dial that named a road it is a
+    /// fact about a different question. Quoting it there — which the first
+    /// draft did, and it was caught by running the thing — produced "a
+    /// process holds :47337 and nothing answered on 10.86.0.1", two true
+    /// clauses joined into a false implication.
+    static func dialFindings(
+        _ outcome: ClusterDial.Outcome,
+        daemonUp: Bool,
+        addresses: [[UInt8]] = []
+    ) -> [Finding] {
+        let dialed = "\(outcome.via):\(outcome.port)"
+        var findings: [Finding] = []
+
+        switch outcome.result {
+        case .opened(let capabilities):
+            let took = outcome.elapsed.map { " in \(secondsRounded($0))" } ?? ""
+            findings.append(Finding(
+                level: .pass,
+                title: "dial",
+                detail: "a session opened over \(dialed)\(took) — the cluster answers a client"
+                    + (capabilities.isEmpty ? "" : ", capabilities \(capabilities.joined(separator: ", "))")
+            ))
+
+        case .noAnswer where outcome.pinned:
+            // A named road that does not answer is a fault about that road,
+            // and the useful half is whether the address is this host's own.
+            // Measured on the rig 2026-08-07: the Mac cannot address its own
+            // mesh address at all — plain UDP and ICMP to it are dropped the
+            // same way the dial is — so "your own address did not answer" is
+            // a real and recurring reading that means something other than a
+            // broken daemon.
+            findings.append(Finding(
+                level: .fail,
+                title: "dial",
+                detail: "nothing answered on \(dialed) — the road named with --via did not reach the cluster",
+                action: isOwnAddress(outcome.via, addresses)
+                    ? "That is one of this host's own addresses. A tunnel address usually cannot be dialed from the host that terminates the tunnel, so try it from the other side rather than from here; anything else means the listener is not answering on this interface."
+                    : "Nothing about the local port checks above bears on this road. Confirm the address is right and reachable from here, then check the edge: doctor cannot see the router."
+            ))
+
+        case .noAnswer where !daemonUp:
+            findings.append(Finding(
+                level: .wait,
+                title: "dial",
+                detail: "nothing answered on \(dialed), and nothing holds the port either — no daemon running",
+                action: "Start it: reachd service install, or reachd serve in a terminal. Then dial again."
+            ))
+
+        case .noAnswer:
+            findings.append(Finding(
+                level: .fail,
+                title: "dial",
+                detail: "a process holds :\(outcome.port) and nothing answered a client on \(dialed)",
+                action: "The port check above passes on any process holding the port; it cannot tell a serving daemon from a deaf one. Read ~/Library/Logs/reachd.log for what that process thinks it is doing."
+            ))
+
+        case .answeredAndFailed(let reason):
+            findings.append(Finding(
+                level: .fail,
+                title: "dial",
+                detail: "something answered on \(dialed) and would not serve — \(reason)",
+                action: "The listener is up and the exchange on it did not finish. A blocked handshake looks exactly like this from here, so check ~/Library/Logs/reachd.log and whether anything is waiting on a dialog."
+            ))
+
+        case .noClusterCA:
+            findings.append(Finding(
+                level: .wait,
+                title: "dial",
+                detail: "not attempted — there is no cluster CA to mint a diagnostic identity from",
+                action: "Created on first serve or pair. Nothing to dial with until then."
+            ))
+
+        case .notAttempted(let reason):
+            findings.append(Finding(
+                level: .warn,
+                title: "dial",
+                detail: "not attempted — the diagnostic identity would not mint: \(reason)",
+                action: "This is doctor's own failure and says nothing about the cluster. Every identity in this project is minted through SecPKCS12Import, which fails intermittently; run it again. If it repeats, the message above is the one to read."
+            ))
+        }
+
+        findings.append(contentsOf: roadFindings(outcome.road))
+        return findings
+    }
+
+    /// The instrument checking the instrument.
+    ///
+    /// `ca10213` gave the daemon a `session … opened from <road>` line
+    /// precisely so a session born away could be photographed. A dial that
+    /// opened a session and cannot find that line has found the fault the
+    /// line was added to fix — so it is a `fail`, and it is one of the five.
+    static func roadFindings(_ road: ClusterDial.Road) -> [Finding] {
+        switch road {
+        case .notApplicable:
+            // No session, so no road. The dial finding has already said why,
+            // and repeating it as a second failure would double-count one
+            // fault in the tally.
+            []
+        case .named(let road):
+            [Finding(level: .pass, title: "road", detail: "the daemon logged the session: opened from \(road)")]
+        case .missing:
+            [Finding(
+                level: .fail,
+                title: "road",
+                detail: "a session opened and the daemon never logged which road it came in on",
+                action: "That line is the only evidence a session born away has. Without it the away test measures nothing, so fix this before the phone goes out: the daemon writing it is a different build from the one answering."
+            )]
+        case .unread(let why):
+            [Finding(
+                level: .warn,
+                title: "road",
+                detail: "the session opened; which road it came in on is unread — \(why)",
+                action: "Fine for a foreground serve. For an away test, run under the launchd agent so the line lands in ~/Library/Logs/reachd.log, or read the terminal it is printing to."
+            )]
+        }
+    }
+
+    /// A loopback dial lands in tens of milliseconds, and one decimal place
+    /// rendered that as "0.0 s" — a number that reads like a stopped clock in
+    /// the finding whose whole job is to be believed.
+    private static func secondsRounded(_ duration: Duration) -> String {
+        let seconds = Double(duration.components.seconds)
+            + Double(duration.components.attoseconds) / 1e18
+        return seconds < 1 ? String(format: "%.0f ms", seconds * 1000) : String(format: "%.1f s", seconds)
     }
 
     /// Whether anything brings the daemon back.

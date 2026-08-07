@@ -36,9 +36,21 @@ let package = Package(
 
         // The daemon's organs: slot host, MLX filling, session residency,
         // enrollment, cluster CA, mesh hosting.
+        //
+        // `ReachKit` — the client — is here for one organ, `ClusterDial`, and
+        // the reason is the difference between a diagnostic that can be
+        // asserted and one that can only be run by hand. A dial that proves
+        // the cluster answers has to cross the real listener with the
+        // ordinary client stack, and the alternative placement (the `reachd`
+        // executable target, beside `Selftest`) puts it somewhere
+        // `ReachDaemonTests` cannot reach, which would leave the tests
+        // re-implementing the thing under test. There is no cycle — ReachKit
+        // knows nothing of the daemon — and nothing new enters the shipped
+        // binary, which already links it.
         .target(
             name: "ReachDaemon",
             dependencies: [
+                .product(name: "ReachKit", package: "ReachKit"),
                 .product(name: "ReachWire", package: "ReachKit"),
                 .product(name: "ReachTransport", package: "ReachKit"),
                 .product(name: "ReachIdentity", package: "ReachKit"),

@@ -117,7 +117,7 @@ public struct ClusterCA: Sendable {
             try ExtendedKeyUsage([.serverAuth])
             SubjectAlternativeNames(names)
         }
-        return try issue(commonName: commonName, days: days, extensions: extensions)
+        return try issue(commonName: commonName, validFor: Self.seconds(days: days), extensions: extensions)
     }
 
     /// The daemon's own listener leaf, minted once and kept beside the CA.
@@ -217,17 +217,38 @@ public struct ClusterCA: Sendable {
         uri: String,
         days: Int = 365
     ) throws -> Issued {
+        try issueClient(commonName: commonName, uri: uri, validFor: Self.seconds(days: days))
+    }
+
+    /// The same leaf, for something that should not outlive the errand it was
+    /// minted for.
+    ///
+    /// Days is the right unit for a device or an app: both are enrolled once
+    /// and expected to work for a year. It is the wrong unit for a diagnostic,
+    /// whose entire claim is that it is minted, used and gone — the shortest
+    /// certificate `days:` can express is a day, so "short validity" would
+    /// have stayed a sentence in a design note rather than a fact about the
+    /// certificate. Minutes are expressible here.
+    public func issueClient(
+        commonName: String,
+        uri: String,
+        validFor: TimeInterval
+    ) throws -> Issued {
         let extensions = try Certificate.Extensions {
             Critical(KeyUsage(digitalSignature: true))
             try ExtendedKeyUsage([.clientAuth])
             SubjectAlternativeNames([.uniformResourceIdentifier(uri)])
         }
-        return try issue(commonName: commonName, days: days, extensions: extensions)
+        return try issue(commonName: commonName, validFor: validFor, extensions: extensions)
+    }
+
+    private static func seconds(days: Int) -> TimeInterval {
+        TimeInterval(days) * 24 * 3600
     }
 
     private func issue(
         commonName: String,
-        days: Int,
+        validFor: TimeInterval,
         extensions: Certificate.Extensions
     ) throws -> Issued {
         let leafKey = P256.Signing.PrivateKey()
@@ -237,7 +258,7 @@ public struct ClusterCA: Sendable {
             serialNumber: Certificate.SerialNumber(),
             publicKey: Certificate.PublicKey(leafKey.publicKey),
             notValidBefore: now.addingTimeInterval(-3600),
-            notValidAfter: now.addingTimeInterval(TimeInterval(days) * 24 * 3600),
+            notValidAfter: now.addingTimeInterval(validFor),
             issuer: certificate.subject,
             subject: try DistinguishedName { CommonName(commonName) },
             signatureAlgorithm: .ecdsaWithSHA256,

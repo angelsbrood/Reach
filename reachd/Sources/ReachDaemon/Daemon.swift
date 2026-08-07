@@ -289,7 +289,7 @@ public final class Daemon: Sendable {
                 // tailnet and one that came over the mesh are indistinguishable
                 // from every other line in this log, and only one of them is
                 // the claim.
-                Log.info("session \(sessionID) opened from \(stream.remoteEndpointDescription() ?? "an unnamed path")")
+                Log.info(Log.sessionOpened(sessionID, from: stream.remoteEndpointDescription() ?? "an unnamed path"))
             case .grantSubscribe:
                 _ = try raw.decode(GrantSubscribe.self)
                 guard let grants, let device = await adminDevice(on: stream, grants: grants) else {
@@ -516,5 +516,23 @@ enum Log {
 
     static func info(_ message: String) {
         print("[reachd] \(message)")
+    }
+
+    /// The road a session was born on: written here, read by `ClusterDial`,
+    /// and the two must not drift.
+    ///
+    /// This is a log line that something greps, which makes its wording a
+    /// contract rather than prose. The reader's needle is `roadPrefix` and
+    /// the writer's line is defined in terms of it, so a reworded line moves
+    /// both at once — a test holding a hand-written copy of this format would
+    /// have gone on passing while `doctor --dial` quietly stopped finding the
+    /// road, which is precisely the shape of defect §7's second corollary is
+    /// about.
+    static func roadPrefix(session: UUID) -> String {
+        "session \(session) opened from "
+    }
+
+    static func sessionOpened(_ session: UUID, from road: String) -> String {
+        roadPrefix(session: session) + road
     }
 }
