@@ -43,13 +43,16 @@ fork's commit says why each exists.
 
 ## Status
 
-Public prototype, and further along than the spine it started as. Three
+Public prototype, and further along than the spine it started as. Four
 things have each been accepted on hardware: the LAN profile (discovery →
 QUIC/mTLS → a `LanguageModelSession` streaming from the host); the pairing
 ceremony in both halves — a device's identity and its mesh membership from
-one QR, then a per-app grant a human rules on the keeper; and the away
+one QR, then a per-app grant a human rules on the keeper; the away
 path, where a session survives leaving the network it began on and falls to
-the mesh without the app having been configured with either address.
+the mesh without the app having been configured with either address; and
+the cold start away, where an app that has never seen the network it is on
+opens a session from stored trust alone — no discovery, dialing only the
+roads an earlier session wrote down.
 The demo is recorded — one unbroken take, July 2026 at Moon, on internal
 networks: https://youtu.be/FmhNJYJ_o0A. What remains is the same take
 behind a public uplink.
