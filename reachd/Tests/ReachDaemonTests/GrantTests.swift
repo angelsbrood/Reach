@@ -94,7 +94,14 @@ import X509
     /// The device ceremony, returning the granted material AND the key the
     /// "phone" minted — the tests dial the control stream with it.
     private func enrollDevice(_ fixture: Fixture, name: String) async throws -> (grant: EnrollGrant, identity: SecIdentity) {
-        let deviceKey = P256.Signing.PrivateKey()
+        // `SigningKey.mint`, not the bare initializer: this key is handed
+        // to `IdentityMaterializer.materialize(certificateDER:privateKey:)`
+        // below, which in a test bundle has no keychain entitlement and so
+        // takes the openssl/PKCS#12 route — where one scalar in 256 loses a
+        // leading zero and cannot be imported back. Guarding `ClusterCA`
+        // alone left this site, and the suite kept the flake it was
+        // supposed to have lost.
+        let deviceKey = SigningKey.mint()
         let wgKey = Curve25519.KeyAgreement.PrivateKey()
         let token = fixture.tokens.mint()
 
@@ -146,7 +153,7 @@ import X509
         _ fixture: Fixture,
         bundleID: String,
         name: String,
-        appKey: P256.Signing.PrivateKey = P256.Signing.PrivateKey(),
+        appKey: P256.Signing.PrivateKey = SigningKey.mint(),
         closing: Closing = .confirm
     ) async throws -> AppOutcome {
         let stream = try await fixture.enrollDialer.openStream(timeout: 45)
@@ -202,7 +209,7 @@ import X509
     // MARK: Tests
 
     @Test func sheetRulesAppOntoTheCluster() async throws {
-        let fixture = try await makeFixture(sessionPort: 47440, enrollPort: 47441)
+        let fixture = try await makeFixture(sessionPort: TestPorts.port(47440), enrollPort: TestPorts.port(47441))
         defer { fixture.cleanup() }
 
         // The keeper: enrolled first (admin), subscribed on its
@@ -299,7 +306,7 @@ import X509
     /// half-closes *after* collecting, so an app that waits for that close
     /// cannot observe the desk mid-decision.
     @Test func everyGrantTheAppConfirmsIsCollectedFromTheDesk() async throws {
-        let fixture = try await makeFixture(sessionPort: 47448, enrollPort: 47449)
+        let fixture = try await makeFixture(sessionPort: TestPorts.port(47448), enrollPort: TestPorts.port(47449))
         defer { fixture.cleanup() }
 
         let keeper = try await enrollDevice(fixture, name: "keeper-phone")
@@ -356,7 +363,7 @@ import X509
     /// been issued — the app already holds a valid certificate, and the only
     /// thing outstanding is the daemon's bookkeeping.
     @Test func aGrantThatIsNeverConfirmedStaysOnTheDeskForTheNextKnock() async throws {
-        let fixture = try await makeFixture(sessionPort: 47450, enrollPort: 47451)
+        let fixture = try await makeFixture(sessionPort: TestPorts.port(47450), enrollPort: TestPorts.port(47451))
         defer { fixture.cleanup() }
 
         let keeper = try await enrollDevice(fixture, name: "keeper-phone")
@@ -365,7 +372,7 @@ import X509
         try await control.send(GrantSubscribe())
 
         // The app is granted and then vanishes without confirming.
-        let appKey = P256.Signing.PrivateKey()
+        let appKey = SigningKey.mint()
         let knock = Task {
             try await appEnroll(fixture, bundleID: "systems.reach.vanished", name: "Vanished", appKey: appKey, closing: .vanish)
         }
@@ -399,7 +406,7 @@ import X509
     }
 
     @Test func nonAdminRefusedAndDenialRefusesApp() async throws {
-        let fixture = try await makeFixture(sessionPort: 47442, enrollPort: 47443)
+        let fixture = try await makeFixture(sessionPort: TestPorts.port(47442), enrollPort: TestPorts.port(47443))
         defer { fixture.cleanup() }
 
         let admin = try await enrollDevice(fixture, name: "keeper-phone")
@@ -436,7 +443,7 @@ import X509
     }
 
     @Test func unruledRequestTimesOut() async throws {
-        let fixture = try await makeFixture(sessionPort: 47444, enrollPort: 47445, window: .seconds(1))
+        let fixture = try await makeFixture(sessionPort: TestPorts.port(47444), enrollPort: TestPorts.port(47445), window: .seconds(1))
         defer { fixture.cleanup() }
 
         // Nobody is watching the desk; the park window closes on its own.
@@ -452,7 +459,7 @@ import X509
     /// rules, so its parked stream is dead when the Allow lands. The desk
     /// holds the verdict; the same key re-knocks and collects it.
     @Test func verdictSurvivesTheAskersStreamDeath() async throws {
-        let fixture = try await makeFixture(sessionPort: 47446, enrollPort: 47447)
+        let fixture = try await makeFixture(sessionPort: TestPorts.port(47446), enrollPort: TestPorts.port(47447))
         defer { fixture.cleanup() }
 
         let keeper = try await enrollDevice(fixture, name: "keeper-phone")
@@ -461,7 +468,7 @@ import X509
         try await control.send(GrantSubscribe())
 
         // The app knocks, parks — and its transport dies (backgrounded).
-        let appKey = P256.Signing.PrivateKey()
+        let appKey = SigningKey.mint()
         let firstKnock = Task {
             try await appEnroll(fixture, bundleID: "systems.reach.suspended", name: "Suspended", appKey: appKey)
         }
@@ -516,7 +523,7 @@ import X509
     /// so this holds the two things that are observable and says plainly that
     /// it does not hold the third.
     @Test func anAppThatLeavesBeforeItsCertificateRequestParksNothing() async throws {
-        let fixture = try await makeFixture(sessionPort: 47452, enrollPort: 47453)
+        let fixture = try await makeFixture(sessionPort: TestPorts.port(47452), enrollPort: TestPorts.port(47453))
         defer { fixture.cleanup() }
 
         let keeper = try await enrollDevice(fixture, name: "keeper-phone")

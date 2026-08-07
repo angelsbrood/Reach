@@ -43,7 +43,7 @@ public enum IdentityError: Error, Sendable, CustomStringConvertible, LocalizedEr
             // not read back.
             "the cluster roads this app kept will not read back: \(Self.name(for: status))"
         case .pkcs12EmptyItemList(let bytes):
-            "the known SecPKCS12Import defect: it returned success and an empty item list for \(bytes) bytes of valid archive. This is the framework, not your change and not these bytes — the archive is kept on disk and reads back fine under LibreSSL, and it strikes about one materialization in 250. Whichever test reported this is almost certainly innocent; run it again. It is deliberately not retried, because three attempts over twenty runs recovered zero times."
+            "the private scalar lost its leading zero byte on the way into the archive, so SecPKCS12Import returned success and an empty item list for \(bytes) bytes — one octet short of the width the field needs, and no identity can be assembled from it. Not the framework, and not a malformed archive: LibreSSL writes it and reads it back quite happily. Re-running will not help, because the same key produces the same short bytes every time. Whatever reached this point was minted with a bare P256.Signing.PrivateKey() instead of SigningKey.mint(), or was written to disk before that guard existed; find the mint site."
         }
     }
 
@@ -94,14 +94,16 @@ public enum KeychainLock {
 /// ceremony replaces this with SecureEnclave keys and issued certificates.
 public enum IdentityStore {
     public static func identity(fromPKCS12 data: Data, passphrase: String) throws -> SecIdentity {
-        // One attempt. Retrying was measured (three attempts, 20 runs) and
-        // never once recovered: when this fails it fails identically on the
-        // same bytes, so a retry buys nothing but three times the work at the
-        // worst moment. What IS known about the failure is recorded on
-        // `KeychainLock` above and on `IdentityMaterializer.viaPKCS12`, which
-        // keeps the archive it could not import and prints where — the failing
-        // bytes are the evidence, and they read back fine under LibreSSL. It is
-        // not concurrency and it is not the archive being malformed.
+        // One attempt, and the reason is now mechanical rather than empirical.
+        // `pkcs12EmptyItemList` is a private scalar that lost its leading zero
+        // byte on the way into the archive — 31 octets where the SEC1 field
+        // wants 32 — so the bytes are short, and short bytes fail identically
+        // however many times they are re-read. That is why retrying was
+        // measured (three attempts, 20 runs) and never once recovered.
+        //
+        // The retry that would have worked is not here: it is not minting the
+        // key in the first place. See `SigningKey`, which is where the defect
+        // is actually closed.
         try importOnce(data, passphrase: passphrase)
     }
 

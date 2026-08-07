@@ -171,7 +171,7 @@ enum EnrollOutcome {
     }
 
     @Test func fullCeremonyIssuesVerifiableIdentityAndMesh() async throws {
-        let fixture = try makeFixture(port: 47430)
+        let fixture = try makeFixture(port: TestPorts.port(47430))
         defer { fixture.cleanup() }
 
         let token = fixture.tokens.mint()
@@ -211,7 +211,7 @@ enum EnrollOutcome {
     }
 
     @Test func tokensAreSingleUseAndFakePoPCloses() async throws {
-        let fixture = try makeFixture(port: 47431)
+        let fixture = try makeFixture(port: TestPorts.port(47431))
         defer { fixture.cleanup() }
 
         let token = fixture.tokens.mint()
@@ -244,7 +244,7 @@ enum EnrollOutcome {
     /// window rather than shrinking it — with host and phone already agreeing, a
     /// lost confirmation costs the pairing nothing.
     @Test func rePairKeepsIdentityAndReplacesPeer() async throws {
-        let fixture = try makeFixture(port: 47432)
+        let fixture = try makeFixture(port: TestPorts.port(47432))
         defer { fixture.cleanup() }
 
         let deviceKey = P256.Signing.PrivateKey()
@@ -311,7 +311,7 @@ enum EnrollOutcome {
     /// second phone would be handed the first venue's address — and would work
     /// perfectly on the LAN right up until it walked out the door.
     @Test func aRePinReachesTheNextPhoneWithoutARestart() async throws {
-        let fixture = try makeFixture(port: 47433) { stateDir in
+        let fixture = try makeFixture(port: TestPorts.port(47433)) { stateDir in
             {
                 MeshEndpoint.resolve(
                     config: try DaemonConfig.load(from: stateDir),
@@ -349,7 +349,7 @@ enum EnrollOutcome {
     /// for a device that can never arrive — so it refuses first, and leaves
     /// nothing behind to clean up.
     @Test func anUnreadableEndpointRefusesBeforeAnythingIsMinted() async throws {
-        let fixture = try makeFixture(port: 47434) { stateDir in
+        let fixture = try makeFixture(port: TestPorts.port(47434)) { stateDir in
             {
                 MeshEndpoint.resolve(
                     config: try DaemonConfig.load(from: stateDir),
@@ -434,7 +434,7 @@ enum EnrollOutcome {
     /// it holds the grant, or a pairing that fails at the last step leaves the
     /// phone with neither the new mesh nor the one it walked in with.
     @Test func aCeremonyAbandonedAfterTheGrantKeepsThePeerItAlreadyHad() async throws {
-        let fixture = try makeFixture(port: 47436)
+        let fixture = try makeFixture(port: TestPorts.port(47436))
         defer { fixture.cleanup() }
 
         let deviceKey = P256.Signing.PrivateKey()
@@ -524,7 +524,7 @@ enum EnrollOutcome {
     }
 
     @Test func aSpentTokenSaysWhatToDoAboutIt() async throws {
-        let fixture = try makeFixture(port: 47435)
+        let fixture = try makeFixture(port: TestPorts.port(47435))
         defer { fixture.cleanup() }
 
         let token = fixture.tokens.mint()

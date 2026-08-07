@@ -21,10 +21,14 @@ import Testing
 /// Two clashes were live and are now fixed: 47416 was shared with
 /// `MLXIntegrationTests` (invisible only because that suite is gated behind
 /// `REACH_MLX_TESTS`), and 47417 was `reachd selftest`'s default `--port`, so
-/// a selftest running beside `swift test` took this suite's listener. The
-/// allocator that would make the whole class impossible is a named roadmap
-/// item with its design attached; until it lands, a new port here means
-/// grepping the target first.
+/// a selftest running beside `swift test` took this suite's listener. A new
+/// port here still means grepping the target first — the literals are still
+/// the allocation, and they must still be unique within it.
+///
+/// What is no longer a hazard is the *other* machine-wide `swift test`. Every
+/// `Address already in use` this suite has ever produced was a second test
+/// process holding the port, and `TestPorts` moves the whole block per process
+/// so the two cannot meet. Read the literals below as offsets, not addresses.
 @Suite(.serialized) struct SpineTests {
     /// Cleans up exactly what this call put in the keychain: the two
     /// identities it minted, and the roads filed under the label it minted
@@ -125,11 +129,11 @@ import Testing
     /// true. (The real topology — a café, the tunnel, the mesh — is hardware
     /// acceptance; this proves the machinery: store read, seeded race, win.)
     @Test func aSessionIsBornAwayFromTheRoadsItKept() async throws {
-        let (daemon, configuration, discard) = try await startDaemon(port: 47420, host: "198.51.100.1")
+        let (daemon, configuration, discard) = try await startDaemon(port: TestPorts.port(47420), host: "198.51.100.1")
         defer { discard() }
         defer { Task { await daemon.stop() } }
 
-        try seedRoads(["127.0.0.1"], port: 47420, for: configuration.identityLabel)
+        try seedRoads(["127.0.0.1"], port: TestPorts.port(47420), for: configuration.identityLabel)
 
         let session = LanguageModelSession(
             model: ReachLanguageModel(configuration: configuration),
@@ -155,7 +159,7 @@ import Testing
         // Short, because the whole point is to wait out a dial that never
         // lands: TEST-NET-2 looks routable, so it hangs rather than refusing.
         let (daemon, configuration, discard) = try await startDaemon(
-            port: 47418, host: "198.51.100.1", connectTimeout: 5
+            port: TestPorts.port(47418), host: "198.51.100.1", connectTimeout: 5
         )
         defer { discard() }
         defer { Task { await daemon.stop() } }
@@ -187,7 +191,7 @@ import Testing
     /// which is the defect this suite's sibling was built to outlaw.
     @Test func aStoreThatWillNotOpenIsNotReadAsAnEmptyOne() async throws {
         let (daemon, configuration, discard) = try await startDaemon(
-            port: 47419, host: "198.51.100.1", connectTimeout: 5
+            port: TestPorts.port(47419), host: "198.51.100.1", connectTimeout: 5
         )
         defer { discard() }
         defer { Task { await daemon.stop() } }
@@ -217,7 +221,7 @@ import Testing
     }
 
     @Test func sessionStreamsThroughTheDaemon() async throws {
-        let (daemon, configuration, discard) = try await startDaemon(port: 47414)
+        let (daemon, configuration, discard) = try await startDaemon(port: TestPorts.port(47414))
         defer { discard() }
         defer { Task { await daemon.stop() } }
 
@@ -246,7 +250,7 @@ import Testing
     /// acceptance; this proves the client machinery: watcher, race,
     /// re-attach, replay dedupe.)
     @Test func generationSurvivesAPathChange() async throws {
-        let (daemon, configuration, discard) = try await startDaemon(port: 47416)
+        let (daemon, configuration, discard) = try await startDaemon(port: TestPorts.port(47416))
         defer { discard() }
         defer { Task { await daemon.stop() } }
 
@@ -269,7 +273,7 @@ import Testing
     }
 
     @Test func cancellationPropagates() async throws {
-        let (daemon, configuration, discard) = try await startDaemon(port: 47415)
+        let (daemon, configuration, discard) = try await startDaemon(port: TestPorts.port(47415))
         defer { discard() }
         defer { Task { await daemon.stop() } }
 

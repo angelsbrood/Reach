@@ -121,7 +121,7 @@ import Testing
     /// ⚠️ Ports are hand-picked literals scattered across test files, and the
     /// first pair chosen here silently collided with `GrantTests`' 47440–47453
     /// — which fails as `.unreachable`, i.e. as a *product* error about roads,
-    /// several layers from the cause. Check `grep -rioE 'port[a-z]*:? ?=? ?47[0-9]{3}'`
+    /// several layers from the cause. Check `grep -rn '47[0-9]\{3\}'`
     /// before claiming a range; a case-sensitive grep misses `sessionPort:`.
     private func startDaemon(
         port: UInt16,
@@ -173,7 +173,7 @@ import Testing
         let ranInTheApp = Ledger()
         let toolsOffered = Ledger()
         let (daemon, configuration, discard) = try await startDaemon(
-            port: 47460,
+            port: TestPorts.port(47460),
             filling: ToolCallingFilling(seen: toolsOffered)
         )
         defer { Task { await daemon.stop() } }
@@ -220,7 +220,7 @@ import Testing
     func aSessionWithNoToolsIsUntouched() async throws {
         let toolsOffered = Ledger()
         let (daemon, configuration, discard) = try await startDaemon(
-            port: 47461,
+            port: TestPorts.port(47461),
             filling: ToolCallingFilling(seen: toolsOffered)
         )
         defer { Task { await daemon.stop() } }
