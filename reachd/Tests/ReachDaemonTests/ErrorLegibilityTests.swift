@@ -125,38 +125,40 @@ import Testing
         }
     }
 
-    /// The failure this suite's own readers meet most, and the one it was
-    /// worst at serving them on.
+    /// The failure this suite's own readers met most — and the wording it
+    /// carried stopped being true the day the cause was found.
     ///
-    /// `SecPKCS12Import` returns `errSecSuccess` with an empty item list on
-    /// about one materialization in 250 — three red runs in nine full `reachd`
-    /// runs, the dominant failure mode in this tree. It throws out of a
-    /// fixture, so swift-testing records `errorCaught` against whichever suite
-    /// lost the coin flip, and that suite is innocent. Twice in one afternoon
-    /// it named `cancellationPropagates` and then `aSpentTokenSaysWhatToDoAboutIt`,
-    /// neither of which had been touched.
+    /// While the cause was unknown, the sentence's job was to stop a reader
+    /// chasing their own change: `SecPKCS12Import` returned `errSecSuccess`
+    /// with an empty item list on about one materialization in 250, threw out
+    /// of a fixture, and swift-testing recorded it against whichever suite lost
+    /// the coin flip. So it said the framework was at fault, that the suite was
+    /// innocent, and to run it again.
     ///
-    /// Under `importFailed` it read as an ordinary assembly failure and cost
-    /// someone a diagnosis every time. Now the error clears the suite it
-    /// landed on, and this holds the clearing. The string checked is the one
-    /// swift-testing interpolates into `Caught error:`.
-    ///
-    /// `withKnownIssue` is the tool that suggests itself here and it is the
-    /// wrong one: it absorbs the failure and the run goes green. A quiet run
-    /// is not a fixed run. This stays red and explains itself.
-    @Test func theKnownPKCS12FailureClearsWhateverTestItLandedOn() {
+    /// ⚠️ **All three are now wrong, and the last one is a trap.** The cause is
+    /// mechanical: LibreSSL re-encodes the private scalar through a BIGNUM when
+    /// it writes the archive, and a scalar whose leading byte is zero — 1 in
+    /// 256 — comes out an octet short. `SigningKey.mint` rejects those, so
+    /// every remaining way to reach this error is a key that guard did not
+    /// cover. Re-running cannot help: the same key produces the same short
+    /// bytes forever, and for a key persisted to disk that is an unbreakable
+    /// loop rather than a coin flip. The sentence has to send the reader to the
+    /// mint site instead, and this holds it there.
+    @Test func theKnownPKCS12FailureSendsTheReaderToTheMintSite() {
         let sentence = "\(IdentityError.pkcs12EmptyItemList(bytes: 894))"
         // What it is, so nobody re-derives it.
         #expect(sentence.contains("SecPKCS12Import"))
-        // Who is not at fault — the two readings that cost the most time.
-        #expect(sentence.contains("not your change"))
-        #expect(sentence.contains("innocent"))
-        // That it is rare rather than deterministic, so a re-run is worth it.
-        #expect(sentence.contains("run it again"))
-        // And that the silence of a retry is not on offer.
-        #expect(sentence.contains("not retried"))
+        // The mechanism, in the one clause that makes it actionable.
+        #expect(sentence.contains("leading zero"))
+        // Where to go: the mint site, named.
+        #expect(sentence.contains("SigningKey.mint()"))
+        // ⚠️ And the advice this sentence used to give, which is now the trap:
+        // a persisted bad key fails identically on every run forever.
+        #expect(sentence.contains("Re-running will not help"))
+        #expect(!sentence.contains("run it again"))
+        #expect(!sentence.contains("innocent"))
         // It must not be mistaken for a malformed archive, which is what the
-        // old wording implied and what sends a reader after the bytes.
+        // oldest wording implied and what sends a reader after the bytes.
         #expect(!sentence.contains("would not import"))
     }
 

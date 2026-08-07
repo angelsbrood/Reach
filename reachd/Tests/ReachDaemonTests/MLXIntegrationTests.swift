@@ -40,7 +40,7 @@ import Testing
         let caCert = try IdentityStore.certificate(fromDER: ca.certificateDER())
 
         var config = DaemonConfig()
-        config.port = 47470
+        config.port = TestPorts.port(47470)
         config.clusterName = "mlx-spine"
         config.modelID = "gemma-4-e2b"
         let daemon = Daemon(
@@ -66,7 +66,7 @@ import Testing
         let session = LanguageModelSession(
             model: ReachLanguageModel(configuration: ReachExecutor.Configuration(
                 host: "127.0.0.1",
-                port: 47470,
+                port: TestPorts.port(47470),
                 modelID: "gemma-4-e2b",
                 identityLabel: label,
                 connectTimeout: 45

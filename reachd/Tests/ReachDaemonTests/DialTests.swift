@@ -14,12 +14,19 @@ import X509
 /// else in this target until the allocator graduates; a new port here means
 /// running the roadmap's uniqueness one-liner first.
 ///
+/// ⚠️ **The literals here are offsets, not addresses.** Every bind goes through
+/// `TestPorts.port(_:)`, which relocates 4749x into whichever hundred this
+/// process claimed — so a live listener is on 48090-48093 or similar, and
+/// grepping the running system for 4749x finds nothing at all. That absence is
+/// the relocation working, not a listener that failed to start.
+///
 /// It also mentions **47337** — production — and the uniqueness checker reports
 /// that as a clash with `ErrorLegibilityTests`. Both are fixture data inside
 /// `Outcome` literals, never a bind, and both are deliberate: a finding about
-/// the real port is what a person actually reads. Every bind here is in the
-/// 4749x range. ⚠️ If a test in this file ever *binds* 47337 it will fight the
-/// launchd agent for the operator's own cluster.
+/// the real port is what a person actually reads. ⚠️ 47337 is also outside the
+/// range `TestPorts.port` will relocate, deliberately — it would refuse it —
+/// so if a test in this file ever *binds* it, it binds the real thing and
+/// fights the launchd agent for the operator's own cluster.
 ///
 /// The suite is deliberately mixed. Half of it is pure — `dialFindings` and
 /// the log reader take values and return values, and every sentence a person
@@ -103,7 +110,7 @@ import X509
     @Test(.timeLimit(.minutes(1)))
     func aDialAgainstARealListenerOpensASessionAndSaysSo() async throws {
         let directory = try stateDirectory()
-        let (daemon, config, discard) = try await startDaemon(in: directory, port: 47490)
+        let (daemon, config, discard) = try await startDaemon(in: directory, port: TestPorts.port(47490))
         defer { discard() }
 
         let outcome = await ClusterDial.dial(
@@ -119,12 +126,12 @@ import X509
             return
         }
         #expect(outcome.via == "127.0.0.1")
-        #expect(outcome.port == 47490)
+        #expect(outcome.port == TestPorts.port(47490))
         #expect(outcome.pinned == false)
 
         let findings = HostCheck.dialFindings(outcome, daemonUp: true)
         #expect(findings.first?.level == .pass)
-        #expect(findings.first?.detail.contains("127.0.0.1:47490") == true)
+        #expect(findings.first?.detail.contains("127.0.0.1:\(TestPorts.port(47490))") == true)
     }
 
     /// A daemon that has been stopped does not answer a client.
@@ -154,7 +161,7 @@ import X509
     @Test(.timeLimit(.minutes(1)))
     func aStoppedDaemonStopsAnsweringClients() async throws {
         let directory = try stateDirectory()
-        let (daemon, config, discard) = try await startDaemon(in: directory, port: 47493)
+        let (daemon, config, discard) = try await startDaemon(in: directory, port: TestPorts.port(47493))
         defer { discard() }
 
         let label = "reach-dial-stop-\(UUID().uuidString)"
@@ -195,7 +202,7 @@ import X509
         try ca.save(to: directory.appendingPathComponent("ca", isDirectory: true))
 
         // Something that is not a daemon, holding the port the daemon would.
-        let socket = DeafSocket(port: 47491)
+        let socket = DeafSocket(port: TestPorts.port(47491))
         try socket.hold()
         defer { socket.release() }
 
@@ -204,7 +211,7 @@ import X509
         // port held by something that will never serve a client: PASS, and
         // sound. Asserted rather than described, so the next person to weaken
         // the dial finds out from this line.
-        let ports = HostCheck.checkPorts(config: config(port: 47491), isHeld: HostCheck.probePort)
+        let ports = HostCheck.checkPorts(config: config(port: TestPorts.port(47491)), isHeld: HostCheck.probePort)
         let sessionPort = try #require(ports.first)
         #expect(sessionPort.level == .pass, "the port check must still be fooled — that is the premise")
         #expect(sessionPort.detail.contains("held"))
@@ -212,7 +219,7 @@ import X509
 
         let outcome = await ClusterDial.dial(
             stateDirectory: directory,
-            config: config(port: 47491),
+            config: config(port: TestPorts.port(47491)),
             budget: .seconds(4),
             supervision: .log(try log([]), collected: false)
         )
@@ -232,11 +239,11 @@ import X509
         let ca = try ClusterCA.create(commonName: "Reach Dial CA")
         try ca.save(to: directory.appendingPathComponent("ca", isDirectory: true))
 
-        #expect(!HostCheck.probePort(47492), "nothing should hold this port")
+        #expect(!HostCheck.probePort(TestPorts.port(47492)), "nothing should hold this port")
 
         let outcome = await ClusterDial.dial(
             stateDirectory: directory,
-            config: config(port: 47492),
+            config: config(port: TestPorts.port(47492)),
             budget: .seconds(4),
             supervision: .log(try log([]), collected: false)
         )
@@ -358,7 +365,7 @@ import X509
         // Real, not simulated: an empty state directory has no CA to mint from.
         let outcome = await ClusterDial.dial(
             stateDirectory: try stateDirectory(),
-            config: config(port: 47493),
+            config: config(port: TestPorts.port(47493)),
             budget: .seconds(2),
             supervision: .log(try log([]), collected: false)
         )

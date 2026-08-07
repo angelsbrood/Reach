@@ -1,5 +1,6 @@
 import Crypto
 import Foundation
+import ReachIdentity
 import SwiftASN1
 import X509
 
@@ -36,7 +37,7 @@ public struct ClusterCA: Sendable {
     // MARK: Creation and persistence
 
     public static func create(commonName: String) throws -> ClusterCA {
-        let key = P256.Signing.PrivateKey()
+        let key = SigningKey.mint()
         let caKey = Certificate.PrivateKey(key)
         let subject = try DistinguishedName {
             CommonName(commonName)
@@ -157,8 +158,22 @@ public struct ClusterCA: Sendable {
         let certURL = directory.appendingPathComponent("server.der")
         let keyURL = directory.appendingPathComponent("server-key.raw")
 
+        // ⚠️ The stored key is checked, not just loaded, and the reason is
+        // that minting is only half of it. This leaf is the one piece of key
+        // material this project *persists* and then pushes through PKCS#12 on
+        // every start (`Reachd.swift` materializes it), so a scalar written
+        // before `SigningKey` existed — one install in 256 — would be reloaded
+        // here forever, fail `SecPKCS12Import` identically every time, and take
+        // the daemon down at every launch under a supervisor that keeps
+        // relaunching it. Guarding the mint alone would have left those installs
+        // permanently broken with no way back short of deleting the file.
+        //
+        // Failing the check falls through to reissue, which mints through
+        // `SigningKey.mint` and overwrites both files — so a bad key heals
+        // itself on the next start rather than needing anyone to know this.
         if let certData = try? Data(contentsOf: certURL),
            let keyData = try? Data(contentsOf: keyURL),
+           SigningKey.survivesPKCS12(scalar: keyData),
            let certificate = try? Certificate(derEncoded: Array(certData)),
            let privateKey = try? P256.Signing.PrivateKey(rawRepresentation: keyData),
            certificate.notValidAfter.timeIntervalSince(now) > renewWithin
@@ -251,7 +266,10 @@ public struct ClusterCA: Sendable {
         validFor: TimeInterval,
         extensions: Certificate.Extensions
     ) throws -> Issued {
-        let leafKey = P256.Signing.PrivateKey()
+        // `SigningKey.mint`, not `P256.Signing.PrivateKey()`: every identity in
+        // this project is certified here and materialized through PKCS#12, and
+        // one scalar in 256 does not survive that trip. See `SigningKey`.
+        let leafKey = SigningKey.mint()
         let now = Date()
         let certificate = try Certificate(
             version: .v3,

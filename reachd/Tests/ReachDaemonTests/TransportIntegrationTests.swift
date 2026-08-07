@@ -227,7 +227,7 @@ final class IdentityBin: @unchecked Sendable {
             identity: fixture.serverIdentity,
             clientTrustRoots: [fixture.caCert]
         )
-        let listener = try QUICListener(port: 47411, parameters: .reachQUIC(options: serverOptions))
+        let listener = try QUICListener(port: TestPorts.port(47411), parameters: .reachQUIC(options: serverOptions))
         defer { listener.cancel() }
 
         let serverTask = Task {
@@ -253,7 +253,7 @@ final class IdentityBin: @unchecked Sendable {
         )
         let (ack, stream): (HelloAck, ReachTransport.QUICStream) = try await withTimeout(60) {
             let dialer = QUICDialer(
-                endpoint: .hostPort(host: "127.0.0.1", port: 47411),
+                endpoint: .hostPort(host: "127.0.0.1", port: .init(rawValue: TestPorts.port(47411))!),
                 parameters: .reachQUIC(options: clientOptions)
             )
             let stream = try await dialer.openStream(timeout: 45)
@@ -332,7 +332,7 @@ final class IdentityBin: @unchecked Sendable {
             identity: fixture.serverIdentity,
             clientTrustRoots: [fixture.caCert]
         )
-        let listener = try QUICListener(port: 47412, parameters: .reachQUIC(options: serverOptions))
+        let listener = try QUICListener(port: TestPorts.port(47412), parameters: .reachQUIC(options: serverOptions))
         defer { listener.cancel() }
 
         let serverTask = Task {
@@ -358,7 +358,7 @@ final class IdentityBin: @unchecked Sendable {
             do {
                 return try await withTimeout(60) {
                     let dialer = QUICDialer(
-                        endpoint: .hostPort(host: "127.0.0.1", port: 47412),
+                        endpoint: .hostPort(host: "127.0.0.1", port: .init(rawValue: TestPorts.port(47412))!),
                         parameters: .reachQUIC(options: clientOptions)
                     )
                     let stream = try await dialer.openStream(timeout: 45)

@@ -434,7 +434,7 @@ struct ScriptedFilling: SlotFilling {
         let caCert = try IdentityStore.certificate(fromDER: ca.certificateDER())
 
         var config = DaemonConfig()
-        config.port = 47413
+        config.port = TestPorts.port(47413)
         config.clusterName = "spine-test"
         let daemon = Daemon(
             config: config,
@@ -450,7 +450,7 @@ struct ScriptedFilling: SlotFilling {
             serverTrustRoots: [caCert]
         )
         let dialer = QUICDialer(
-            endpoint: .hostPort(host: "127.0.0.1", port: 47413),
+            endpoint: .hostPort(host: "127.0.0.1", port: .init(rawValue: TestPorts.port(47413))!),
             parameters: .reachQUIC(options: clientOptions)
         )
 
@@ -462,7 +462,7 @@ struct ScriptedFilling: SlotFilling {
         // The daemon declares every address it answers on — the away fall's
         // redial candidates.
         #expect(ack.addrs?.isEmpty == false)
-        #expect(ack.port == 47413)
+        #expect(ack.port == TestPorts.port(47413))
         try await control.send(SessionOpen(modelID: "scripted"))
         let opened = try await controlFrames.next()!.decode(SessionOpened.self)
 
@@ -547,7 +547,7 @@ struct ScriptedFilling: SlotFilling {
         let caCert = try IdentityStore.certificate(fromDER: ca.certificateDER())
 
         var config = DaemonConfig()
-        config.port = 47454
+        config.port = TestPorts.port(47454)
         config.clusterName = "silent-test"
         let daemon = Daemon(
             config: config,
@@ -558,7 +558,7 @@ struct ScriptedFilling: SlotFilling {
         defer { Task { await daemon.stop() } }
 
         let dialer = QUICDialer(
-            endpoint: .hostPort(host: "127.0.0.1", port: 47454),
+            endpoint: .hostPort(host: "127.0.0.1", port: .init(rawValue: TestPorts.port(47454))!),
             parameters: .reachQUIC(
                 options: TLSBuilder.clientOptions(alpn: Wire.alpn, identity: clientIdentity, serverTrustRoots: [caCert])
             )
@@ -599,7 +599,7 @@ struct ScriptedFilling: SlotFilling {
     /// thing a real client does, since it acks in batches of sixteen and this
     /// generation is longer than that between one ack and the walk-out.
     ///
-    /// ⚠️ Port 47455, checked clear. `grep -rioE 'port[a-z]*:? ?=? ?47[0-9]{3}'`
+    /// ⚠️ Port 47455, checked clear. `grep -rn '47[0-9]\{3\}'`
     /// — a case-sensitive grep misses `sessionPort:`.
     @Test func aReattachPastTheBufferIsRefusedInWordsAndNotServedShort() async throws {
         let ca = try ClusterCA.create(commonName: "Reach Truncation CA")
@@ -614,7 +614,7 @@ struct ScriptedFilling: SlotFilling {
         var limits = SessionRegistry.Limits()
         limits.bufferCapBytes = 200
         var config = DaemonConfig()
-        config.port = 47455
+        config.port = TestPorts.port(47455)
         config.clusterName = "trunc-test"
         let daemon = Daemon(
             config: config,
@@ -628,7 +628,7 @@ struct ScriptedFilling: SlotFilling {
         defer { Task { await daemon.stop() } }
 
         let dialer = QUICDialer(
-            endpoint: .hostPort(host: "127.0.0.1", port: 47455),
+            endpoint: .hostPort(host: "127.0.0.1", port: .init(rawValue: TestPorts.port(47455))!),
             parameters: .reachQUIC(
                 options: TLSBuilder.clientOptions(alpn: Wire.alpn, identity: clientIdentity, serverTrustRoots: [caCert])
             )

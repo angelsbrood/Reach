@@ -18,7 +18,10 @@ import X509
 ///
 /// 1. The PKCS#12 defect `IdentityError.pkcs12EmptyItemList` describes is not
 ///    an unlucky corner — every identity in this project is minted through the
-///    call that exhibits it, which is why it dominates red runs.
+///    call that exhibits it, which is why it dominated red runs. It is closed
+///    now, upstream of here: LibreSSL drops a leading zero byte from the
+///    private scalar, so `ClusterCA` mints keys that do not have one. See
+///    `SigningKey`. This path is still the one that would show it.
 /// 2. `SecPKCS12Import` used to leave the key in the login keychain, where its
 ///    access list could never match an ad-hoc signed binary. That produced a
 ///    password dialog on the operator's Mac at the first client connection,
@@ -51,6 +54,13 @@ public enum IdentityMaterializer {
     /// key as the enrolling side minted it (tests standing in for keepers
     /// and apps use this; on devices the ceremony stores into the keychain
     /// directly).
+    ///
+    /// ⚠️ **`privateKey` must come from `SigningKey.mint()`.** Unlike the
+    /// `Issued` overload above — whose key `ClusterCA` minted and therefore
+    /// guarded — this one takes a key from the caller, and an unguarded
+    /// `P256.Signing.PrivateKey()` brings back the 1-in-256 scalar that cannot
+    /// survive `viaPKCS12`. Guarding `ClusterCA` alone left exactly this door
+    /// open and the suite kept flaking through it.
     public static func materialize(certificateDER: Data, privateKey: P256.Signing.PrivateKey, label: String) throws -> SecIdentity {
         KeychainLock.acquire()
         defer { KeychainLock.release() }

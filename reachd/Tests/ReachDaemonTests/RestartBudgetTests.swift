@@ -26,7 +26,7 @@ import Testing
 /// live here because `swift test` cannot find the built binary to spawn.
 ///
 /// ⚠️ Ports: 47480–47482, checked clear of the literals scattered across the
-/// other suites. `grep -rioE 'port[a-z]*:? ?=? ?47[0-9]{3}'` — a
+/// other suites. `grep -rn '47[0-9]\{3\}'` — a
 /// case-sensitive grep misses `sessionPort:`.
 @Suite(.serialized) struct RestartBudgetTests {
     /// The residency window. Anything approaching it here is the defect.
@@ -129,7 +129,7 @@ import Testing
     /// deadline chosen because a stale cached handle was not nil.
     @Test(.timeLimit(.minutes(1)))
     func aFreshAskWithNothingResidentDoesNotSpendTheResidencyWindow() async throws {
-        let port: UInt16 = 47480
+        let port: UInt16 = TestPorts.port(47480)
         let cluster = try makeCluster()
         defer { cluster.discard() }
         let daemon = try await startDaemon(port: port, cluster: cluster)
@@ -192,7 +192,7 @@ import Testing
     /// meets, and the shape the rig measured.
     @Test(.timeLimit(.minutes(2)))
     func aColdAskRefusesAtItsBudgetAndNotAtTwiceIt() async throws {
-        let port: UInt16 = 47483
+        let port: UInt16 = TestPorts.port(47483)
         let cluster = try makeCluster()
         defer { cluster.discard() }
         let daemon = try await startDaemon(port: port, cluster: cluster)
@@ -250,7 +250,7 @@ import Testing
     /// reopen has to retry, which is `selftest --restart`'s ground.
     @Test(.timeLimit(.minutes(1)))
     func aSessionTheClusterForgotIsReopenedWithoutTheAppSeeingIt() async throws {
-        let port: UInt16 = 47481
+        let port: UInt16 = TestPorts.port(47481)
         let cluster = try makeCluster()
         defer { cluster.discard() }
         let first = try await startDaemon(port: port, cluster: cluster)
@@ -295,7 +295,7 @@ import Testing
     /// ⚠️ Port 47484.
     @Test(.timeLimit(.minutes(2)))
     func aClusterThatAnswersAndThenGoesQuietStillRefusesAtTheBudget() async throws {
-        let port: UInt16 = 47484
+        let port: UInt16 = TestPorts.port(47484)
         let cluster = try makeCluster()
         defer { cluster.discard() }
 
@@ -349,7 +349,7 @@ import Testing
     /// most likely bad start and the one nothing could see.
     @Test(.timeLimit(.minutes(1)))
     func aDaemonThatCannotTakeThePortSaysSoRatherThanServingNothing() async throws {
-        let port: UInt16 = 47482
+        let port: UInt16 = TestPorts.port(47482)
         let cluster = try makeCluster()
         defer { cluster.discard() }
         let holder = try await startDaemon(port: port, cluster: cluster)
