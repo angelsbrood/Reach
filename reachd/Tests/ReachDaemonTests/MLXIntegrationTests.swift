@@ -52,6 +52,13 @@ import Testing
         defer { Task { await daemon.stop() } }
 
         let label = "mlx-\(UUID().uuidString)"
+        // The hub writes the cluster's roads under this label the moment the
+        // daemon acks the hello, so a run of this test leaves a keychain item
+        // behind exactly like the identities above. No `mlx-` entries were
+        // found in the login keychain — this suite is gated, so nobody has
+        // paid for it yet, which is the only reason it is not on the pile with
+        // `spine-`, `tools-` and `budget-`.
+        defer { try? ClusterRoads.forget(for: label) }
         await ReachIdentityRegistry.shared.register(
             label: label,
             material: .init(identity: clientIdentity, caCertificate: caCert)
