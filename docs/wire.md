@@ -330,13 +330,19 @@ v0; tool execution remains exclusively in the adopting app.
 
 ## Named seams (v0, deliberate)
 
-- **Sampling mode is lossy.** `GenerationOptions.SamplingMode` exposes no
-  public read accessor — the `Kind` enum exists but nothing returns it. Greedy
-  survives because it is detectable through `Equatable`; every other mode rides
-  as `nil` and the host applies its own defaults. The constrained response path
-  and tool-argument paths are also currently greedy: their grammars control
-  which tokens are legal, not the fidelity of how a legal token is sampled.
-  Feedback-worthy upstream, and resolved by the same rebase.
+- **Sampling has three distinct losses.** `GenerationOptions.SamplingMode`
+  exposes no public read accessor — the `Kind` enum exists but nothing returns
+  it. Greedy can be detected through `Equatable` and represented on the wire;
+  other native modes ride as `nil`. The daemon's established unconstrained
+  path currently applies only `temperature`, leaving an explicit wire
+  `sampling` value to the host default. That is a Reach-owned parity seam.
+  Constrained response and tool-argument paths deliberately remain greedy:
+  S15 applied the ordinary sampler after the grammar mask and S14's unchanged
+  completion bias, and the exact adversarial schema exhausted 512 legal tokens
+  on its second run even at temperature `0.2`. Sampling was therefore stopped
+  rather than shipped with a wider hand-tuned bias or a parser. The framework
+  accessor and the evidenced constrained-completion problem are separate
+  follow-ons; neither is described as on-device equivalence.
 - **Request `metadata` is dropped.** Its values are existential
   `Sendable & Codable & Equatable`, which JSON coding cannot carry generically.
 - **Structured partial snapshots do not cross the wire.** The daemon streams

@@ -18,6 +18,84 @@ the decision. Kill criteria come from the pre-filing plan.
 | S12 | Can the pinned grammar engine constrain FoundationModels schemas within the warmed latency gate? | **PASS** (2026-08-08) — five schema shapes compiled; warmed first accepted delta 30–39 ms; xgrammar 0.1.30 cannot fork, so the required fresh-compile fallback costs ~13 ms for the two-field schema and ~120–135 ms for the adversarial benchmark |
 | S13 | Can generic structural guidance repair allowed tool calls and force required calls across the planned schema range? | **STOP / REPLAY FAILED** (2026-08-08) — nested and fixed-array calls failed unconstrained 3/3 and repaired 3/3, and generic required produced a valid Gemma 4 call; the adversarial replay nevertheless exhausted 512 tokens through legal numeric runaway 3/3, firing the plan's stop before implementation |
 | S14 | Was S13's adversarial stop a missing parser, or a wrong completion policy? | **PASS** (2026-08-08) — treating comma as a structural exit and digits as content completed the exact adversarial schema 3/3; negative, decimal and nested-number controls also passed 3/3, so no parsing table or Swift schema state machine was needed |
+| S15 | Does S14's completion repair survive probabilistic sampling? | **STOP / SAMPLING FAILED** (2026-08-08) — at temperature 0.2 the first four shapes accepted and decoded, but the exact adversarial shape's second run exhausted 512 legal tokens; the locked kill fired before permanent code, a fork pin or the higher-temperature arms |
+
+## S15 — constrained greed is measured necessity (2026-08-08)
+
+**Question and kill.** Would S14's unchanged completion policy remain safe if
+the grammar masked first and the ordinary MLX sampler then selected among legal
+tokens? The pre-ruled matrix was the exact S14 adversarial, negative-integer,
+decimal-plus-integer and nested-numeric shapes, three runs each at temperature
+`0.2`, the unset provider default `0.6`, and `1.0`. Any attributable grammar,
+decode or budget failure stopped the pass; widening the bias table or adding a
+parser was forbidden.
+
+**Prototype boundary.** Nothing in Reach's tracked tree or installed daemon was
+changed. Isolated release sources based on Reach `0d5e9fc` and pinned
+`mlx-swift-lm` `83f3ef6dc5bc24daeea33cfd9e18ab1383bb0bc8` added one
+source-compatible dependency hook:
+
+- `GuidedGenerationLoop.run` accepted a defaulted `LogitSampler`, retaining
+  `ArgMaxSampler` as its old behavior;
+- grammar mask and S14's exact closing/whitespace biases were applied before
+  `sampler.sample(logits:)`;
+- the candidate constrained path passed the request's ordinary
+  `GenerateParameters.sampler()`; no completion score, reserve, schema or
+  prompt changed.
+
+That combination built successfully in release in **90.62 s** and prewarmed
+cached `gemma-4-e2b`. The spike used no Keychain, wire session, phone or
+Simulator, so the result isolates guided token selection.
+
+**Verdict: STOP on attempt 5.** Temperature `0.2` run 1 passed all four shapes:
+
+| Shape | Complete | Time | Accepted JSON |
+| --- | ---: | ---: | --- |
+| adversarial nested pattern/range/fixed arrays | yes | 3.601 s | primary plus two alternatives; every code matched `^[A-Z]{2}-[0-9]{4}$`, every count was 73 and every checkpoint array had three integers |
+| negative bounded integer | yes | 0.360 s | `{"label":"-73","offset":-73}` |
+| decimal plus following integer | yes | 0.241 s | `{"count":5,"ratio":0.500000}` |
+| two nested integer/decimal objects | yes | 0.429 s | `{"first":{"count":-5,"score":0.75},"second":{"count":-12,"score":9.2}}` |
+
+The accepted adversarial bytes were:
+
+```json
+{
+  "auditNote": "This is a complete audit based on the,","payload"
+  : {"alternatives" : [
+    {"checkpoints" : [
+      1,
+      2,
+      3],"code" :"AZ-0001","count" :73},
+    {"checkpoints" : [
+      4,
+      5,
+      6],"code" :"BC-0002","count" :73}],"primary" : {"checkpoints" : [
+      7,
+      8,
+      9],"code" :"CD-0003","count" :73}}}
+```
+
+The next attempt — temperature `0.2`, adversarial run 2 — stayed within the
+grammar but did not accept before the same 512-token ceiling. It returned the
+exact product error:
+
+```
+the cluster could not finish the constrained response within its 512-token limit
+```
+
+This is the planned model-path failure, not an infrastructure fault. The
+remaining 31 candidate runs, including default `0.6` and `1.0`, were therefore
+not run: continuing after the first kill would turn a stopping rule into a
+scorecard.
+
+**What this rules.** S14's table is sufficient under greedy argmax but is not a
+general completion guarantee under sampling, even at temperature `0.2`.
+Reach therefore keeps constrained response and tool-argument selection greedy
+on purpose. The sampler hook, shared resolver, fork pin, upstream PR,
+Simulator probe, release installation and full-suite repetitions were not
+implemented. Sampling fidelity remains an evidenced M3 seam; changing that
+verdict requires a new founder ruling over a different completion design, not
+a wider hand-tuned token table.
 
 ## S13 — constrained calls have a greedy adversarial cliff (2026-08-08)
 
