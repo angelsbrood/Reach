@@ -345,11 +345,18 @@ v0; tool execution remains exclusively in the adopting app.
   close that overflow hole: seed 29 decoded and exact integer/finite-Double
   boundary tests passed. It still stopped when the unchanged adversarial
   schema exhausted 512 tokens at temperature 1.0 after 28/36 matrix cases.
-  The candidate was rolled back rather than widened into a completion parser
-  or larger hand-tuned bias. The framework
-  accessor, unconstrained wire-mode parity and constrained typed-completion
-  problem remain separate follow-ons; none is described as on-device
-  equivalence.
+  That candidate was rolled back rather than widened into a completion parser
+  or larger hand-tuned bias.
+  S19 then attacked the installed greedy path directly with `1e309`,
+  `2e-324`, both adjacent `Int` overflows and a 100-digit integer, three runs
+  apiece. All 15 streams completed as shorter decoder-safe values; no typed
+  mismatch reproduced. No Reach schema normalization or dependency pin ships
+  for a defect the current path did not reach. Type-safe numeric grammar
+  semantics remain architectural hardening, and become a prerequisite again
+  before any future constrained-sampling path can be considered safe.
+  The framework accessor, unconstrained wire-mode parity and constrained
+  typed-completion problem remain separate follow-ons; none is described as
+  on-device equivalence.
 - **Request `metadata` is dropped.** Its values are existential
   `Sendable & Codable & Equatable`, which JSON coding cannot carry generically.
 - **Structured partial snapshots do not cross the wire.** The daemon streams

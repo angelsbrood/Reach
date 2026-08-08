@@ -22,6 +22,69 @@ the decision. Kill criteria come from the pre-filing plan.
 | S16 | Can requested sampling retain a deterministic hard-completion boundary? | **PASS** (2026-08-08) — all 36/36 accepted and decoded at 0.2, default 0.6 and 1.0; simple shapes sampled throughout, while the adversarial shape sampled 13–14 decisions before 129–156 hard-zone argmax decisions completed it |
 | S17 | Does S16's hybrid survive product acceptance beyond its four retained shapes? | **STOP / DECODE FAILED** (2026-08-08) — the installed schema-plus-tools path produced grammar-accepted JSON that FoundationModels could not decode; a deterministic `topP(1, seed: 29)` response reproduced an unbounded integer outside Swift `Int`, firing the locked decode kill and rolling back the fork and product changes |
 | S18 | Do decoder-compatible numeric grammars make S16's hybrid safe to ship? | **STOP / BUDGET FAILED** (2026-08-08) — exact signed-64-bit and finite-Double grammars passed in isolation and seed 29 decoded, but the unchanged adversarial schema exhausted 512 tokens at temperature 1.0 after 28/36 accepted matrix cases; no sampler or numeric fork ships |
+| S19 | Can the installed greedy path reach a grammar-accepted numeric value that fails typed decoding? | **STOP / NOT REPRODUCED** (2026-08-08) — five hostile unbounded numeric asks completed and decoded 3/3 each, 15/15 total; neither the `Int` nor `Double` mismatch was reachable, so no Reach normalization, dependency pin or installation change ships |
+
+## S19 — the typed mismatch is architectural under the shipped greedy path (2026-08-08)
+
+**Question and gate.** S17 proved that sampled constrained generation can
+produce grammar-accepted JSON that FoundationModels cannot decode. S19 asked
+the narrower product question before hardening anything: can the installed
+greedy daemon at `32f93a2` reach the same class of mismatch at its real
+defaults? The locked stop required no Reach product change and no fork pin if
+neither `Int` nor `Double` reproduced.
+
+The launch-environment-only instrument was a normally signed Simulator build
+using the existing Example identity, `127.0.0.1`, and `gemma-4-e4b`. Every run
+created a fresh `LanguageModelSession`, sent one exact prompt with a 512-token
+ceiling, streamed the response, and retained the final typed value. The two
+wire schemas were the framework's sorted-key encodings:
+
+```json
+{"additionalProperties":false,"properties":{"value":{"type":"number"}},"required":["value"],"type":"object"}
+{"additionalProperties":false,"properties":{"value":{"type":"integer"}},"required":["value"],"type":"object"}
+```
+
+The three ordered runs for each ask were identical in value and snapshot
+count. Timings below are end-to-end `streamResponse` wall time from request
+construction through the final typed snapshot:
+
+| Exact requested value | Final typed value | Snapshots | Seconds, ordered |
+|---|---:|---:|---|
+| `1e309` (`Double`) | `1e+30` | 5 | 0.344, 0.236, 0.233 |
+| `2e-324` (`Double`) | `2e-32` | 5 | 0.223, 0.221, 0.221 |
+| `9223372036854775808` (`Int`) | `922337203685477632` | 18 | 0.419, 0.421, 0.415 |
+| `-9223372036854775809` (`Int`) | `-9223372036854775808` | 22 | 0.416, 0.415, 0.414 |
+| 100-digit all-nines (`Int`) | `1000000000000000000` | 18 | 1.524, 1.510, 1.542 |
+
+The model did not obey the impossible requested literals; greedy completion
+closed each numeric token at a decoder-safe value. That is not evidence that
+the ordinary JSON grammar is type-safe. It is the narrower evidence the gate
+asked for: **0/15 typed failures, with streamed completion in every run.** The
+normally signed evidence screen and exact timing ledger were retained locally;
+the app was terminated after capture.
+
+**Dependency division of labour.** Reach can deterministically annotate every
+response and tool schema before encoding, but it cannot make xgrammar compile
+new numeric semantics without becoming a second schema compiler. The converter
+must own exact signed-64 range construction and a finite-binary64 lexical
+grammar; Reach should only opt into those semantics once the dependency offers
+them. Three independent fixes were therefore prepared and tested on current
+upstream `c97539d`: signed-64 range generation passed 2 boundary tests plus the
+7 CXGrammar tests; finite `format: "double"` passed 5 boundary/refusal tests
+plus the 7 CXGrammar tests; and the stale structural-tool assertion now passes
+its complete 12/12 suite. A broader guided-generation run reached an unrelated
+existing test-harness failure loading MLX's default Metal library; the
+converter and CXGrammar suites were then run separately and passed.
+
+**Verdict: STOP / NOT REPRODUCED.** Both candidate product defects remained
+unreachable under the shipped greedy path, and the exact mechanism requires a
+dependency change. Reach therefore keeps its existing dependency, product
+code, installed daemon, wire dialect v0, public API, persistence and CA
+material unchanged. The three upstream fixes are clean local commits only;
+at the founder's direction they are neither pushed nor filed while another
+`mlx-swift-lm` PR is pending. Typed numeric completion returns to Held as
+architectural hardening and as a prerequisite for any future sampled path,
+not as a claimed defect fixed in the current product.
 
 ## S18 — typed numerics closed the overflow hole, not the completion cliff (2026-08-08)
 
