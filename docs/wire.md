@@ -336,13 +336,16 @@ v0; tool execution remains exclusively in the adopting app.
   other native modes ride as `nil`. The daemon's established unconstrained
   path currently applies only `temperature`, leaving an explicit wire
   `sampling` value to the host default. That is a Reach-owned parity seam.
-  Constrained response and tool-argument paths deliberately remain greedy:
-  S15 applied the ordinary sampler after the grammar mask and S14's unchanged
-  completion bias, and the exact adversarial schema exhausted 512 legal tokens
-  on its second run even at temperature `0.2`. Sampling was therefore stopped
-  rather than shipped with a wider hand-tuned bias or a parser. The framework
-  accessor and the evidenced constrained-completion problem are separate
-  follow-ons; neither is described as on-device equivalence.
+  Constrained response and tool-argument paths deliberately remain greedy.
+  S15 showed that sampling through the hard-completion zone can exhaust 512
+  legal tokens. S16's hybrid sampled normal/soft choices and completed the
+  exact retained matrix 36/36 with hard-zone argmax, but S17 then produced a
+  grammar-accepted integer outside Swift `Int` and failed the requested typed
+  decode at deterministic seed 29. The candidate was rolled back rather than
+  widened into a numeric parser or larger hand-tuned bias. The framework
+  accessor, unconstrained wire-mode parity and constrained typed-completion
+  problem remain separate follow-ons; none is described as on-device
+  equivalence.
 - **Request `metadata` is dropped.** Its values are existential
   `Sendable & Codable & Equatable`, which JSON coding cannot carry generically.
 - **Structured partial snapshots do not cross the wire.** The daemon streams

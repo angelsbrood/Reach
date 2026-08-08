@@ -19,6 +19,100 @@ the decision. Kill criteria come from the pre-filing plan.
 | S13 | Can generic structural guidance repair allowed tool calls and force required calls across the planned schema range? | **STOP / REPLAY FAILED** (2026-08-08) — nested and fixed-array calls failed unconstrained 3/3 and repaired 3/3, and generic required produced a valid Gemma 4 call; the adversarial replay nevertheless exhausted 512 tokens through legal numeric runaway 3/3, firing the plan's stop before implementation |
 | S14 | Was S13's adversarial stop a missing parser, or a wrong completion policy? | **PASS** (2026-08-08) — treating comma as a structural exit and digits as content completed the exact adversarial schema 3/3; negative, decimal and nested-number controls also passed 3/3, so no parsing table or Swift schema state machine was needed |
 | S15 | Does S14's completion repair survive probabilistic sampling? | **STOP / SAMPLING FAILED** (2026-08-08) — at temperature 0.2 the first four shapes accepted and decoded, but the exact adversarial shape's second run exhausted 512 legal tokens; the locked kill fired before permanent code, a fork pin or the higher-temperature arms |
+| S16 | Can requested sampling retain a deterministic hard-completion boundary? | **PASS** (2026-08-08) — all 36/36 accepted and decoded at 0.2, default 0.6 and 1.0; simple shapes sampled throughout, while the adversarial shape sampled 13–14 decisions before 129–156 hard-zone argmax decisions completed it |
+| S17 | Does S16's hybrid survive product acceptance beyond its four retained shapes? | **STOP / DECODE FAILED** (2026-08-08) — the installed schema-plus-tools path produced grammar-accepted JSON that FoundationModels could not decode; a deterministic `topP(1, seed: 29)` response reproduced an unbounded integer outside Swift `Int`, firing the locked decode kill and rolling back the fork and product changes |
+
+## S17 — grammar acceptance is not typed acceptance (2026-08-08)
+
+**Question and stop.** S16 proved the hybrid policy against the exact retained
+four-shape matrix. Product acceptance then exercised `.allowed`, `.required`
+and schema-plus-tools through the installed release. The plan's unchanged kill
+criterion still applied: any attributable grammar, decoding or budget failure
+stops the pass. It did.
+
+The first canonical installed selftest reached the default-`0.6`
+schema-plus-tools arm and returned `Failed to parse generated content.` A
+separate `.allowed` run once selected prose rather than a tool; that is valid
+allowed-mode model routing and is not the stop. To isolate the decode failure,
+the same two-field response schema was run directly with the categorical
+sampler, `topP(1)` and explicit seeds. Seeds 1–28 accepted and decoded (mostly
+with `count` 0; seed 28 produced 1). Seed 29 accepted this JSON shape:
+
+```json
+{"count":1000000000…<hundreds of additional digits>…,"name":""}
+```
+
+The JSON is structurally valid and the grammar accepted it, but its positive
+integer is outside Swift `Int`; constructing the requested `@Generable` value
+failed with `Failed to parse generated content.` This was not a Metal, model
+load, Keychain, wire, cancellation, budget or harness fault. It is an
+attributable decoding failure produced by the candidate sampling path while
+the S14 grammar, bias table, reserve formulas and token budget remained
+unchanged.
+
+**Verdict: STOP.** S16 was a valid but insufficient matrix result. The local
+dependency hook and Reach sampling resolver were removed, the upstream and
+backport branches remain unpublished scratch evidence, and constrained paths
+remain deliberately greedy. No wider completion bias, numeric parser or JSON
+repair was added. The signed Simulator probe was canceled before install or
+launch because continuing after this kill would test a design the product no
+longer contains.
+
+## S16 — sample while there is headroom, complete deterministically (2026-08-08)
+
+**Ruling.** S15 established that probabilistic choice inside the hard zone can
+legally avoid structural exits until the budget ends. The authorized follow-up
+therefore changed one thing: the request sampler chooses grammar-legal tokens
+in the normal and soft zones, while the existing hard-completion zone uses
+argmax. S14's grammar, 512-token budget, reserve formulas, closing table and
+whitespace policy remained byte-for-byte unchanged. No parser, backtracking,
+buffered retraction or wider bias was added.
+
+The isolated dependency hook counted requested-sampler decisions, hard-zone
+argmax decisions, unconditional-splice selections and xgrammar fast-forward
+tokens. The release harness built in **83.62 s**, prewarmed the cached
+`gemma-4-e2b`, and ran the exact S15 four-shape matrix. Every row below is three
+ordered runs; `chosen` is requested sampler / hard argmax / total generated
+tokens, and seconds are complete accepted-and-decoded wall times.
+
+| Temperature | Shape | Chosen tokens, runs 1/2/3 | Seconds, runs 1/2/3 |
+| --- | --- | --- | --- |
+| 0.2 | adversarial | `13/129/159`, `13/148/178`, `13/129/159` | `3.847`, `1.977`, `1.746` |
+| 0.2 | negative integer | `28/0/30`, `28/0/30`, `29/0/31` | `0.487`, `0.370`, `0.383` |
+| 0.2 | decimal + integer | `16/0/17`, `19/0/20`, `19/0/20` | `0.218`, `0.254`, `0.256` |
+| 0.2 | nested numerics | `42/0/47`, `62/0/67`, `44/0/49` | `0.532`, `0.766`, `0.547` |
+| default 0.6 | adversarial | `13/129/159`, `13/148/178`, `13/129/159` | `1.754`, `1.968`, `1.746` |
+| default 0.6 | negative integer | `22/0/24`, `18/0/20`, `28/0/30` | `0.296`, `0.251`, `0.370` |
+| default 0.6 | decimal + integer | `16/0/17`, `19/0/20`, `19/0/20` | `0.214`, `0.255`, `0.251` |
+| default 0.6 | nested numerics | `44/0/49`, `44/0/49`, `39/0/44` | `0.547`, `0.549`, `0.489` |
+| 1.0 | adversarial | `14/156/187`, `13/148/178`, `13/148/178` | `2.104`, `1.986`, `1.977` |
+| 1.0 | negative integer | `20/0/22`, `17/0/19`, `17/0/19` | `0.275`, `0.237`, `0.240` |
+| 1.0 | decimal + integer | `16/0/17`, `16/0/17`, `19/0/20` | `0.223`, `0.215`, `0.251` |
+| 1.0 | nested numerics | `40/0/45`, `58/0/63`, `38/0/43` | `0.511`, `0.713`, `0.476` |
+
+The grammar fast-forwarded 18 adversarial tokens, 3 negative-integer tokens,
+2 decimal/integer tokens and 6 nested tokens in every run; unconditional
+splice selections were zero. Reserves were stable by shape: soft/hard
+`186/496`, `128/56`, `128/72` and `128/168`. The adversarial hard reserve
+therefore begins with 16 tokens of nominal headroom, and the instrumentation
+proved the policy did not disguise an all-greedy run: 13–14 actual choices used
+the requested sampler before deterministic completion.
+
+**Verdict: PASS 36/36.** All outputs reached grammar acceptance and decoded.
+Every adversarial result retained two alternatives, three checkpoints per
+leaf, exact count 73 and codes `AB-1234`, `CD-5678`, `EF-9012`; its free audit
+note varied among `Audit Complete`, `Audit Report`, and a longer sentence.
+The fixed decimal/integer result remained `5` and `0.5`. Legal sampled
+variation was observable rather than inferred: negative labels varied, and at
+temperature 1.0 the nested run produced alternatives including scores
+`-0.75333333333333334`, `1.92`, and `-9.2` while still decoding.
+
+This overturned only S15's proposed *full-path* sampling design, not its
+evidence. It licensed a product candidate: sample where choice is generative,
+then complete the already-defined hard zone deterministically. S17 subsequently
+showed that the four retained shapes did not cover typed numeric range: a
+grammar-accepted sampled integer overflowed Swift `Int`. S16 therefore remains
+useful mechanism evidence, but no longer licenses a fork pin or product ship.
 
 ## S15 — constrained greed is measured necessity (2026-08-08)
 
@@ -88,14 +182,14 @@ remaining 31 candidate runs, including default `0.6` and `1.0`, were therefore
 not run: continuing after the first kill would turn a stopping rule into a
 scorecard.
 
-**What this rules.** S14's table is sufficient under greedy argmax but is not a
-general completion guarantee under sampling, even at temperature `0.2`.
-Reach therefore keeps constrained response and tool-argument selection greedy
-on purpose. The sampler hook, shared resolver, fork pin, upstream PR,
-Simulator probe, release installation and full-suite repetitions were not
-implemented. Sampling fidelity remains an evidenced M3 seam; changing that
-verdict requires a new founder ruling over a different completion design, not
-a wider hand-tuned token table.
+**What this ruled at the gate.** S14's table is sufficient under greedy argmax
+but is not a general completion guarantee under sampling, even at temperature
+`0.2`. The candidate sampler hook, shared resolver and fork pin therefore did
+not proceed under S15's full-path design. S16 later supplied the required new
+founder ruling over a different completion design — sampled normal/soft zones
+and deterministic hard completion — without widening this table or adding a
+parser; its separate result above supersedes the temporary all-greedy product
+decision while preserving this stop as evidence.
 
 ## S13 — constrained calls have a greedy adversarial cliff (2026-08-08)
 
