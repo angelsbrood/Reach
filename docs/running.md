@@ -36,7 +36,7 @@ would fail on a healthy cluster that had just started.
 A daemon that is simply not running is `WAIT`. A daemon that is running and
 cannot answer is `FAIL`, and only `FAIL` gates the exit status.
 
-`--via <address>` dials one chosen road instead of loopback, which is how you
+`--via <host[:port]>` dials one chosen road instead of loopback, which is how you
 prove a road from the host side before asking a device to use it, and
 `--dial-budget <seconds>` (default 10) bounds the whole attempt — the dial gets
 half of it and the exchange on the far side gets the rest, so both halves stay
@@ -46,6 +46,39 @@ inside the number you asked for.
 address — plain UDP and ICMP to it are dropped the same way — so `--via` the
 mesh address must be run from the other end of the tunnel, not from the
 cluster.
+
+## Automatic mappings
+
+While serving, reachd holds two long-lived UDP mapping requests through the
+macOS system broker: the configured session port and WireGuard `51820`. It asks
+for the same external ports and the system-default lease lifetime, but the
+router may assign different ports. Enrollment is not mapped. The system renews
+the mappings and reports network, address, or port changes on the same request;
+stopping the daemon deallocates both.
+
+`doctor` prints separate `session mapping` and `mesh mapping` findings. Active
+public mappings pass. A private/shared outer address or an explicit double-NAT
+callback warns and is described as usable only from that outer network.
+Probing waits; unsupported, disabled, absent-router, zero-endpoint, and broker
+errors warn without changing local or pinned behavior. A dead process's active
+record is called stale, and endpoint movement names the replaced value. The
+evidence lives at `reachability.json` in the state directory with mode `0600`;
+it is runtime diagnostics, never configuration and never an authority for a
+road.
+
+An assigned endpoint can be exercised directly:
+
+```
+reachd doctor --dial --via 198.51.100.8:55001
+```
+
+The QUIC listener requires a cluster-issued client certificate at TLS even
+when mapped onto a public interface. WireGuard accepts only enrolled peer keys.
+Neither fact makes a private double-NAT address public: single-NAT edges are
+the direct-mapping case, while CGNAT, building routers, and VPN layers may
+still require a manually reachable endpoint or the future relay described in
+[relay.md](relay.md). A client already away when an endpoint moves keeps its
+stale road until it can authenticate on another one and receive a fresh hello.
 
 ## As a service
 

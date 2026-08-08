@@ -73,6 +73,10 @@ struct Serve: AsyncParsableCommand {
         let caCert = try IdentityStore.certificate(fromDER: ca.certificateDER())
 
         let filling = MLXFilling(modelID: config.modelID)
+        let reachability = ReachabilityCoordinator(
+            sessionPort: config.port,
+            stateDirectory: DaemonInfo.stateDirectory
+        )
         // One device registry and one grant desk, shared between the organ
         // that parks app requests and the organ that lets keepers rule them.
         let devices = DeviceRegistry()
@@ -81,10 +85,15 @@ struct Serve: AsyncParsableCommand {
             config: config,
             filling: filling,
             identity: Daemon.ListenerIdentity(identity: identity, caCertificate: caCert),
-            grants: Daemon.GrantWiring(desk: desk, devices: devices)
+            grants: Daemon.GrantWiring(desk: desk, devices: devices),
+            reachability: reachability
         )
         try await daemon.start(advertise: !noAdvertise)
-        let mesh = MeshEndpoint.resolve(config: config, addresses: addresses)
+        let mesh = MeshEndpoint.resolve(
+            config: config,
+            mapped: reachability.meshEndpoint,
+            addresses: addresses
+        )
         // The startup line reports what the endpoint is now; the grant reads
         // it again when it grants. Re-pinning meshEndpoint — which is what
         // arriving at a venue means — must reach the next phone paired
@@ -94,6 +103,7 @@ struct Serve: AsyncParsableCommand {
         let wgHost = try WireGuardHost {
             MeshEndpoint.resolve(
                 config: try DaemonConfig.load(),
+                mapped: reachability.meshEndpoint,
                 addresses: LocalAddresses.ipv4()
             ).endpoint
         }

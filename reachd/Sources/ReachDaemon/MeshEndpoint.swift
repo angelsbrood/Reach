@@ -1,4 +1,5 @@
 import Foundation
+import ReachWire
 
 /// Where the phone is told to send WireGuard packets — and, just as
 /// importantly, where that answer came from.
@@ -18,6 +19,8 @@ public enum MeshEndpoint {
     public enum Source: Sendable, Equatable {
         /// Read from `meshEndpoint` in config.json.
         case pinned
+        /// Assigned by the active system port-mapping broker.
+        case mapped
         /// Guessed from a local address. LAN-only: correct for rehearsals on
         /// one network, useless the moment the phone leaves it.
         case derived
@@ -40,6 +43,8 @@ public enum MeshEndpoint {
             switch source {
             case .pinned:
                 "mesh endpoint \(endpoint) (pinned)"
+            case .mapped:
+                "mesh endpoint \(endpoint) (automatically mapped)"
             case .derived:
                 "mesh endpoint \(endpoint) (DERIVED — LAN-only; pin meshEndpoint in config.json for the away leg)"
             case .unavailable:
@@ -48,9 +53,16 @@ public enum MeshEndpoint {
         }
     }
 
-    public static func resolve(config: DaemonConfig, addresses: [[UInt8]]) -> Resolution {
+    public static func resolve(
+        config: DaemonConfig,
+        mapped: RoadEndpoint? = nil,
+        addresses: [[UInt8]]
+    ) -> Resolution {
         if let pinned = config.meshEndpoint, !pinned.isEmpty {
             return Resolution(endpoint: pinned, source: .pinned)
+        }
+        if let mapped {
+            return Resolution(endpoint: "\(mapped.host):\(mapped.port)", source: .mapped)
         }
         let candidate = addresses.first { address in
             address.count == 4

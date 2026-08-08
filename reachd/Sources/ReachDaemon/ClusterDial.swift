@@ -113,7 +113,8 @@ public enum ClusterDial {
     /// Dials the cluster once.
     ///
     /// - Parameters:
-    ///   - via: the address to dial, or nil for loopback. A chosen road is
+    ///   - via: the address (optionally `host:port`) to dial, or nil for
+    ///     loopback. A chosen road is
     ///     how this doubles as the away instrument: `--via` the mesh address
     ///     proves that road from the host side before a phone is asked to.
     ///   - budget: the whole thing completes or refuses inside this. Split in
@@ -125,7 +126,9 @@ public enum ClusterDial {
         budget: Duration = .seconds(10),
         supervision: Supervision = .launchAgent
     ) async -> Outcome {
-        let host = via ?? "127.0.0.1"
+        let target = via.flatMap(MeshEndpoint.split)
+        let host = target?.host ?? via ?? "127.0.0.1"
+        let port = target?.port ?? config.port
         let pinned = via != nil
 
         // A label nothing else will ever use. Not cosmetic: the hub seeds a
@@ -146,7 +149,7 @@ public enum ClusterDial {
                 elapsed: nil,
                 road: .notApplicable,
                 via: host,
-                port: config.port,
+                port: port,
                 pinned: pinned
             )
         } catch {
@@ -155,7 +158,7 @@ public enum ClusterDial {
                 elapsed: nil,
                 road: .notApplicable,
                 via: host,
-                port: config.port,
+                port: port,
                 pinned: pinned
             )
         }
@@ -169,7 +172,7 @@ public enum ClusterDial {
 
         let configuration = ReachExecutor.Configuration(
             host: host,
-            port: config.port,
+            port: port,
             modelID: config.modelID,
             identityLabel: label,
             connectTimeout: (budget / 2).seconds
@@ -187,7 +190,7 @@ public enum ClusterDial {
                 elapsed: elapsed,
                 road: await road(of: handle.sessionID, supervision: supervision),
                 via: host,
-                port: config.port,
+                port: port,
                 pinned: pinned
             )
         } catch let error as ReachError {
@@ -196,7 +199,7 @@ public enum ClusterDial {
                 elapsed: clock.now - start,
                 road: .notApplicable,
                 via: host,
-                port: config.port,
+                port: port,
                 pinned: pinned
             )
         } catch is DialTimeout {
@@ -208,7 +211,7 @@ public enum ClusterDial {
                 elapsed: clock.now - start,
                 road: .notApplicable,
                 via: host,
-                port: config.port,
+                port: port,
                 pinned: pinned
             )
         } catch {
@@ -217,7 +220,7 @@ public enum ClusterDial {
                 elapsed: clock.now - start,
                 road: .notApplicable,
                 via: host,
-                port: config.port,
+                port: port,
                 pinned: pinned
             )
         }

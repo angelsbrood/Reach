@@ -9,10 +9,11 @@ with the framework's native semantics; a conforming provider package
 model by swapping one dependency; and a single pairing ceremony provisions
 both halves of trust — a mutually authenticated device identity at the
 application layer, and membership in an embedded WireGuard mesh — in one
-gesture. The cluster is never internet-exposed: a public door, where there
-is one, is a single UDP port speaking WireGuard that answers nothing
-unauthenticated — not even to say no — and the session port never faces the
-internet at all. Access is per-device and per-app; every session is
+gesture. The daemon asks the current router to map both its QUIC session UDP
+port and its WireGuard UDP port. A mapped QUIC listener still requires a
+cluster-issued client certificate during TLS; WireGuard still requires an
+enrolled peer key. Neither listener offers an unauthenticated application
+door. Access is per-device and per-app; every session is
 inspectable; there is no account anywhere.
 
 ## Layout
@@ -27,8 +28,8 @@ inspectable; there is no account anywhere.
   grant sheet
 - `Example/` — a sample app that links ReachKit and nothing privileged
 - `docs/` — [the wire](docs/wire.md), [the ceremony](docs/ceremony.md), [the
-  demo](docs/demo.md), [running the daemon](docs/running.md), and [spike
-  verdicts](docs/spikes.md)
+  demo](docs/demo.md), [running the daemon](docs/running.md), [the relay
+  contract](docs/relay.md), and [spike verdicts](docs/spikes.md)
 
 ## Building
 
@@ -56,6 +57,28 @@ roads an earlier session wrote down.
 The demo is recorded — one unbroken take, July 2026 at Moon, on internal
 networks: https://youtu.be/FmhNJYJ_o0A. What remains is the same take
 behind a public uplink.
+
+## Reachability
+
+Automatic mapping is best-effort and enabled by default. The daemon uses the
+macOS system broker (PCP, NAT-PMP, or UPnP as the router supports), renews the
+leases for its lifetime, follows primary-network changes, and records current
+diagnostic evidence in a private `reachability.json` beside its state. Session
+and WireGuard mappings are independent, so a gateway may assign them different
+external ports. Enrollment remains local and Bonjour-discovered; it is never
+mapped.
+
+An explicit `meshEndpoint` remains authoritative. If it is absent, a current
+mapped WireGuard endpoint wins over the derived LAN fallback; the mapping is
+still maintained while pinned so removing the pin takes effect without a
+restart. Mapping failure changes no local behavior.
+
+A mapping is not a universal public road. A private or CGNAT outer address is
+usable only from that outer network, and a client already away when an endpoint
+moves retains the old road until it next authenticates successfully. Direct
+mapping principally serves single-NAT edges; [the published relay
+contract](docs/relay.md) names the follow-on for inbound walls and moving
+addresses without pretending that relay is implemented.
 
 ## Collaboration
 

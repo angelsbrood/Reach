@@ -259,9 +259,15 @@ public actor ReachConnectionHub {
     }
 
     private func noteCandidates(from ack: HelloAck, for configuration: ReachExecutor.Configuration) {
-        guard let addrs = ack.addrs, let port = ack.port,
-              let nwPort = NWEndpoint.Port(rawValue: port) else { return }
-        entries[configuration]?.candidates = endpoints(from: addrs, port: nwPort, for: configuration)
+        let roads: [RoadEndpoint]
+        if let declared = ack.roads {
+            roads = declared
+        } else if let addrs = ack.addrs, let port = ack.port {
+            roads = addrs.map { RoadEndpoint(host: $0, port: port) }
+        } else {
+            return
+        }
+        entries[configuration]?.candidates = endpoints(from: roads, for: configuration)
         // Being answered is exactly what `storedRoads` is asking about, and it
         // was only ever set when an entry was seeded from disk. So an app that
         // had just been answered — that had streamed tokens — was still told,
@@ -278,21 +284,21 @@ public actor ReachConnectionHub {
         // is not a reason to fail a session that is working, and ReachKit has
         // no channel to say so on; a store that will not write surfaces later
         // as an app that cannot start away.
-        try? ClusterRoads.save(addrs: addrs, port: port, for: configuration.identityLabel)
+        try? ClusterRoads.save(
+            endpoints: roads.map { .init(host: $0.host, port: $0.port) },
+            for: configuration.identityLabel
+        )
     }
 
     /// The declared addresses as endpoints, minus whatever is already the
     /// primary — the same conversion whether they arrived in a `HelloAck` or
     /// came back out of the store.
-    private func endpoints(
-        from addrs: [String],
-        port: NWEndpoint.Port,
-        for configuration: ReachExecutor.Configuration
-    ) -> [NWEndpoint] {
+    private func endpoints(from roads: [RoadEndpoint], for configuration: ReachExecutor.Configuration) -> [NWEndpoint] {
         var seen: Set<NWEndpoint> = [primaryEndpoint(for: configuration)]
         var candidates: [NWEndpoint] = []
-        for addr in addrs {
-            let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(addr), port: port)
+        for road in roads {
+            guard let port = NWEndpoint.Port(rawValue: road.port) else { continue }
+            let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(road.host), port: port)
             if seen.insert(endpoint).inserted {
                 candidates.append(endpoint)
             }
@@ -402,9 +408,11 @@ public actor ReachConnectionHub {
         // pair it again over a keychain it cannot open. The dial collapses
         // them; the sentence must not.
         do {
-            if let roads = try ClusterRoads.load(for: configuration.identityLabel),
-               let nwPort = NWEndpoint.Port(rawValue: roads.port) {
-                let stored = endpoints(from: roads.addrs, port: nwPort, for: configuration)
+            if let roads = try ClusterRoads.load(for: configuration.identityLabel) {
+                let stored = endpoints(
+                    from: roads.endpoints.map { RoadEndpoint(host: $0.host, port: $0.port) },
+                    for: configuration
+                )
                 if !stored.isEmpty {
                     entry.candidates = stored
                     entry.storedRoads = .known

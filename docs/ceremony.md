@@ -42,8 +42,16 @@ The daemon appends the wg peer (the operator applies it: the one visible
 sudo) and issues `reach://device/<uuid>`, clientAuth, one year. The first
 device enrolled holds the admin grant. The keeper stores the certificate
 beside the SE key, installs the tunnel with the system's consent, and
-keeps the cluster's calling card (addrs, session port, CA) for its
-console.
+keeps the cluster's calling card (endpoint-specific session roads and CA) for
+its console. Old calling cards containing one address list and one port decode
+lazily; every authenticated `HelloAck` refreshes the new form.
+
+The WireGuard endpoint granted to a newly enrolled device is resolved at the
+last responsible moment: explicit `meshEndpoint` pin, then the active mapped
+endpoint, then the current derived/local fallback. The automatic mapping stays
+alive while a pin is present, so removing the pin takes effect for the next
+grant without restarting the daemon. A translated external port is expected
+and does not change the QR schema.
 
 **The last frame is why "paired" means anything.** `EnrollComplete` says
 the phone holds the grant; the peer install waits for it, so a re-pair

@@ -26,7 +26,7 @@ struct Doctor: AsyncParsableCommand {
     @Flag(name: .long, help: "Open a session against the running daemon and report the road it came in on.")
     var dial = false
 
-    @Option(name: .long, help: "Dial this address instead of loopback — proves one chosen road from the host side.")
+    @Option(name: .long, help: "Dial this host or host:port instead of loopback — proves one chosen road from the host side.")
     var via: String?
 
     @Option(name: .long, help: "Seconds the dial gets to complete or refuse.")
@@ -53,13 +53,9 @@ struct Doctor: AsyncParsableCommand {
 
         print("""
 
-            doctor cannot see the router, and the port map lives there. It has
-            gone missing between sessions before, and its absence looks exactly
-            like a mesh fault:
-
-                ssh root@<gateway> "nft list ruleset | grep 51820"
-
-            Three lines expected — the DNAT plus two NAT-reflection rules.
+            Automatic mapping is best-effort. A warning leaves local roads and
+            an explicit meshEndpoint unchanged; a private double-NAT result is
+            evidence only for clients on that outer network.
             """)
 
         print("\n\(report.count(.pass)) pass, \(report.count(.warn)) warn, \(report.count(.wait)) waiting, \(report.count(.fail)) fail")

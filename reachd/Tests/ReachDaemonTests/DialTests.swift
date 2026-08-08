@@ -105,6 +105,19 @@ import X509
         return url
     }
 
+    @Test func aNamedPortOverridesTheConfiguredPortBeforeDialing() async throws {
+        let directory = try stateDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let outcome = await ClusterDial.dial(
+            stateDirectory: directory,
+            config: config(port: 47337),
+            via: "198.51.100.8:55001"
+        )
+        #expect(outcome.via == "198.51.100.8")
+        #expect(outcome.port == 55001)
+        #expect(outcome.pinned)
+    }
+
     // MARK: - The dial, against a real listener
 
     @Test(.timeLimit(.minutes(1)))

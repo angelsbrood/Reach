@@ -69,6 +69,7 @@ let package = Package(
             dependencies: [
                 "ReachDaemon",
                 .product(name: "ReachKit", package: "ReachKit"),
+                .product(name: "ReachWire", package: "ReachKit"),
             ]
         ),
     ]

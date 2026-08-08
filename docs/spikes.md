@@ -347,3 +347,116 @@ had been declared over an authenticated control stream, and the road
 worked out how to be a road. Reach ships no relay by design; a road that
 brings its own is that road's business. **Reach always brings a road,
 gladly uses yours, and the session never learns which one it took.**
+
+## S8 — the local mapping broker has no permitted edge (2026-08-07)
+
+**Question.** Can the product's actual macOS mapping path obtain a usable
+UDP lease from the active default gateway before reachability code or live
+port mappings are introduced?
+
+**Verdict: KILL FIRED.** The active product path has no responding mapping
+edge, so this pass stopped before implementation, installation, or plan
+retirement.
+
+The host's default route was `192.168.8.1` over `en0`, with the host at
+`192.168.8.210`. Three sequential `dns-sd -X` probes exercised the same
+system broker used by `DNSServiceNATPortMappingCreate`, each with an unused
+UDP port, the same requested external port, and a 120-second requested TTL:
+
+| Probe | Disposable UDP port | Callback delay | External address | External port | TTL | Protocol |
+| --- | ---: | ---: | --- | ---: | ---: | ---: |
+| 1 | 55101 | about 3.5 s | `0.0.0.0` | 0 | 0 | 16 |
+| 2 | 55102 | about 3.5 s | `0.0.0.0` | 0 | 0 | 16 |
+| 3 | 55103 | about 3.5 s | `0.0.0.0` | 0 | 0 | 16 |
+
+Read-only inspection of the Slate gateway attributed the result: its
+`upnpd` service is disabled (`enabled='0'`). Its stored configuration still
+has NAT-PMP and UPnP enabled (`enable_natpmp='1'` and `enable_upnp='1'`), but
+no `miniupnpd` process or UDP 5351 listener was active. The Proton VPN path
+configured on the router is not a mapping broker exposed to the Mac's active
+default-gateway product path, so it cannot satisfy this spike.
+
+S9 did not run because S8 produced no lease whose renewal, movement,
+teardown, or stale-road behavior could be measured.
+
+The founder explicitly authorized a second attempt the same day. The Slate's
+feed supplied `miniupnpd-nftables` 2.3.3-2; it was installed, restricted to
+requests from `192.168.8.210/32`, enabled, and verified listening on UDP 5351.
+The product broker reached it, and the daemon log showed both the request and
+the matching allow rule. The result was still unusable:
+
+- a probe on disposable UDP port 55111 returned macOS error `-65564`
+  (`NATPortMappingUnsupported`); miniupnpd had selected the Proton interface
+  `wgclient1` at private address `10.2.0.2` and refused to install the mapping;
+- a diagnostic repeat on port 55112 returned the same error;
+- after separate explicit authorization, binding the broker to the Slate's
+  real Wi-Fi WAN (`wwan` / `sta1`) and declaring its private outer address
+  `192.168.4.94` failed before startup with the exact broker error
+  `Error: option ext_ip contains reserved / private address 192.168.4.94, not public routable`.
+
+The failed interface declarations were reverted. The broker was stopped and
+disabled, no listener or lease remained, and the package was left installed
+but inert; the narrower Mac-only permission remains. Under the criterion as
+then written, S8 had no accessible edge and the kill remained active.
+
+On 8 August the plan split that single question in two. The public-edge result
+above became S8a: it still fails and still forbids an end-to-end public-uplink
+claim on this rig. A separate S8b asks whether the product mapping client can
+be verified against a deliberate conformant instrument; only failure there
+stops implementation. The founder explicitly reopened the pass on that
+amended criterion.
+
+## S8b — the macOS broker is verifiable (2026-08-07 PDT / 8 August sitting)
+
+**Question.** Can the exact product API path create and tear down mappings,
+receive the assigned address, port, and lease lifetime, and repeat reliably
+against a conformant controlled edge?
+
+**Verdict: PASS, 3/3.** A one-off miniupnpd 2.3.3 process ran on the Slate with
+an ephemeral configuration: boot service still disabled, client restricted to
+`192.168.8.210/32`, disposable ports restricted to 55120–55199, and the rig's
+current Proton exit `159.26.99.105` used only as a synthetic public-form
+callback value. It was an instrument, never a reachability claim.
+
+Three `dns-sd -X` calls exercised `DNSServiceNATPortMappingCreate` with the
+system-default TTL:
+
+| Probe | Internal port | Assigned endpoint | Granted TTL | Active-rule check | Deallocation check |
+| --- | ---: | --- | ---: | --- | --- |
+| 1 | 55121 | `159.26.99.105:55121` | 7200 s | matching PCP lease + nft DNAT | lease and rules empty |
+| 2 | 55122 | `159.26.99.105:55122` | 7200 s | matching PCP lease + nft DNAT | lease and rules empty |
+| 3 | 55123 | `159.26.99.105:55123` | 7200 s | matching PCP lease + nft DNAT | lease and rules empty |
+
+The system broker chose PCP, preserved each requested external port, and
+explicit deallocation removed each mapping immediately. S8b therefore lifts
+the verification kill. S8a remains failed: none of these addresses was tested
+or claimed as a public road.
+
+## S9 — the lease changes honestly (2026-08-07 PDT / 8 August sitting)
+
+**Question.** What does the system broker report for renewal, movement,
+expiry, refusal, and teardown, and what state does the edge actually retain?
+
+**Verdict: PASS for the protocol mechanics; public-uplink behavior remains
+unavailable under S8a.** Measurements against the same instrument:
+
+- requesting a 12-second lease was clamped to 120 seconds;
+- with the DNSService reference held open, the edge deadline advanced by
+  exactly 60 seconds at renewal while the callback value stayed unchanged;
+- restarting the instrument with its synthetic address moved from
+  `159.26.99.105` to `159.26.99.106` produced a second callback on the same
+  live reference with the replacement address, same port, and 120-second TTL;
+- three raw, non-renewing NAT-PMP control leases on ports 55125–55127 were
+  granted for 120 seconds and all three lease rows and nft rules disappeared
+  at expiry;
+- a request outside the instrument's ACL (55200) produced macOS error
+  `-65564` (`NATPortMappingUnsupported`) while the broker logged the explicit
+  permission rejection;
+- deallocating a live DNSService reference removed its lease and both
+  forwarding chains immediately.
+
+The one-off process was stopped, its temporary files removed, both miniupnpd
+chains verified empty, UDP 5351 verified absent, and the boot service left
+disabled. The installed package remains inert with the Mac-only ACL. These
+results license implementation of automatic mapping and its failure states;
+they do not license an internet-reachability claim on the current rig.

@@ -26,6 +26,22 @@ public struct ModelDescriptor: Codable, Sendable, Equatable {
     }
 }
 
+/// One authenticated route to the session listener.
+///
+/// Unlike the legacy `HelloAck.addrs` plus `port` pair, every address carries
+/// its own port. Gateways are allowed to translate two UDP mappings to
+/// different external ports, so flattening this list would make at least one
+/// otherwise-working route impossible to dial.
+public struct RoadEndpoint: Codable, Sendable, Equatable, Hashable {
+    public var host: String
+    public var port: UInt16
+
+    public init(host: String, port: UInt16) {
+        self.host = host
+        self.port = port
+    }
+}
+
 public struct HelloAck: WireFrame, Equatable {
     public static let frameType = FrameType.helloAck
     public var version: UInt8
@@ -39,19 +55,24 @@ public struct HelloAck: WireFrame, Equatable {
     public var addrs: [String]?
     /// The session port those addresses answer on.
     public var port: UInt16?
+    /// Endpoint-specific routes, preferred by new clients. Optional so a v0
+    /// decoder built before mapped reachability continues to ignore it.
+    public var roads: [RoadEndpoint]?
 
     public init(
         version: UInt8 = Wire.version,
         cluster: String,
         models: [ModelDescriptor],
         addrs: [String]? = nil,
-        port: UInt16? = nil
+        port: UInt16? = nil,
+        roads: [RoadEndpoint]? = nil
     ) {
         self.version = version
         self.cluster = cluster
         self.models = models
         self.addrs = addrs
         self.port = port
+        self.roads = roads
     }
 }
 

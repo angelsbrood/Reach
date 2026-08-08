@@ -16,6 +16,27 @@ import Testing
 struct ClusterRoadsTests {
     private func freshLabel() -> String { "reach-test-roads-\(UUID().uuidString)" }
 
+    @Test func legacyJSONLazilyBecomesEndpointSpecific() throws {
+        let legacy = Data(#"{"addrs":["192.168.1.40","10.86.0.1"],"port":47337}"#.utf8)
+        let decoded = try JSONDecoder().decode(ClusterRoads.Roads.self, from: legacy)
+        #expect(decoded.endpoints == [
+            .init(host: "192.168.1.40", port: 47337),
+            .init(host: "10.86.0.1", port: 47337),
+        ])
+    }
+
+    @Test func newJSONRetainsDifferentPorts() throws {
+        let roads = ClusterRoads.Roads(endpoints: [
+            .init(host: "192.168.1.40", port: 47337),
+            .init(host: "198.51.100.8", port: 55001),
+        ])
+        let decoded = try JSONDecoder().decode(
+            ClusterRoads.Roads.self,
+            from: JSONEncoder().encode(roads)
+        )
+        #expect(decoded == roads)
+    }
+
     @Test func roadsComeBackTheWayTheyWentIn() throws {
         let label = freshLabel()
         defer { try? ClusterRoads.forget(for: label) }
@@ -74,6 +95,23 @@ struct ClusterRoadsTests {
 
         let loaded = try #require(try ClusterRoads.load(for: label))
         #expect(loaded.addrs == ["192.168.1.40"])
+    }
+
+    @Test func endpointSpecificStoreFiltersLoopbackAndKeepsPorts() throws {
+        let label = freshLabel()
+        defer { try? ClusterRoads.forget(for: label) }
+
+        try ClusterRoads.save(endpoints: [
+            .init(host: "127.0.0.1", port: 47337),
+            .init(host: "198.51.100.8", port: 55001),
+            .init(host: "10.86.0.1", port: 51820),
+        ], for: label)
+
+        let loaded = try #require(try ClusterRoads.load(for: label))
+        #expect(loaded.endpoints == [
+            .init(host: "198.51.100.8", port: 55001),
+            .init(host: "10.86.0.1", port: 51820),
+        ])
     }
 
     /// A daemon that can currently see only itself has not learned that last

@@ -9,9 +9,75 @@ import SwiftUI
 /// The cluster as the ceremony recorded it — the console's dialing card.
 struct ClusterRecord: Codable {
     var name: String
-    var addrs: [String]
-    var sessionPort: UInt16
+    var roads: [RoadEndpoint]
     var caCertDER: Data
+
+    /// Compatibility projections for the ceremony code and for old records.
+    var addrs: [String] { roads.map(\.host) }
+    var sessionPort: UInt16 { roads.first?.port ?? 47337 }
+
+    init(name: String, addrs: [String], sessionPort: UInt16, caCertDER: Data) {
+        self.name = name
+        roads = addrs.map { RoadEndpoint(host: $0, port: sessionPort) }
+        self.caCertDER = caCertDER
+    }
+
+    init(name: String, roads: [RoadEndpoint], caCertDER: Data) {
+        self.name = name
+        self.roads = roads
+        self.caCertDER = caCertDER
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case name
+        case roads
+        case addrs
+        case sessionPort
+        case caCertDER
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        name = try container.decode(String.self, forKey: .name)
+        caCertDER = try container.decode(Data.self, forKey: .caCertDER)
+        if let roads = try container.decodeIfPresent([RoadEndpoint].self, forKey: .roads) {
+            self.roads = roads
+        } else {
+            let addrs = try container.decode([String].self, forKey: .addrs)
+            let port = try container.decode(UInt16.self, forKey: .sessionPort)
+            roads = addrs.map { RoadEndpoint(host: $0, port: port) }
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(name, forKey: .name)
+        try container.encode(roads, forKey: .roads)
+        try container.encode(caCertDER, forKey: .caCertDER)
+    }
+
+    func refreshed(from ack: HelloAck) -> ClusterRecord {
+        let declared: [RoadEndpoint]?
+        if let roads = ack.roads {
+            declared = roads
+        } else if let addrs = ack.addrs, let port = ack.port {
+            declared = addrs.map { RoadEndpoint(host: $0, port: port) }
+        } else {
+            declared = nil
+        }
+        guard let declared else { return self }
+        var seen: Set<RoadEndpoint> = []
+        let usable = declared.filter { !Self.isLoopback($0.host) && seen.insert($0).inserted }
+        guard !usable.isEmpty else { return self }
+        return ClusterRecord(name: ack.cluster, roads: usable, caCertDER: caCertDER)
+    }
+
+    private static func isLoopback(_ host: String) -> Bool {
+        guard let first = host.split(separator: ".").first,
+              let octet = UInt8(String(first))
+        else { return false }
+        return octet == 127
+    }
 
     static var url: URL {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -206,9 +272,10 @@ final class GrantConsole {
         let options = TLSBuilder.clientOptions(alpn: Wire.alpn, identity: identity, serverTrustRoots: [ca])
 
         var stream: ReachTransport.QUICStream?
-        for addr in record.addrs {
+        for road in record.roads {
+            guard let port = NWEndpoint.Port(rawValue: road.port) else { continue }
             let dialer = QUICDialer(
-                endpoint: .hostPort(host: NWEndpoint.Host(addr), port: NWEndpoint.Port(rawValue: record.sessionPort)!),
+                endpoint: .hostPort(host: NWEndpoint.Host(road.host), port: port),
                 parameters: .reachQUIC(options: options)
             )
             if let opened = try? await dialer.openStream(timeout: 10) {
@@ -241,9 +308,10 @@ final class GrantConsole {
                 cluster: [ack.version]
             ))
         }
+        record.refreshed(from: ack).save()
         controlVersion = ack.version
         try await stream.send(GrantSubscribe(), for: ack.version)
-        state = .watching(cluster: record.name)
+        state = .watching(cluster: ack.cluster)
 
         // The session tunnel idles out at 30 s; the console holds it open.
         let pinger = Task {

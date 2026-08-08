@@ -28,12 +28,52 @@ public enum ClusterRoads {
     /// JSON so a later field can arrive optional, the way `HelloAck.addrs`
     /// itself did.
     public struct Roads: Codable, Sendable, Equatable {
-        public var addrs: [String]
-        public var port: UInt16
+        public struct Endpoint: Codable, Sendable, Equatable, Hashable {
+            public var host: String
+            public var port: UInt16
+
+            public init(host: String, port: UInt16) {
+                self.host = host
+                self.port = port
+            }
+        }
+
+        public var endpoints: [Endpoint]
+
+        /// Source-compatible projections for callers that still construct or
+        /// inspect the legacy single-port shape. New encodes contain only
+        /// `endpoints`; the custom decoder accepts both shapes.
+        public var addrs: [String] { endpoints.map(\.host) }
+        public var port: UInt16 { endpoints.first?.port ?? 0 }
 
         public init(addrs: [String], port: UInt16) {
-            self.addrs = addrs
-            self.port = port
+            endpoints = addrs.map { Endpoint(host: $0, port: port) }
+        }
+
+        public init(endpoints: [Endpoint]) {
+            self.endpoints = endpoints
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case endpoints
+            case addrs
+            case port
+        }
+
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            if let endpoints = try container.decodeIfPresent([Endpoint].self, forKey: .endpoints) {
+                self.endpoints = endpoints
+                return
+            }
+            let addrs = try container.decode([String].self, forKey: .addrs)
+            let port = try container.decode(UInt16.self, forKey: .port)
+            endpoints = addrs.map { Endpoint(host: $0, port: port) }
+        }
+
+        public func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(endpoints, forKey: .endpoints)
         }
     }
 
@@ -53,9 +93,18 @@ public enum ClusterRoads {
     /// than erasing it — a daemon that can currently see only itself has not
     /// learned that the roads it told us about last week are gone.
     public static func save(addrs: [String], port: UInt16, for label: String) throws {
-        let roads = addrs.filter { !isLoopback($0) }
+        try save(
+            endpoints: addrs.map { Roads.Endpoint(host: $0, port: port) },
+            for: label
+        )
+    }
+
+    /// Records endpoint-specific roads for `label`.
+    public static func save(endpoints: [Roads.Endpoint], for label: String) throws {
+        var seen: Set<Roads.Endpoint> = []
+        let roads = endpoints.filter { !isLoopback($0.host) && seen.insert($0).inserted }
         guard !roads.isEmpty else { return }
-        let data = try JSONEncoder().encode(Roads(addrs: roads, port: port))
+        let data = try JSONEncoder().encode(Roads(endpoints: roads))
 
         // The whole body, as `WGKey.createOrLoad` holds it: add-then-update is
         // a read-then-write by another name.

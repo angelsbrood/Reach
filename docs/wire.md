@@ -57,7 +57,7 @@ ended 3/3 as the opaque `stream open timeout`. The retained register is in
 | | Frame | |
 |---|---|---|
 | **1** | `Hello` | versions offered, client name |
-| **2** | `HelloAck` | version, cluster, models, **addrs**, port |
+| **2** | `HelloAck` | version, cluster, models, **roads?**, addrs?, port? |
 | **3** | `SessionOpen` | model id |
 | **4** | `SessionOpened` | session id, resume token, capabilities |
 | **5, 6** | *reserved* | retired; see below |
@@ -119,7 +119,7 @@ Client-opened, long-lived, one per connection.
 ```
   Hello{versions, client}                client ──► daemon
   HelloAck{version, cluster, models,
-           addrs, port}                  daemon ──► client
+           roads?, addrs?, port?}        daemon ──► client
   SessionOpen{modelID}                   client ──► daemon
   SessionOpened{sessionID, token,
                 capabilities}            daemon ──► client
@@ -133,14 +133,20 @@ selected value then belongs to the session: generation begin and re-attach,
 grants, keepalives, events and acknowledgements are all gated by it rather than
 falling back to the process's preferred dialect.
 
-`HelloAck.addrs` is the part that earns its keep. The daemon declares **every
-IPv4 address it answers on** — LAN, mesh, and any tunnel interface that happens
-to be up — together with the port they answer on. A client whose path has just
-died re-dials those as candidates and keeps the first that connects. The list
-arrives over an already mutually authenticated stream, so trusting it grants
-nothing that mTLS did not already grant.
+`HelloAck.roads` is the endpoint-specific declaration: every entry is
+`{host, port}` because gateways may translate the session mapping to a port
+other than the listener's internal port. A client prefers this list, re-dials
+its candidates in parallel, and keeps the first that connects. The list arrives
+over an already mutually authenticated stream, so trusting it grants nothing
+that mTLS did not already grant.
 
-The client also **keeps them**, in the keychain beside the CA it pinned, so
+`addrs` plus `port` is retained as the legacy projection. It contains local
+addresses and may include a mapped address only when that mapping preserved the
+configured session port. An old client therefore never combines an external
+address with the wrong port; a new client can use every endpoint. Missing
+`roads` means the legacy shape, not an empty declaration.
+
+The client also **keeps host and port together**, in the keychain beside the CA it pinned, so
 they outlive the process that learned them and the app install that learned
 them. That is what lets a session be *born* away rather than only survive
 going there: a cold launch on a network that has never seen this cluster
@@ -149,9 +155,11 @@ chain decides which of them is the cluster. Loopback is dropped on the way in
 — the daemon's declared set carries it because that set doubles as the server
 certificate's SAN list, and on another device it names that device.
 
-Both fields are **optional on the wire**, which is the whole compatibility
-story: a daemon that predates them simply omits them, and a client that
-receives none falls back to the address it already had.
+All reachability fields are **optional on the wire**, which is the whole
+compatibility story: a daemon that predates endpoint-specific roads omits them,
+a new client lazily upgrades the old single-port store, and a client receiving
+neither form falls back to the address it already had. `roads` adds no new
+frame type and leaves dialect v0 unchanged.
 
 ## A generation
 

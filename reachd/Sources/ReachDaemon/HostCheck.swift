@@ -155,6 +155,7 @@ public enum HostCheck {
         findings.append(contentsOf: wireGuard.findings)
         findings.append(await checkDevices(in: stateDirectory, peers: wireGuard.peers))
         findings.append(contentsOf: portFindings)
+        findings.append(contentsOf: checkReachability(in: stateDirectory, daemonUp: daemonUp))
         findings.append(checkSupervision(daemonUp: daemonUp))
 
         // Last, and deliberately: everything above says the host is dressed,
@@ -171,6 +172,99 @@ public enum HostCheck {
         }
 
         return Report(findings: findings)
+    }
+
+    /// Reads the daemon's diagnostic mapping evidence. This file never feeds
+    /// the wire or a grant; it exists so an absent router capability and a
+    /// moving endpoint do not both collapse into "away does not work".
+    static func checkReachability(
+        in stateDirectory: URL,
+        daemonUp: Bool,
+        processIsAlive: @Sendable (Int32) -> Bool = HostCheck.processIsAlive
+    ) -> [Finding] {
+        let url = stateDirectory.appendingPathComponent(ReachabilityCoordinator.statusFileName)
+        guard let data = try? Data(contentsOf: url) else {
+            let level: Level = daemonUp ? .warn : .wait
+            let detail = daemonUp
+                ? "no reachability.json — this running daemon has not recorded mapping state"
+                : "not probing — mappings start with the daemon"
+            return [
+                Finding(level: level, title: "session mapping", detail: detail),
+                Finding(level: level, title: "mesh mapping", detail: detail),
+            ]
+        }
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        guard let runtime = try? decoder.decode(ReachabilityRuntime.self, from: data) else {
+            return [
+                Finding(level: .warn, title: "session mapping", detail: "reachability.json is unreadable", action: "Restart reachd; the file is runtime evidence and will be replaced."),
+                Finding(level: .warn, title: "mesh mapping", detail: "reachability.json is unreadable", action: "Restart reachd; the file is runtime evidence and will be replaced."),
+            ]
+        }
+
+        if !processIsAlive(runtime.processID),
+           runtime.session.state != .stopped || runtime.mesh.state != .stopped {
+            let age = max(0, Date().timeIntervalSince(runtime.updatedAt))
+            let detail = "stale runtime state from process \(runtime.processID), updated \(Int(age)) s ago"
+            return [
+                Finding(level: .warn, title: "session mapping", detail: detail, action: "Start or restart reachd; stale endpoints are not advertised."),
+                Finding(level: .warn, title: "mesh mapping", detail: detail, action: "Start or restart reachd; stale endpoints are not used in grants."),
+            ]
+        }
+
+        return [mappingFinding(runtime.session), mappingFinding(runtime.mesh)]
+    }
+
+    static func mappingFinding(_ mapping: PortMappingRuntime) -> Finding {
+        let title = "\(mapping.kind.rawValue) mapping"
+        let change = mapping.changeCount > 0
+            ? "; changed \(mapping.changeCount) time(s)"
+                + (mapping.previousEndpoint.map { ", replacing \($0.host):\($0.port)" } ?? "")
+            : ""
+
+        switch mapping.state {
+        case .active:
+            guard let endpoint = mapping.endpoint else {
+                return Finding(level: .warn, title: title, detail: "broker reported active without an endpoint")
+            }
+            let addressKind = MeshEndpoint.classify(endpoint.host)
+            let ttl = mapping.ttl.map { ", TTL \($0) s" } ?? ""
+            if mapping.doubleNAT || addressKind == .privateNetwork || addressKind == .sharedAddressSpace {
+                return Finding(
+                    level: .warn,
+                    title: title,
+                    detail: "active private outer mapping \(endpoint.host):\(endpoint.port) (double NAT)\(ttl)\(change)",
+                    action: "Use it only from that outer network. A private or CGNAT outer address is not a public-internet road."
+                )
+            }
+            return Finding(
+                level: .pass,
+                title: title,
+                detail: "active public mapping \(endpoint.host):\(endpoint.port)\(ttl)\(change)"
+            )
+
+        case .probing:
+            return Finding(level: .wait, title: title, detail: "probing the current router")
+        case .unsupported:
+            return Finding(level: .warn, title: title, detail: mapping.error ?? "automatic mapping is unsupported", action: "Local and pinned roads are unchanged; configure a router forward or explicit meshEndpoint if away access is required.")
+        case .disabled:
+            return Finding(level: .warn, title: title, detail: mapping.error ?? "automatic mapping is disabled at the router", action: "Enable PCP, NAT-PMP, or restricted UPnP on the router, or keep using local and pinned roads.")
+        case .noRouter:
+            return Finding(level: .warn, title: title, detail: mapping.error ?? "no router is available", action: "Mapping will be retried automatically when the primary network changes.")
+        case .unavailable:
+            return Finding(level: .warn, title: title, detail: mapping.error ?? "the broker returned no usable endpoint", action: "Local and explicitly pinned behavior is unchanged.")
+        case .failed:
+            return Finding(level: .warn, title: title, detail: mapping.error ?? "the mapping request failed", action: "Read the error code above; the daemon continues serving local and pinned roads.")
+        case .stopped:
+            return Finding(level: .wait, title: title, detail: "mapping deallocated when the daemon stopped")
+        }
+    }
+
+    static func processIsAlive(_ pid: Int32) -> Bool {
+        guard pid > 0 else { return false }
+        if kill(pid, 0) == 0 { return true }
+        return errno == EPERM
     }
 
     /// A config that will not parse deletes the dial too, and says so —
@@ -453,7 +547,7 @@ public enum HostCheck {
                 detail: "no usable address to derive from",
                 action: "Set meshEndpoint in config.json."
             )]
-        case .pinned:
+        case .pinned, .mapped:
             break
         }
 

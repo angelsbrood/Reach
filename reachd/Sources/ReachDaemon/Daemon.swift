@@ -38,6 +38,25 @@ public enum DaemonInfo {
 /// stands between an app and its certificate); revocation and the ledger
 /// are funded scope (M2).
 public final class Daemon: Sendable {
+    struct RoadAdvertisement: Sendable, Equatable {
+        var roads: [RoadEndpoint]
+        var legacyAddresses: [String]
+    }
+
+    static func roadAdvertisement(
+        localAddresses: [String],
+        port: UInt16,
+        mapped: RoadEndpoint?
+    ) -> RoadAdvertisement {
+        var roads = localAddresses.map { RoadEndpoint(host: $0, port: port) }
+        if let mapped, !roads.contains(mapped) { roads.append(mapped) }
+        var legacyAddresses = localAddresses
+        if let mapped, mapped.port == port, !legacyAddresses.contains(mapped.host) {
+            legacyAddresses.append(mapped.host)
+        }
+        return RoadAdvertisement(roads: roads, legacyAddresses: legacyAddresses)
+    }
+
     public struct ListenerIdentity: @unchecked Sendable {
         public let identity: SecIdentity
         public let caCertificate: SecCertificate
@@ -106,6 +125,7 @@ public final class Daemon: Sendable {
     private let registry: SessionRegistry
     private let tls: ListenerIdentity
     private let grants: GrantWiring?
+    private let reachability: ReachabilityCoordinator?
     private let state = StateBox()
 
     public init(
@@ -113,13 +133,15 @@ public final class Daemon: Sendable {
         filling: any SlotFilling,
         identity: ListenerIdentity,
         registry: SessionRegistry = SessionRegistry(),
-        grants: GrantWiring? = nil
+        grants: GrantWiring? = nil,
+        reachability: ReachabilityCoordinator? = nil
     ) {
         self.config = config
         self.filling = filling
         self.registry = registry
         self.tls = identity
         self.grants = grants
+        self.reachability = reachability
     }
 
     /// Starts listening (and advertising, unless disabled for tests).
@@ -140,6 +162,10 @@ public final class Daemon: Sendable {
         // for its port is exactly what a restart is, so this is the shape the
         // daemon meets most.
         try await listener.waitUntilReady()
+        // The system request is deliberately long-lived: it renews mappings
+        // and follows primary-network changes, calling us again whenever the
+        // assigned address or port moves.
+        reachability?.start()
         if advertise {
             // The CA-hash pin rides the TXT record: an identity-less app
             // reads it here and holds the enrollment channel to it.
@@ -180,6 +206,7 @@ public final class Daemon: Sendable {
     }
 
     public func stop() async {
+        reachability?.stop()
         await state.stop()
     }
 
@@ -274,12 +301,19 @@ public final class Daemon: Sendable {
         iterator: inout AsyncThrowingStream<RawFrame, Error>.AsyncIterator,
         version: UInt8
     ) async throws -> FrameEnding {
+        let localAddresses = LocalAddresses.ipv4().map { $0.map(String.init).joined(separator: ".") }
+        let advertisement = Self.roadAdvertisement(
+            localAddresses: localAddresses,
+            port: config.port,
+            mapped: reachability?.sessionEndpoint
+        )
         try await stream.send(HelloAck(
             version: version,
             cluster: config.clusterName,
             models: [ModelDescriptor(id: filling.modelID, displayName: filling.displayName, capabilities: filling.capabilities)],
-            addrs: LocalAddresses.ipv4().map { $0.map(String.init).joined(separator: ".") },
-            port: config.port
+            addrs: advertisement.legacyAddresses,
+            port: config.port,
+            roads: advertisement.roads
         ), for: version)
         // The admin device, once this stream proves it is one; grant events
         // ride back on this same stream while the loop keeps consuming.

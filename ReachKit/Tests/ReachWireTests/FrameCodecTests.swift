@@ -106,7 +106,11 @@ private func roundTrip<F: WireFrame>(_ frame: F) throws -> F {
             cluster: "studio",
             models: [ModelDescriptor(id: "gemma-3-1b", displayName: "Gemma 3 1B", capabilities: [])],
             addrs: ["192.168.8.104", "10.86.0.1"],
-            port: 47337
+            port: 47337,
+            roads: [
+                RoadEndpoint(host: "192.168.8.104", port: 47337),
+                RoadEndpoint(host: "198.51.100.8", port: 55001),
+            ]
         )
         #expect(try roundTrip(full) == full)
 
@@ -116,6 +120,7 @@ private func roundTrip<F: WireFrame>(_ frame: F) throws -> F {
         #expect(decoded == legacy)
         #expect(decoded.addrs == nil)
         #expect(decoded.port == nil)
+        #expect(decoded.roads == nil)
     }
 
     /// `SessionResume`/`SessionResumed` were round-tripped here and nowhere

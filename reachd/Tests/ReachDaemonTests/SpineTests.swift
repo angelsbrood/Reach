@@ -13,7 +13,7 @@ import Testing
 /// sentence minus the second machine.
 ///
 /// ⚠️ **Ports here are hand-picked literals and nothing checks them.** This
-/// suite owns 47414–47416 and 47418–47420. `.serialized` orders it against
+/// suite owns 47414–47416 and 47418–47422. `.serialized` orders it against
 /// itself only, so every other suite in this target runs concurrently with it
 /// and a clash surfaces as `ReachError.unreachable` — a *product* error about
 /// roads, which reads as a cold-start regression and is not one.
@@ -137,6 +137,43 @@ import Testing
 
         let session = LanguageModelSession(
             model: ReachLanguageModel(configuration: configuration),
+            instructions: "Scripted."
+        )
+        var final = ""
+        for try await snapshot in session.streamResponse(to: "Go.") {
+            final = snapshot.content
+        }
+        #expect(final == ScriptedFilling().words.joined())
+    }
+
+    /// The configured port and a mapped port are different facts. This starts
+    /// the daemon on one port, gives the cold client a dead primary on another,
+    /// and stores only an endpoint-specific road to the real listener.
+    @Test func aColdSessionUsesAStoredRoadOnADifferentPort() async throws {
+        let daemonPort = TestPorts.port(47421)
+        let deadPrimaryPort = TestPorts.port(47422)
+        let (daemon, original, discard) = try await startDaemon(
+            port: daemonPort,
+            host: "198.51.100.1",
+            connectTimeout: 5
+        )
+        defer { discard() }
+        defer { Task { await daemon.stop() } }
+
+        try ClusterRoads.save(
+            endpoints: [.init(host: "localhost", port: daemonPort)],
+            for: original.identityLabel
+        )
+        let cold = ReachExecutor.Configuration(
+            host: "198.51.100.1",
+            port: deadPrimaryPort,
+            modelID: original.modelID,
+            identityLabel: original.identityLabel,
+            connectTimeout: 5
+        )
+
+        let session = LanguageModelSession(
+            model: ReachLanguageModel(configuration: cold),
             instructions: "Scripted."
         )
         var final = ""
