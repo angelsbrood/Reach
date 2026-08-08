@@ -21,6 +21,56 @@ the decision. Kill criteria come from the pre-filing plan.
 | S15 | Does S14's completion repair survive probabilistic sampling? | **STOP / SAMPLING FAILED** (2026-08-08) — at temperature 0.2 the first four shapes accepted and decoded, but the exact adversarial shape's second run exhausted 512 legal tokens; the locked kill fired before permanent code, a fork pin or the higher-temperature arms |
 | S16 | Can requested sampling retain a deterministic hard-completion boundary? | **PASS** (2026-08-08) — all 36/36 accepted and decoded at 0.2, default 0.6 and 1.0; simple shapes sampled throughout, while the adversarial shape sampled 13–14 decisions before 129–156 hard-zone argmax decisions completed it |
 | S17 | Does S16's hybrid survive product acceptance beyond its four retained shapes? | **STOP / DECODE FAILED** (2026-08-08) — the installed schema-plus-tools path produced grammar-accepted JSON that FoundationModels could not decode; a deterministic `topP(1, seed: 29)` response reproduced an unbounded integer outside Swift `Int`, firing the locked decode kill and rolling back the fork and product changes |
+| S18 | Do decoder-compatible numeric grammars make S16's hybrid safe to ship? | **STOP / BUDGET FAILED** (2026-08-08) — exact signed-64-bit and finite-Double grammars passed in isolation and seed 29 decoded, but the unchanged adversarial schema exhausted 512 tokens at temperature 1.0 after 28/36 accepted matrix cases; no sampler or numeric fork ships |
+
+## S18 — typed numerics closed the overflow hole, not the completion cliff (2026-08-08)
+
+**Question and boundary.** The founder reopened sampling for one narrower
+mechanism: add decoder-compatible numeric grammar semantics, then rerun the
+exact S16 matrix without widening the S14 completion bias, adding a parser, or
+repairing output after generation. Any grammar, decode, or budget failure
+still stopped the pass.
+
+The isolated dependency prototype repaired the pinned converter's exact
+`Int64.min` negation and generated a Reach-opt-in finite IEEE-754 `Double`
+grammar. Four focused dependency tests passed in 0.722 s: both signed integer
+boundaries decoded, adjacent overflows and a 100-digit integer were rejected,
+ordinary decimal and scientific forms remained available, and Foundation's
+underflow/overflow cases (`2e-324`, `1e309`, and a value above the finite
+maximum) were rejected. Upstream xgrammar's ordinary unbounded `number`
+semantics remained unchanged. Reach's scratch schema normalization and
+sampling resolver then passed 7/7 and 5/5 focused tests respectively,
+including nested objects, arrays, optionals, `$defs`, explicit-bound
+precedence, default `0.6`, greedy precedence, top-k/top-p boundaries, and seed
+forwarding.
+
+The real-weight gate used the preserved S16 harness against cached
+`gemma-4-e2b`. The exact S17 `topP(1, seed: 29)` reproducer now completed and
+decoded:
+
+```json
+{"count":1234567890123456789,"name":"Alpha"}
+```
+
+The former hundreds-digit overflow was therefore closed. All 12 temperature
+`0.2` cases, all 12 default-`0.6` cases, and all four first-run temperature
+`1.0` cases accepted and decoded. The next case — temperature `1.0`, run 2,
+the exact adversarial nested pattern/range/fixed-array schema — then returned
+`the cluster could not finish the constrained response within its 512-token
+limit`. The 28 accepted matrix cases took 0.51–5.23 s after prewarm. An earlier
+diagnostic attempt had also ended with a typed-decode error before raw-output
+instrumentation; the instrumented rerun was commissioned only to attribute
+the stop and was not repeated after the independent budget failure fired it.
+
+**Verdict: STOP.** Type-safe numeric grammars are a valid, bounded mechanism:
+they solve S17's grammar-accepted `Int` overflow without a post-generation
+parser or arbitrary digit cap. They do not solve S15's independent fact that
+probabilistic choices can consume the budget before the grammar completes.
+The required S16 matrix was 28/36, not 36/36, so neither the sampler resolver
+nor the numeric dependency prototype returns to the product. The installed
+greedy daemon, wire dialect v0, public interfaces, CA material, and pushed
+dependency state were untouched. The sampler commits and numeric prototype
+remain unpublished scratch evidence; no upstream PR was opened.
 
 ## S17 — grammar acceptance is not typed acceptance (2026-08-08)
 

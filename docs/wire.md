@@ -341,8 +341,12 @@ v0; tool execution remains exclusively in the adopting app.
   legal tokens. S16's hybrid sampled normal/soft choices and completed the
   exact retained matrix 36/36 with hard-zone argmax, but S17 then produced a
   grammar-accepted integer outside Swift `Int` and failed the requested typed
-  decode at deterministic seed 29. The candidate was rolled back rather than
-  widened into a numeric parser or larger hand-tuned bias. The framework
+  decode at deterministic seed 29. S18 proved a bounded numeric grammar can
+  close that overflow hole: seed 29 decoded and exact integer/finite-Double
+  boundary tests passed. It still stopped when the unchanged adversarial
+  schema exhausted 512 tokens at temperature 1.0 after 28/36 matrix cases.
+  The candidate was rolled back rather than widened into a completion parser
+  or larger hand-tuned bias. The framework
   accessor, unconstrained wire-mode parity and constrained typed-completion
   problem remain separate follow-ons; none is described as on-device
   equivalence.
