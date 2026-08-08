@@ -1,5 +1,7 @@
 import Foundation
 import HuggingFace
+import MLX
+import MLXGuidedGeneration
 import MLXHuggingFace
 import MLXLLM
 import MLXLMCommon
@@ -71,7 +73,9 @@ public final class MLXFilling: SlotFilling {
     }
 
     public func prewarm() async throws {
-        _ = try await container.get(configuration: configuration)
+        let loaded = try await container.get(configuration: configuration)
+        let tokenizer = await loaded.tokenizer
+        try await container.prewarmGuidance(tokenizer: tokenizer)
     }
 
     public func generate(_ request: WireGenerationRequest) -> AsyncThrowingStream<WireEvent, Error> {
@@ -84,6 +88,7 @@ public final class MLXFilling: SlotFilling {
                 let messages = TranscriptChat.messages(from: request.transcript)
                 let maxTokens = request.options.maximumResponseTokens ?? 512
                 let temperature = request.options.temperature
+                let schemaJSON = try request.schema.map(ResponseGuidance.schemaJSON)
                 // Outside `perform`, because a tool whose schema will not
                 // render is a refusal to answer rather than an empty answer,
                 // and this is where the throw is still legible.
@@ -93,6 +98,142 @@ public final class MLXFilling: SlotFilling {
                 // a fresh id per call would scatter one turn across several.
                 let toolCallsEntryID = UUID().uuidString
 
+                if let schemaJSON {
+                    try await container.perform { context in
+                        let xgTokenizer: GrammarTokenizer
+                        let constraint: GrammarConstraint
+                        do {
+                            xgTokenizer = try await box.grammarTokenizer(
+                                tokenizer: context.tokenizer)
+                            constraint = try await box.constraint(
+                                schemaJSON: schemaJSON,
+                                tokenizer: xgTokenizer,
+                                hostTokenizer: context.tokenizer)
+                        } catch {
+                            throw ResponseGuidance.unsupported(error)
+                        }
+                        let bias = await box.tokenizerBias(tokenizer: context.tokenizer)
+
+                        // Deliberately identical to the established prompt
+                        // preparation below: schemas constrain the response,
+                        // not the input or the model's chat template.
+                        let chat: [Chat.Message] = try messages.map { message in
+                            switch message.role {
+                            case .system: return .system(message.text)
+                            case .user: return .user(message.text)
+                            case .tool:
+                                if case .output(let callID) = message.tool {
+                                    return .tool(message.text, id: callID)
+                                }
+                                return .tool(message.text)
+                            case .assistant:
+                                if case .calls(let calls) = message.tool {
+                                    return .assistant(
+                                        message.text,
+                                        toolCalls: try calls.map(Self.toolCall(from:))
+                                    )
+                                }
+                                return .assistant(message.text)
+                            }
+                        }
+                        let input = try await context.processor.prepare(
+                            input: UserInput(
+                                chat: chat,
+                                tools: tools,
+                                additionalContext: ["enable_thinking": false]
+                            )
+                        )
+
+                        // Tool arguments remain on the existing unconstrained
+                        // detector path. Prose is held back until the probe has
+                        // either produced a call or definitively has not: a
+                        // failed probe must not leak unconstrained response text
+                        // before the grammar-owned answer begins.
+                        if let tools {
+                            var parameters = GenerateParameters(maxTokens: maxTokens)
+                            if let temperature {
+                                parameters.temperature = Float(temperature)
+                            }
+                            var buffered = SchemaToolProbeBuffer()
+                            let probe = try MLXLMCommon.generate(
+                                input: input,
+                                parameters: parameters,
+                                context: context,
+                                tools: tools
+                            )
+                            for await event in probe {
+                                try Task.checkCancellation()
+                                switch event {
+                                case .chunk:
+                                    break
+                                case .info(let info):
+                                    buffered.appendUsage(.usage(
+                                        inputTokens: info.promptTokenCount,
+                                        outputTokens: info.generationTokenCount
+                                    ))
+                                case .toolCall(let call):
+                                    guard let arguments = Self.argumentsJSON(of: call) else {
+                                        continue
+                                    }
+                                    buffered.appendToolCall(.toolCallAppendArguments(
+                                        entryID: toolCallsEntryID,
+                                        id: call.id ?? UUID().uuidString,
+                                        name: call.function.name,
+                                        content: arguments,
+                                        tokenCount: 1
+                                    ))
+                                }
+                            }
+                            if let toolEvents = buffered.selectedToolEvents {
+                                for event in toolEvents { continuation.yield(event) }
+                                return
+                            }
+                        }
+
+                        let structuralReserve = CompletionReserve.estimate(
+                            schemaJSON: schemaJSON,
+                            tokenizer: context.tokenizer)
+                        let completionReserve = Swift.max(structuralReserve * 3, maxTokens / 4)
+                        let hardReserve = structuralReserve * 8
+                        let generatedTokenCount: Int
+                        do {
+                            generatedTokenCount = try GuidedGenerationLoop.run(
+                                input: input,
+                                context: context,
+                                constraint: constraint,
+                                maxTokens: maxTokens,
+                                vocabSize: xgTokenizer.vocabSize,
+                                completionReserve: completionReserve,
+                                hardReserve: hardReserve,
+                                closingBias: bias.closing,
+                                whitespaceBias: bias.whitespace,
+                                whitespaceTokenIDs: bias.whitespaceTokenIDs
+                            ) { text in
+                                continuation.yield(.responseAppend(
+                                    entryID: nil,
+                                    text: text,
+                                    segmentID: nil,
+                                    tokenCount: 1
+                                ))
+                                return !Task.isCancelled
+                            }
+                        } catch {
+                            throw ResponseGuidance.generationError(error, maxTokens: maxTokens)
+                        }
+                        try Task.checkCancellation()
+                        continuation.yield(.usage(
+                            inputTokens: input.text.tokens.size,
+                            outputTokens: generatedTokenCount
+                        ))
+                    }
+                    continuation.yield(.finished(.complete))
+                    continuation.finish()
+                    return
+                }
+
+                // No-schema requests remain on the established sampler and
+                // tool-call detector path. Keep this branch mechanically
+                // unchanged: response guidance must not alter ordinary asks.
                 let events = try await container.perform { context in
                     let chat: [Chat.Message] = try messages.map { message in
                         switch message.role {
@@ -172,6 +313,9 @@ public final class MLXFilling: SlotFilling {
                 }
                 continuation.yield(.finished(Task.isCancelled ? .cancelled : .complete))
                 continuation.finish()
+            } catch is CancellationError {
+                continuation.yield(.finished(.cancelled))
+                continuation.finish()
             } catch {
                 continuation.yield(.finished(.error("\(error)")))
                 continuation.finish()
@@ -207,13 +351,121 @@ public final class MLXFilling: SlotFilling {
 }
 
 /// One loaded model container shared across generations.
-private actor ContainerBox {
+actor ContainerBox {
     private var container: ModelContainer?
+    private var cachedGrammarTokenizer: GrammarTokenizer?
+    private var constraintTemplates: [String: GrammarConstraint] = [:]
+    private var guidanceBias: GuidanceBias?
+    private var guidanceStatistics = GuidanceCacheStatistics()
 
     func get(configuration: ModelConfiguration) async throws -> ModelContainer {
         if let container { return container }
         let loaded = try await #huggingFaceLoadModelContainer(configuration: configuration)
         container = loaded
         return loaded
+    }
+
+    /// Prewarm only model-wide grammar state. Request schemas remain lazy, so
+    /// prewarm never guesses a cache key no real generation will use.
+    func prewarmGuidance(tokenizer: any MLXLMCommon.Tokenizer) throws {
+        _ = try makeGrammarTokenizer(tokenizer: tokenizer)
+    }
+
+    func grammarTokenizer(tokenizer: any MLXLMCommon.Tokenizer) throws -> GrammarTokenizer {
+        try makeGrammarTokenizer(tokenizer: tokenizer)
+    }
+
+    func constraint(
+        schemaJSON: String,
+        tokenizer: GrammarTokenizer,
+        hostTokenizer: any MLXLMCommon.Tokenizer
+    ) throws -> GrammarConstraint {
+        if let template = constraintTemplates[schemaJSON] {
+            do {
+                return try template.clone()
+            } catch {
+                // The pinned xgrammar exposes Fork through the Swift surface
+                // but can report it unavailable at runtime. A failed clone is
+                // never reused: discard it and compile a fresh matcher.
+                guidanceStatistics.constraintCloneFailures += 1
+                constraintTemplates.removeValue(forKey: schemaJSON)
+            }
+        }
+
+        guidanceStatistics.constraintCompiles += 1
+        let constraint = try GrammarConstraint(
+            tokenizer: tokenizer,
+            jsonSchema: schemaJSON,
+            fastForward: true,
+            hostTokenizer: hostTokenizer
+        )
+        do {
+            let clone = try constraint.clone()
+            constraintTemplates[schemaJSON] = constraint
+            return clone
+        } catch {
+            guidanceStatistics.constraintCloneFailures += 1
+        }
+        return constraint
+    }
+
+    func tokenizerBias(tokenizer: any MLXLMCommon.Tokenizer) -> GuidanceBias {
+        makeTokenizerBias(tokenizer: tokenizer)
+    }
+
+    func guidanceCacheStatistics() -> GuidanceCacheStatistics {
+        guidanceStatistics
+    }
+
+    private func makeGrammarTokenizer(
+        tokenizer: any MLXLMCommon.Tokenizer
+    ) throws -> GrammarTokenizer {
+        if let cachedGrammarTokenizer { return cachedGrammarTokenizer }
+        guidanceStatistics.tokenizerBuilds += 1
+        let vocab = TokenizerVocabExtractor.extractForGrammar(from: tokenizer)
+        let made = try GrammarTokenizer(
+            vocab: vocab.vocab,
+            vocabType: vocab.vocabType,
+            eosTokenId: Int32(tokenizer.eosTokenId ?? 0)
+        )
+        cachedGrammarTokenizer = made
+        return made
+    }
+
+    private func makeTokenizerBias(tokenizer: any MLXLMCommon.Tokenizer) -> GuidanceBias {
+        if let guidanceBias { return guidanceBias }
+        guidanceStatistics.biasBuilds += 1
+        let closing = ClosingTokenBias.compute(
+            tokenizer: tokenizer,
+            eosTokenId: tokenizer.eosTokenId)
+        let whitespace = WhitespaceTokenBias.compute(tokenizer: tokenizer)
+        let made = GuidanceBias(
+            closing: closing,
+            whitespace: whitespace.bias,
+            whitespaceTokenIDs: whitespace.tokenIDs)
+        guidanceBias = made
+        return made
+    }
+}
+
+struct GuidanceCacheStatistics: Sendable, Equatable {
+    var tokenizerBuilds = 0
+    var biasBuilds = 0
+    var constraintCompiles = 0
+    var constraintCloneFailures = 0
+}
+
+/// Tokenizer-derived arrays are immutable after construction and are only
+/// added to logits by the generation loop. The unchecked conformance matches
+/// the engine's own GrammarTokenizer/GrammarConstraint cache boundary.
+final class GuidanceBias: @unchecked Sendable {
+    let closing: MLXArray
+    let whitespace: MLXArray
+    let whitespaceTokenIDs: Set<Int>
+
+    init(closing: MLXArray, whitespace: MLXArray, whitespaceTokenIDs: Set<Int>) {
+        self.closing = closing
+        self.whitespace = whitespace
+        self.whitespaceTokenIDs = whitespaceTokenIDs
     }
 }

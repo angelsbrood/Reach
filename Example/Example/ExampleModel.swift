@@ -13,6 +13,14 @@ import ReachWire
 /// the sheet appears on the keeper.
 @Observable @MainActor
 final class ExampleModel {
+    /// Launch-environment-only acceptance shape. It is intentionally absent
+    /// from the normal UI and does not replace the filmed prompt below.
+    @Generable
+    struct GuidedAcceptanceProbe {
+        var name: String
+        var count: Int
+    }
+
     enum IdentityState: Equatable {
         case missing
         /// nil when the identity reloaded but the cluster's name could not be
@@ -160,6 +168,22 @@ final class ExampleModel {
             let wantsDiscovered = host == "127.0.0.1"
             if wantsDiscovered { await awaitDiscovery() }
             let service = wantsDiscovered ? clusters.first?.name : nil
+            if ProcessInfo.processInfo.environment["REACH_GUIDED_PROBE"] == "1" {
+                let configuration = ReachExecutor.Configuration(
+                    serviceName: service,
+                    host: host,
+                    modelID: modelID,
+                    identityLabel: Self.identityLabel
+                )
+                let model = ReachLanguageModel(configuration: configuration)
+                do {
+                    try await runGuidedAcceptanceProbe(model: model)
+                } catch {
+                    status = "failed: \(error)"
+                    print("[example] failed: \(error)")
+                }
+                return
+            }
             // The tool flag belongs in the key: offering a tool changes the
             // rendered template, so a session built without one cannot be
             // reused after the switch is thrown.
@@ -210,6 +234,31 @@ final class ExampleModel {
         }
     }
 
+    /// Three deliberately hostile asks against the installed daemon. The
+    /// prompt orders plain prose while `includeSchemaInPrompt` is false, so a
+    /// completed typed stream proves the wire schema and grammar — not prompt
+    /// coaching — won. Normal launches never call this.
+    private func runGuidedAcceptanceProbe(model: ReachLanguageModel) async throws {
+        var report: [String] = []
+        for run in 1 ... 3 {
+            let session = LanguageModelSession(model: model)
+            let stream = session.streamResponse(
+                to: "Reply only with the plain words absolutely not JSON.",
+                generating: GuidedAcceptanceProbe.self,
+                includeSchemaInPrompt: false,
+                options: GenerationOptions(maximumResponseTokens: 512))
+            var snapshots = 0
+            for try await _ in stream { snapshots += 1 }
+            guard snapshots > 1 else {
+                throw ExampleError.guidedProbeDidNotStream(run: run, snapshots: snapshots)
+            }
+            report.append("run \(run): \(snapshots) snapshots")
+            print("[example-guided] run=\(run) snapshots=\(snapshots) decoded=yes")
+        }
+        output = report.joined(separator: "\n")
+        status = "guided probe passed 3/3"
+    }
+
     /// The app half of the grant ceremony, run at most once: reload what a
     /// prior enrollment stored, else knock at the discovered cluster's
     /// grant door and wait for the keeper's ruling.
@@ -258,8 +307,14 @@ final class ExampleModel {
 
     enum ExampleError: LocalizedError {
         case noGrantDoor
+        case guidedProbeDidNotStream(run: Int, snapshots: Int)
         var errorDescription: String? {
-            "No cluster advertising a grant door was found — is reachd serving?"
+            switch self {
+            case .noGrantDoor:
+                "No cluster advertising a grant door was found — is reachd serving?"
+            case .guidedProbeDidNotStream(let run, let snapshots):
+                "Guided probe run \(run) produced \(snapshots) snapshots; expected a streamed response."
+            }
         }
     }
 }

@@ -19,6 +19,41 @@ import Testing
 /// `ReachError.unreachable` — which reads like a real cold-start failure. The
 /// gate that hid it is also what would have made it hardest to believe.
 @Suite(.serialized) struct MLXIntegrationTests {
+    @Generable
+    struct GuidedTwoField {
+        var name: String
+        var count: Int
+    }
+
+    @Generable
+    struct GuidedNested {
+        var result: GuidedTwoField
+    }
+
+    @Generable
+    enum GuidedColor {
+        case red
+        case green
+        case blue
+    }
+
+    @Generable
+    struct GuidedEnum {
+        var color: GuidedColor
+    }
+
+    @Generable
+    struct GuidedFixedArray {
+        @Guide(.count(3))
+        var values: [Int]
+    }
+
+    @Generable
+    struct GuidedOptional {
+        var title: String
+        var subtitle: String?
+    }
+
     @Test(
         .enabled(if: ProcessInfo.processInfo.environment["REACH_MLX_TESTS"] == "1",
                  "MLX metallib is only locatable in executable layouts; run `reachd selftest --mlx` or set REACH_MLX_TESTS=1 under Xcode"),
@@ -63,14 +98,14 @@ import Testing
             label: label,
             material: .init(identity: clientIdentity, caCertificate: caCert)
         )
+        let modelConfiguration = ReachExecutor.Configuration(
+            host: "127.0.0.1",
+            port: TestPorts.port(47470),
+            modelID: "gemma-4-e2b",
+            identityLabel: label,
+            connectTimeout: 45)
         let session = LanguageModelSession(
-            model: ReachLanguageModel(configuration: ReachExecutor.Configuration(
-                host: "127.0.0.1",
-                port: TestPorts.port(47470),
-                modelID: "gemma-4-e2b",
-                identityLabel: label,
-                connectTimeout: 45
-            )),
+            model: ReachLanguageModel(configuration: modelConfiguration),
             instructions: "You are terse."
         )
         let clock = ContinuousClock()
@@ -87,5 +122,57 @@ import Testing
         print("[mlx-spine] first snapshot \(firstSnapshot.map(String.init(describing:)) ?? "-"), \(snapshots) snapshots, final: \(final)")
         #expect(!final.isEmpty)
         #expect(snapshots > 1, "expected token-by-token streaming, got a single snapshot")
+
+        // The same real listener and session now exercise the response-schema
+        // path. Completion of each typed stream is the framework's decode
+        // assertion: malformed or schema-incomplete JSON throws before it can
+        // finish as that Generable type. `includeSchemaInPrompt: false` makes
+        // the grammar, rather than prompt coaching, carry the guarantee.
+        for run in 1 ... 3 {
+            try await assertGuided(
+                GuidedTwoField.self,
+                prompt: "Return a short name and the integer 7.",
+                label: "two-field[\(run)]",
+                configuration: modelConfiguration)
+            try await assertGuided(
+                GuidedNested.self,
+                prompt: "Return a nested result with a short name and integer count.",
+                label: "nested[\(run)]",
+                configuration: modelConfiguration)
+            try await assertGuided(
+                GuidedEnum.self,
+                prompt: "Choose blue.",
+                label: "enum[\(run)]",
+                configuration: modelConfiguration)
+            try await assertGuided(
+                GuidedFixedArray.self,
+                prompt: "Return exactly three small integers.",
+                label: "fixed-array[\(run)]",
+                configuration: modelConfiguration)
+            try await assertGuided(
+                GuidedOptional.self,
+                prompt: "Return a title; omit the optional subtitle.",
+                label: "optional[\(run)]",
+                configuration: modelConfiguration)
+        }
+    }
+
+    private func assertGuided<Value: Generable>(
+        _ type: Value.Type,
+        prompt: String,
+        label: String,
+        configuration: ReachExecutor.Configuration
+    ) async throws {
+        let session = LanguageModelSession(
+            model: ReachLanguageModel(configuration: configuration))
+        let stream = session.streamResponse(
+            to: prompt,
+            generating: type,
+            includeSchemaInPrompt: false,
+            options: GenerationOptions(maximumResponseTokens: 512))
+        var snapshots = 0
+        for try await _ in stream { snapshots += 1 }
+        print("[mlx-guided] \(label) snapshots=\(snapshots)")
+        #expect(snapshots > 1, "\(label) should stream multiple typed snapshots")
     }
 }

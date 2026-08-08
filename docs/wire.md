@@ -293,15 +293,40 @@ types need hand mirrors: `WireGenerationOptions`, `WireContextOptions` and
 not a design: when the framework core open-sources, the mirrors are deleted and
 native conformances take their place.
 
+When `schema` is present, reachd deterministically encodes the native
+`GenerationSchema` as sorted-key JSON Schema and compiles it before sampling.
+Unsupported encodings or grammar constructs are refused — never retried
+unconstrained — with `the cluster could not constrain this response to the
+requested schema: …`, followed by the engine's nonempty reason. Accepted
+grammar deltas cross as the existing `responseAppend` events; reachd derives
+usage from the prepared input and accepted output tokens, and reports
+`.complete` only after the grammar accepts the response. Exhausting the
+request's token budget is an error rather than successful incomplete JSON.
+Requests without a schema stay on the established sampler unchanged.
+
+If a request contains both a response schema and tools, the existing
+unconstrained tool detector gets the first opportunity while its prose is
+buffered. A tool call crosses exactly as before; if there is no call, the
+probe's prose is discarded and a fresh grammar-constrained response streams.
+This ordering constrains the response without pretending that tool arguments
+or `.required` are already constrained.
+
 ## Named seams (v0, deliberate)
 
 - **Sampling mode is lossy.** `GenerationOptions.SamplingMode` exposes no
   public read accessor — the `Kind` enum exists but nothing returns it. Greedy
   survives because it is detectable through `Equatable`; every other mode rides
-  as `nil` and the host applies its own defaults. Feedback-worthy upstream, and
+  as `nil` and the host applies its own defaults. The constrained response path
+  is also currently greedy: its grammar controls which tokens are legal, not
+  the fidelity of how a legal token is sampled. Feedback-worthy upstream, and
   resolved by the same rebase.
 - **Request `metadata` is dropped.** Its values are existential
   `Sendable & Codable & Equatable`, which JSON coding cannot carry generically.
+- **Structured partial snapshots do not cross the wire.** The daemon streams
+  accepted JSON text deltas and FoundationModels derives its current typed
+  snapshots locally; the wire has no structured patch or partial-value event.
+  Making those snapshots explicit is named M3 follow-on work, not part of
+  response-schema enforcement.
 - **Tool arguments arrive whole, not streamed.** Response text still streams
   token by token; a call's arguments cross in one `toolCallAppendArguments`.
   This is what the grammar forces rather than a shortcut: the slot model's

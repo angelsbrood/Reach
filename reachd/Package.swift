@@ -57,6 +57,7 @@ let package = Package(
                 .product(name: "MLXLLM", package: "mlx-swift-lm"),
                 .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
                 .product(name: "MLXHuggingFace", package: "mlx-swift-lm"),
+                .product(name: "MLXGuidedGeneration", package: "mlx-swift-lm"),
                 .product(name: "Transformers", package: "swift-transformers"),
                 .product(name: "HuggingFace", package: "swift-huggingface"),
                 .product(name: "X509", package: "swift-certificates"),
@@ -70,6 +71,8 @@ let package = Package(
                 "ReachDaemon",
                 .product(name: "ReachKit", package: "ReachKit"),
                 .product(name: "ReachWire", package: "ReachKit"),
+                .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
+                .product(name: "MLXGuidedGeneration", package: "mlx-swift-lm"),
             ]
         ),
     ]

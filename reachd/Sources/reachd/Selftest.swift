@@ -74,11 +74,19 @@ struct Selftest: AsyncParsableCommand {
             return
         }
         let clock = ContinuousClock()
+        let runLabel = "selftest-\(UUID().uuidString)"
         let ca = try ClusterCA.create(commonName: "Reach Selftest CA")
         let server = try ca.issueServer(commonName: "localhost", dnsNames: ["localhost"], ipAddresses: [[127, 0, 0, 1]])
         let client = try ca.issueClient(commonName: "selftest", uri: "reach://device/selftest")
-        let serverIdentity = try IdentityMaterializer.materialize(server, label: "reach-selftest-server")
-        let clientIdentity = try IdentityMaterializer.materialize(client, label: "reach-selftest-client")
+        let serverIdentity = try IdentityMaterializer.materialize(
+            server, label: "reach-\(runLabel)-server")
+        let clientIdentity = try IdentityMaterializer.materialize(
+            client, label: "reach-\(runLabel)-client")
+        defer {
+            KeychainIdentity.remove(identity: serverIdentity)
+            KeychainIdentity.remove(identity: clientIdentity)
+            try? ClusterRoads.forget(for: runLabel)
+        }
         let caCert = try IdentityStore.certificate(fromDER: ca.certificateDER())
 
         let filling: any SlotFilling = mlx ? MLXFilling(modelID: model) : SelftestFilling()
@@ -98,11 +106,15 @@ struct Selftest: AsyncParsableCommand {
         }
 
         await ReachIdentityRegistry.shared.register(
-            label: "selftest",
+            label: runLabel,
             material: .init(identity: clientIdentity, caCertificate: caCert)
         )
         if tools {
-            try await runToolExchange(port: port, modelID: filling.modelID, clock: clock)
+            try await runToolExchange(
+                port: port,
+                modelID: filling.modelID,
+                identityLabel: runLabel,
+                clock: clock)
             await daemon.stop()
             return
         }
@@ -112,7 +124,7 @@ struct Selftest: AsyncParsableCommand {
                 host: "127.0.0.1",
                 port: port,
                 modelID: filling.modelID,
-                identityLabel: "selftest",
+                identityLabel: runLabel,
                 connectTimeout: 45
             )),
             instructions: "You are terse."
@@ -133,14 +145,103 @@ struct Selftest: AsyncParsableCommand {
             print("SELFTEST: FAIL (empty or non-streaming)")
             throw ExitCode.failure
         }
+        if mlx {
+            try await runGuidedExchange(
+                port: port,
+                modelID: filling.modelID,
+                identityLabel: runLabel)
+        }
         print(mlx ? "SELFTEST (mlx spine): PASS" : "SELFTEST (scripted spine): PASS")
         await daemon.stop()
+    }
+
+    /// Real-weight response-schema acceptance in the executable layout where
+    /// MLX can load its metallib. Each typed stream runs three times with no
+    /// schema prose in the prompt; successful completion is FoundationModels'
+    /// decode assertion, not a hand-written JSON parse.
+    private func runGuidedExchange(
+        port: UInt16,
+        modelID: String,
+        identityLabel: String
+    ) async throws {
+        for run in 1 ... 3 {
+            try await assertGuided(
+                SelftestGuidedTwoField.self,
+                prompt: "Return a short name and integer count.",
+                label: "two-field[\(run)]",
+                port: port,
+                modelID: modelID,
+                identityLabel: identityLabel)
+            try await assertGuided(
+                SelftestGuidedNested.self,
+                prompt: "Return a nested result with a short name and integer count.",
+                label: "nested[\(run)]",
+                port: port,
+                modelID: modelID,
+                identityLabel: identityLabel)
+            try await assertGuided(
+                SelftestGuidedEnum.self,
+                prompt: "Choose blue.",
+                label: "enum[\(run)]",
+                port: port,
+                modelID: modelID,
+                identityLabel: identityLabel)
+            try await assertGuided(
+                SelftestGuidedFixedArray.self,
+                prompt: "Return exactly three small integers.",
+                label: "fixed-array[\(run)]",
+                port: port,
+                modelID: modelID,
+                identityLabel: identityLabel)
+            try await assertGuided(
+                SelftestGuidedOptional.self,
+                prompt: "Return a title and omit the optional subtitle.",
+                label: "optional[\(run)]",
+                port: port,
+                modelID: modelID,
+                identityLabel: identityLabel)
+        }
+        print("SELFTEST (guided schemas): PASS 15/15")
+    }
+
+    private func assertGuided<Value: Generable>(
+        _ type: Value.Type,
+        prompt: String,
+        label: String,
+        port: UInt16,
+        modelID: String,
+        identityLabel: String
+    ) async throws {
+        let session = LanguageModelSession(
+            model: ReachLanguageModel(configuration: ReachExecutor.Configuration(
+                host: "127.0.0.1",
+                port: port,
+                modelID: modelID,
+                identityLabel: identityLabel,
+                connectTimeout: 45)))
+        let stream = session.streamResponse(
+            to: prompt,
+            generating: type,
+            includeSchemaInPrompt: false,
+            options: GenerationOptions(maximumResponseTokens: 512))
+        var snapshots = 0
+        for try await _ in stream { snapshots += 1 }
+        print("[selftest-guided] \(label) snapshots=\(snapshots) decoded=yes")
+        guard snapshots > 1 else {
+            print("SELFTEST (guided schemas): FAIL (\(label) did not stream)")
+            throw ExitCode.failure
+        }
     }
 
     /// A real session, a real tool, real weights behind the wire. What is
     /// being measured is the model's willingness to call — everything between
     /// the app and the slot is already held by tests that need no weights.
-    private func runToolExchange(port: UInt16, modelID: String, clock: ContinuousClock) async throws {
+    private func runToolExchange(
+        port: UInt16,
+        modelID: String,
+        identityLabel: String,
+        clock: ContinuousClock
+    ) async throws {
         var called = 0
         var timezones: [String] = []
         var prose: [String] = []
@@ -152,7 +253,7 @@ struct Selftest: AsyncParsableCommand {
                     host: "127.0.0.1",
                     port: port,
                     modelID: modelID,
-                    identityLabel: "selftest",
+                    identityLabel: identityLabel,
                     connectTimeout: 45
                 )),
                 tools: [SelftestClock(ledger: ledger)],
@@ -194,6 +295,41 @@ struct Selftest: AsyncParsableCommand {
         // is model-agnostic. A call that came back mangled is the other thing.
         print(called > 0 ? "SELFTEST (tools): CALLED \(called)/\(max(1, runs))" : "SELFTEST (tools): NO CALL in \(max(1, runs))")
     }
+}
+
+@Generable
+private struct SelftestGuidedTwoField {
+    var name: String
+    var count: Int
+}
+
+@Generable
+private struct SelftestGuidedNested {
+    var result: SelftestGuidedTwoField
+}
+
+@Generable
+private enum SelftestGuidedColor {
+    case red
+    case green
+    case blue
+}
+
+@Generable
+private struct SelftestGuidedEnum {
+    var color: SelftestGuidedColor
+}
+
+@Generable
+private struct SelftestGuidedFixedArray {
+    @Guide(.count(3))
+    var values: [Int]
+}
+
+@Generable
+private struct SelftestGuidedOptional {
+    var title: String
+    var subtitle: String?
 }
 
 /// What the app's tool was actually asked, recorded rather than inferred.

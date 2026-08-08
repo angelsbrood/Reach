@@ -81,6 +81,9 @@ import Testing
             tool: "current_time",
             reason: "its parameters did not encode as a JSON object"
         ),
+        ResponseGuidanceError.schemaUnsupported(reason: "unknown JSON Schema keyword"),
+        ResponseGuidanceError.incompleteOutput(maxTokens: 64),
+        ResponseGuidanceError.generationFailed(reason: "the model ended too early"),
         // The operator's terminal, at the one moment they can still act.
         ServiceError.buildPath("/Users/x/Library/Caches/reach-spm/reachd/out/Products/Debug/reachd"),
         ServiceError.notExecutable("/usr/local/bin/reachd"),

@@ -14,6 +14,65 @@ the decision. Kill criteria come from the pre-filing plan.
 | S6 | How does the framework's session drive a tool round trip through a third-party executor? | **PASS** (2026-08-05) — the transcript loop, and it is forced: the channel is send-only, so no `respond` call can receive tool output. `capabilities` is a hard gate, not a label |
 | S7 | Does the slot model emit tool calls the host can parse? | **PASS** (2026-08-05) — `gemma-4-e4b` 5/5, ~0.85 s per round trip; MLX parses the call itself, and the grammar has no escaping, which is why arguments cross whole |
 | S10 | What does a pre-negotiation peer actually survive? | **PASS** (2026-08-08) — unknown optional JSON keys tolerated 3/3; unknown type 255 fatal 3/3; authenticated and enrollment ALPN mismatches each ended in opaque `stream open timeout` 3/3 |
+| S11 | What does a real `@Generable` response do before the daemon honors its schema? | **FAIL / FUNCTION GAP** (2026-08-08) — all six shapes, three runs each with prompt schema on and off, were refused by FoundationModels before the executor ran: 36/36 exact `unsupportedCapability`; no schema or transcript crossed the wire |
+| S12 | Can the pinned grammar engine constrain FoundationModels schemas within the warmed latency gate? | **PASS** (2026-08-08) — five schema shapes compiled; warmed first accepted delta 30–39 ms; xgrammar 0.1.30 cannot fork, so the required fresh-compile fallback costs ~13 ms for the two-field schema and ~120–135 ms for the adversarial benchmark |
+
+## S11 — the framework refused the missing capability (2026-08-08)
+
+Measured before changing the model capability or daemon, with real
+`gemma-4-e4b` weights and the same loopback spine as the tool-call spike. Six
+`@Generable` shapes — two fields, nesting, enum, fixed-length array, optional,
+and an adversarial prose-vs-JSON ask — each ran three times with
+`includeSchemaInPrompt` both `true` and `false`.
+
+- All **36/36** attempts stopped in FoundationModels with the exact sentence
+  `The selected model does not support guided generation. Consider trying
+  again with a different model.`
+- The executor was never invoked. Consequently no transcript, transmitted
+  schema, stream, or final decode existed to compare; prompt-schema inclusion
+  made no difference.
+- The cause was `ReachLanguageModel.capabilities` declaring only
+  `.toolCalling`. The prior behavior was therefore a **function gap**, not a
+  sampling-fidelity gap disguised by prompt coaching.
+
+This is the retained before-state. Declaring `.guidedGeneration` is valid only
+with a working constrained path behind it, which is why capability and engine
+support land in the same change.
+
+## S12 — the pinned grammar engine's real surface (2026-08-08)
+
+Measured in release configuration against the repository's exact
+`mlx-swift-lm` checkout `83f3ef6dc5bc24daeea33cfd9e18ab1383bb0bc8`,
+using the checked-out source and executable-layout metallibs. The engine takes
+JSON Schema directly, constructs its own grammar tokenizer from the model
+vocabulary, computes an allowed-token mask each step, supports fast-forwarded
+forced text, and accepts deltas while its matcher advances.
+
+- Model load was **3,481.70 ms**, including a first Metal warm-up of
+  **1,495.17 ms**. Vocabulary extraction was **70.16 ms** and the one-time
+  grammar-tokenizer build **91.78 ms** for 262,144 tokens.
+- First compilation was **14.53 ms** for two fields, **14.15 ms** nested,
+  **0.34 ms** enum, **0.36 ms** fixed array and **13.83 ms** optional. The
+  larger adversarial benchmark compiled in **119.98 ms**.
+- `GrammarConstraint.clone()` itself returned in **0.002–0.004 ms**, but the
+  pinned xgrammar then failed exactly with
+  `forkFailed("xg_matcher_fork: Fork() not available in xgrammar v0.1.30")`.
+  Fresh compilation is therefore the honest per-request isolation path:
+  **13.3–13.6 ms** for the exact two-field FoundationModels schema and
+  **120.12–134.76 ms** for the adversarial benchmark.
+- The exact two-field schema reached its first accepted delta in
+  **38.94 / 30.35 / 30.32 ms** over three warm runs and completed 19 tokens in
+  **216–226 ms** (**84–87.7 tok/s**). The adversarial benchmark reached its
+  first delta in **95.71 / 31.80 / 32.41 ms** and completed 31 tokens in
+  **510.44 / 387.40 / 382.50 ms** (**60.73–81.05 tok/s**).
+
+The warmed first-token addition is safely below the one-second re-ruling gate.
+The implementation therefore keeps one model grammar tokenizer and bias set,
+keys compiled templates by deterministic schema JSON, asks for a fresh clone,
+and recompiles when this pinned fork is unavailable. It also retains the
+adapter's completion reserve, hard reserve, closing bias and whitespace bias.
+The current guided loop chooses the highest permitted token, so sampling-mode
+fidelity remains a separate seam even though schema conformance is now exact.
 
 ## S10 — what an old peer actually survives (2026-08-08)
 

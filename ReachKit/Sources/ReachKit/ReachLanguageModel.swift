@@ -21,9 +21,11 @@ public struct ReachLanguageModel: FoundationModels.LanguageModel {
         // the daemon actually serving them — an app told the tools are
         // supported and then quietly ignored is worse off than one refused.
         //
-        // Guided generation and vision stay undeclared: funded scope, and
-        // declaring either would take away the same honest refusal.
-        LanguageModelCapabilities([.toolCalling])
+        // Response schemas are served by the daemon's grammar-constrained
+        // path. Vision stays undeclared: declaring it would take away the
+        // framework's honest refusal without a daemon implementation behind
+        // the claim.
+        LanguageModelCapabilities([.guidedGeneration, .toolCalling])
     }
 
     public init(configuration: ReachExecutor.Configuration) {
