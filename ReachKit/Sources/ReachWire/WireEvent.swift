@@ -7,8 +7,9 @@ public enum WireEvent: Codable, Sendable, Equatable {
     case responseAppend(entryID: String?, text: String, segmentID: String?, tokenCount: Int)
     case responseReplace(entryID: String?, text: String, segmentID: String?, tokenCount: Int)
     case reasoningAppend(entryID: String?, text: String, segmentID: String?, tokenCount: Int)
-    /// Reserved for tool round-trips (funded scope); the daemon never emits
-    /// it in v0.
+    /// One complete, grammar-constrained tool argument object. The daemon
+    /// emits whole calls because the pinned native processor exposes no safe
+    /// incremental argument surface.
     case toolCallAppendArguments(entryID: String?, id: String, name: String, content: String, tokenCount: Int)
     case usage(inputTokens: Int, outputTokens: Int)
     case finished(WireFinishReason)

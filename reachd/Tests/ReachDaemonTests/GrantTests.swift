@@ -145,6 +145,9 @@ import X509
         /// The app is gone after the grant (suspended, killed, uninstalled) and
         /// never confirms at all. Deterministic, unlike the race above.
         case vanish
+        /// The app received the grant but explicitly says it could not retain
+        /// the identity. The ruling must remain collectable by the same key.
+        case decline
     }
 
     /// The app ceremony: begins, proves the key, and stays parked until
@@ -175,9 +178,9 @@ import X509
         let grant = try grantRaw.decode(AppEnrollGrant.self)
         if closing == .vanish { return .granted(grant, appKey: appKey) }
 
-        try await stream.send(EnrollComplete(ok: true))
+        try await stream.send(EnrollComplete(ok: closing != .decline))
         stream.finishSending()
-        if closing == .confirm {
+        if closing == .confirm || closing == .decline {
             // Wait for the cluster's own FIN — the daemon sends nothing after
             // the grant and half-closes only once it has read the confirmation,
             // so EOF here IS the acknowledgement. Mirrors `ReachEnrollment`;
@@ -420,6 +423,52 @@ import X509
             slowestGoodbye < .milliseconds(500),
             "the slowest ruling-to-granted was \(slowestGoodbye) — the cluster's FIN is not arriving"
         )
+    }
+
+    @Test func aFalseAppCompletionKeepsTheRulingForTheSameKeysNextKnock() async throws {
+        let fixture = try await makeFixture(
+            sessionPort: TestPorts.port(47462),
+            enrollPort: TestPorts.port(47463)
+        )
+        defer { fixture.cleanup() }
+
+        let keeper = try await enrollDevice(fixture, name: "keeper-phone")
+        var (control, controlFrames) = try await openControl(fixture, identity: keeper.identity)
+        defer { control.cancel() }
+        try await control.send(GrantSubscribe())
+
+        let appKey = SigningKey.mint()
+        let first = Task {
+            try await appEnroll(
+                fixture,
+                bundleID: "systems.reach.declined",
+                name: "Declined",
+                appKey: appKey,
+                closing: .decline
+            )
+        }
+        let event = try (try #require(try await controlFrames.next())).decode(GrantEvent.self)
+        try await control.send(GrantRule(requestID: event.requestID, allow: true))
+        guard case .granted = try await first.value else {
+            Issue.record("the first grant never reached the app")
+            return
+        }
+
+        #expect(await fixture.desk.footprint.ruled == 1)
+
+        // No second ruling: the same key collects the held verdict and a true
+        // completion then clears it.
+        let second = try await appEnroll(
+            fixture,
+            bundleID: "systems.reach.declined",
+            name: "Declined",
+            appKey: appKey
+        )
+        guard case .granted = second else {
+            Issue.record("the held verdict was not collectable after ok=false")
+            return
+        }
+        #expect(await fixture.desk.footprint.ruled == 0)
     }
 
     /// The other ending, and the one the daemon promises in writing: *"the

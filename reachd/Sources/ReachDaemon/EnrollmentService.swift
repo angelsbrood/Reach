@@ -420,7 +420,15 @@ public struct EnrollmentService: Sendable {
                 return
             }
             try completeRaw.requireSupported(by: version)
-            _ = try completeRaw.decode(EnrollComplete.self)
+            guard try completeRaw.decode(EnrollComplete.self).ok else {
+                // The app says it did not retain the granted identity. Keep
+                // the ruling exactly as an interrupted delivery does, so the
+                // same key can collect it on its next knock; do not print the
+                // success line for a grant its recipient rejected.
+                Log.error("app enrollment declined by \(begin.bundleID) after the grant: it could not hold the certificate; the ruling stays parked for its next knock")
+                stream.cancel()
+                return
+            }
             // Only a confirmed delivery clears the held verdict — anything
             // short of EnrollComplete leaves it for the app's next knock.
             await desk.collected(fingerprint)

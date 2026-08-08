@@ -302,7 +302,7 @@ grammar deltas cross as the existing `responseAppend` events; reachd derives
 usage from the prepared input and accepted output tokens, and reports
 `.complete` only after the grammar accepts the response. Exhausting the
 request's token budget is an error rather than successful incomplete JSON.
-Requests without a schema stay on the established sampler unchanged.
+Requests without a schema use the unconstrained sampler described below.
 
 Every offered tool schema is deterministically encoded and compiled before
 sampling. The grammar is a model-format-neutral strict JSON envelope,
@@ -328,15 +328,52 @@ summed, cancellation remains cancellation, and `.complete` follows only after
 every selected grammar accepts. None of this adds a frame or changes dialect
 v0; tool execution remains exclusively in the adopting app.
 
+## Crossing-value audit
+
+The v0 surface was audited field by field on 8 August 2026. Every encoded
+value has one of three outcomes: **HONORED** at the receiving side, **NAMED**
+here as an intentional compatibility or product seam, or **GRADUATED** into a
+separate design problem. Nothing was removed: required v0 keys remain encoded
+for old peers, and the optional context keys remain public intent rather than
+dead storage.
+
+| Crossing surface | Verdict |
+|---|---|
+| `Hello.versions`; `HelloAck.version`, `cluster`, `addrs`, `port`, `roads`; `RoadEndpoint.host`, `port` | **HONORED** — dialect selection, authenticated cluster identity, and endpoint-specific road refresh |
+| `SessionOpened.sessionID`, `token`, `capabilities` | **HONORED** — generation identity/reattach and the `ClusterDial`/`doctor` capability result |
+| `Ping.nonce`; `ErrorFrame.code`, `message` | **HONORED** — the daemon echoes the ping and both sides turn remote refusals into typed failures |
+| `GrantEvent`'s request, provenance, app identity and fingerprint; `GrantRule.requestID`, `allow` | **HONORED** — the sheet renders the request and its ruling resolves that same parked request |
+| `GenerateBegin.sessionID`, `genID`, `request`; `GenerateReattach.sessionID`, `token`, `genID`, `fromSeq`; `GenerateCancel.genID`; `EvAck.seq`; `Ev.seq`, `event` | **HONORED** — authorization, replay position, cancellation, acknowledgement, ordering and payload all affect generation state |
+| Request transcript; tool name, description and parameters; schema; temperature, token limit, sampling and tool mode | **HONORED** — every value that reaches reachd selects prompt, grammar, budget or an actual unconstrained sampler pass |
+| `responseAppend`, `responseReplace`, `toolCallAppendArguments`, `usage`, and every `finished` reason, including their ids, segments, text, counts and errors | **HONORED** — response/tool events enter the framework channel; completed usage enters Reach's monitor; endings determine success, cancellation or error |
+| Device enrollment token/name/versions, challenge nonce/version, both public keys and proof, certificate/CA, every `WGProvision` field, completion and confirmation | **HONORED** — negotiation precedes token use; proofs, provision, `ok`, and `applyPending` all change ceremony outcome |
+| App enrollment bundle/name/versions, challenge, key/proof, grant certificate/CA, and `EnrollComplete.ok` | **HONORED** — negotiation precedes parking; the ruling is correlated to the request; a false close keeps the ruled grant parked and is not logged as success |
+| `Hello.client` | **NAMED** — required v0 peer-label copy; decoded but not used for authorization or behavior |
+| `WireGenerationRequest.id` | **NAMED** — required v0 crossed copy; the envelope's `genID` remains the daemon authority, while ReachKit correlates completed usage with the native local request id |
+| `WireContextOptions.includeSchemaInPrompt`, `reasoning` | **NAMED** — faithfully mirrored public intent that reachd does not currently apply; grammar enforcement is independent of prompt inclusion and reasoning output is disabled |
+| `Pong.nonce` | **NAMED** — echoed but intentionally uncorrelated by the keeper's best-effort keepalive loop |
+| `reasoningAppend` and all of its fields | **NAMED** — reserved receiver vocabulary; reachd emits no reasoning event in v0 |
+| `HelloAck.models`; `ModelDescriptor.id`, `displayName`, `capabilities`; `SessionOpen.modelID` | **GRADUATED** — the catalog is displayed/sent but does not authoritatively select or refuse a model. The catalog's meaning, authoritative side and mismatch copy are one Held model-selection-authority design item |
+
+`GrantSubscribe` has no body to ignore. The unknown-key rule still makes old
+decoders safe when optional fields are added; it does not turn any required v0
+field into deletion permission. `responseReplace` is honored receiver
+vocabulary even though today's daemon only appends. Framework request
+`metadata` is not in this table because v0 cannot encode it and therefore it
+does not cross.
+
 ## Named seams (v0, deliberate)
 
-- **Sampling has three distinct losses.** `GenerationOptions.SamplingMode`
+- **Sampling has two remaining boundaries.** `GenerationOptions.SamplingMode`
   exposes no public read accessor — the `Kind` enum exists but nothing returns
   it. Greedy can be detected through `Equatable` and represented on the wire;
-  other native modes ride as `nil`. The daemon's established unconstrained
-  path currently applies only `temperature`, leaving an explicit wire
-  `sampling` value to the host default. That is a Reach-owned parity seam.
-  Constrained response and tool-argument paths deliberately remain greedy.
+  other native modes ride as `nil`. Every explicit value that does reach the
+  daemon is now honored by ordinary prose and `.allowed` tool-proposal passes:
+  the host default remains categorical temperature `0.6`; negative or explicit
+  zero is greedy; `.greedy` overrides temperature; invalid low top-k disables
+  that filter; top-p at or below zero is greedy and at or above one is the full
+  distribution; seeds reach a fresh pass-local sampler. Constrained response,
+  required-call and constrained tool-replay paths deliberately remain greedy.
   S15 showed that sampling through the hard-completion zone can exhaust 512
   legal tokens. S16's hybrid sampled normal/soft choices and completed the
   exact retained matrix 36/36 with hard-zone argmax, but S17 then produced a
@@ -354,9 +391,8 @@ v0; tool execution remains exclusively in the adopting app.
   for a defect the current path did not reach. Type-safe numeric grammar
   semantics remain architectural hardening, and become a prerequisite again
   before any future constrained-sampling path can be considered safe.
-  The framework accessor, unconstrained wire-mode parity and constrained
-  typed-completion problem remain separate follow-ons; none is described as
-  on-device equivalence.
+  The framework accessor and constrained typed-completion problem remain
+  separate follow-ons; none is described as on-device equivalence.
 - **Request `metadata` is dropped.** Its values are existential
   `Sendable & Codable & Equatable`, which JSON coding cannot carry generically.
 - **Structured partial snapshots do not cross the wire.** The daemon streams
@@ -370,10 +406,21 @@ v0; tool execution remains exclusively in the adopting app.
   `ToolCallProcessor` exposes only completed candidate calls and the public
   event has no retraction mechanism. Safe incremental argument delivery is
   therefore a Tier 3 M3 seam rather than an implied future chunking toggle.
-- **Usage has no ReachKit public accessor.** The daemon counts the real probe
-  and constrained passes and the wire carries `.usage`; the client executor
-  still drops it because FoundationModels exposes no appropriate update
-  surface. A ReachKit-owned usage API remains follow-on work.
+- **Completed usage is Reach-owned.** `ReachLanguageModel.usage` is a shared
+  `ReachUsageMonitor` for copies of one model and a fresh monitor for a newly
+  initialized model. Its async `latest` value and bounded `updates()` stream
+  publish one `ReachGenerationUsage(requestID:inputTokens:outputTokens:)` only
+  after the matching generation finishes successfully. Cancellation, error,
+  replay, and a legacy daemon with no usage event publish nothing. Plain
+  generations report backend counts; multi-pass tool and guided routes report
+  accumulated prepared-input and accepted-output totals. ReachKit neither
+  references nor emits Foundation Models' `updateUsage` action.
+- **Context intent is carried but not applied.** `includeSchemaInPrompt` and
+  `reasoning` remain optional v0 mirrors. Schema constraints hold whether or
+  not the schema is repeated in prompt text; no reasoning event is emitted.
+- **Model selection is not yet authoritative.** The model catalog and requested
+  model id stay on v0 for compatibility, but their meaning and refusal behavior
+  are the Held model-selection-authority seam named by the audit above.
 - **Bodies are JSON.** Chosen for legibility while the shape is still moving —
   every frame on this wire can be read by a human with a hex dump and patience,
   which during a ceremony debugged at a kitchen table is worth more than bytes.

@@ -11,6 +11,7 @@ public struct ReachLanguageModel: FoundationModels.LanguageModel {
     public typealias Executor = ReachExecutor
 
     public let executorConfiguration: ReachExecutor.Configuration
+    public let usage: ReachUsageMonitor
 
     public var capabilities: LanguageModelCapabilities {
         // This is a gate, not a label. A session handed tools by an app whose
@@ -30,6 +31,7 @@ public struct ReachLanguageModel: FoundationModels.LanguageModel {
 
     public init(configuration: ReachExecutor.Configuration) {
         executorConfiguration = configuration
+        usage = ReachUsageMonitor()
     }
 }
 
@@ -86,6 +88,7 @@ public struct ReachExecutor: FoundationModels.LanguageModelExecutor {
         let wire = WireGenerationRequest(request)
         var session: ReachConnectionHub.SessionHandle?
         let genID = UUID()
+        var pendingUsage: ReachGenerationUsage?
 
         var lastReceived: UInt64?
         var unacked = 0
@@ -192,7 +195,13 @@ public struct ReachExecutor: FoundationModels.LanguageModelExecutor {
                             try? await stream.send(EvAck(seq: ev.seq), for: live.version)
                             unacked = 0
                         }
-                        if try await forward(ev.event, into: channel) {
+                        if try await forward(
+                            ev.event,
+                            requestID: wire.id,
+                            pendingUsage: &pendingUsage,
+                            monitor: model.usage,
+                            into: channel
+                        ) {
                             try? await stream.send(EvAck(seq: ev.seq), for: live.version)
                             return
                         }
@@ -257,6 +266,9 @@ public struct ReachExecutor: FoundationModels.LanguageModelExecutor {
     /// Returns true when the generation finished.
     private func forward(
         _ event: WireEvent,
+        requestID: UUID,
+        pendingUsage: inout ReachGenerationUsage?,
+        monitor: ReachUsageMonitor,
         into channel: LanguageModelExecutorGenerationChannel
     ) async throws -> Bool {
         switch event {
@@ -279,19 +291,21 @@ public struct ReachExecutor: FoundationModels.LanguageModelExecutor {
         case .reasoningAppend:
             // Reserved vocabulary; the v0 daemon does not emit this.
             break
-        case .usage:
-            // Dropped, and not because it never arrives: `MLXFilling` yields
-            // usage on every generation, so the real daemon sends this and
-            // this line throws it away. It is not wired because ReachKit has
-            // nowhere to put it — the framework's own `updateUsage` is not a
-            // surface a client library should reach for, and a ReachKit-only
-            // accessor would be the more honest home. Surfacing it is a
-            // scoped item, not a line: it wants an API on this type, and the
-            // daemon side is already done.
-            break
+        case .usage(let inputTokens, let outputTokens):
+            // The event precedes `.finished`; retain it until the cluster says
+            // this generation completed so cancellation and error never look
+            // like completed usage. An older daemon may omit it entirely.
+            pendingUsage = ReachGenerationUsage(
+                requestID: requestID,
+                inputTokens: inputTokens,
+                outputTokens: outputTokens
+            )
         case .finished(let reason):
             switch reason {
             case .complete:
+                if let pendingUsage {
+                    await monitor.record(pendingUsage)
+                }
                 return true
             case .cancelled:
                 throw CancellationError()

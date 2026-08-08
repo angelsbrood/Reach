@@ -87,7 +87,6 @@ public final class MLXFilling: SlotFilling {
                 let container = try await box.get(configuration: configuration)
                 let messages = TranscriptChat.messages(from: request.transcript)
                 let maxTokens = request.options.maximumResponseTokens ?? 512
-                let temperature = request.options.temperature
                 let schemaJSON = try request.schema.map(ResponseGuidance.schemaJSON)
                 let tools = try ToolRendering.specs(for: request)
                 let toolMode = request.options.toolCalling ?? .allowed
@@ -116,8 +115,10 @@ public final class MLXFilling: SlotFilling {
                                 additionalContext: ["enable_thinking": false]
                             )
                         )
-                        var parameters = GenerateParameters(maxTokens: maxTokens)
-                        if let temperature { parameters.temperature = Float(temperature) }
+                        let parameters = UnconstrainedSampling.parameters(
+                            options: request.options,
+                            maxTokens: maxTokens
+                        )
                         return try MLXLMCommon.generate(
                             input: input,
                             parameters: parameters,
@@ -243,8 +244,10 @@ public final class MLXFilling: SlotFilling {
                             throw ToolGuidanceError.incompleteOutput(
                                 "the grammar tokenizer was not prepared for offered tools")
                         }
-                        var parameters = GenerateParameters(maxTokens: maxTokens)
-                        if let temperature { parameters.temperature = Float(temperature) }
+                        let parameters = UnconstrainedSampling.parameters(
+                            options: request.options,
+                            maxTokens: maxTokens
+                        )
                         var proposals: [ProposedToolCall] = []
                         let probe = try MLXLMCommon.generate(
                             input: input,

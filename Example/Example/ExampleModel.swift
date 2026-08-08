@@ -184,6 +184,22 @@ final class ExampleModel {
                 }
                 return
             }
+            if ProcessInfo.processInfo.environment["REACH_USAGE_PROBE"] == "1" {
+                let configuration = ReachExecutor.Configuration(
+                    serviceName: service,
+                    host: host,
+                    modelID: modelID,
+                    identityLabel: Self.identityLabel
+                )
+                let model = ReachLanguageModel(configuration: configuration)
+                do {
+                    try await runUsageAcceptanceProbe(model: model)
+                } catch {
+                    status = "failed: \(error)"
+                    print("[example-usage] failed: \(error)")
+                }
+                return
+            }
             if ProcessInfo.processInfo.environment["REACH_GUIDED_PROBE"] == "1" {
                 let configuration = ReachExecutor.Configuration(
                     serviceName: service,
@@ -273,6 +289,31 @@ final class ExampleModel {
         }
         output = report.joined(separator: "\n")
         status = "guided probe passed 3/3"
+    }
+
+    /// A retained-model check for the public Reach-owned usage surface. The
+    /// launch environment is the only caller; normal UI and demo behavior do
+    /// not know this probe exists.
+    private func runUsageAcceptanceProbe(model: ReachLanguageModel) async throws {
+        let updates = await model.usage.updates()
+        var iterator = updates.makeAsyncIterator()
+        let session = LanguageModelSession(model: model)
+        let response = try await session.respond(
+            to: "In one short sentence, what is a river reach?",
+            options: GenerationOptions(maximumResponseTokens: 128)
+        )
+        guard !response.content.isEmpty,
+              let update = await iterator.next(),
+              let latest = await model.usage.latest,
+              update == latest,
+              update.inputTokens > 0,
+              update.outputTokens > 0
+        else {
+            throw ExampleError.usageProbeMissingCompletion
+        }
+        output = "request \(update.requestID)\ninput \(update.inputTokens) tokens\noutput \(update.outputTokens) tokens"
+        status = "usage probe passed"
+        print("[example-usage] passed input=\(update.inputTokens) output=\(update.outputTokens)")
     }
 
     /// The app-facing Tier 1/2 acceptance. A successful ledger entry means
@@ -372,6 +413,7 @@ final class ExampleModel {
         case noGrantDoor
         case guidedProbeDidNotStream(run: Int, snapshots: Int)
         case toolArgumentsProbeDidNotCall(mode: String, run: Int, calls: Int)
+        case usageProbeMissingCompletion
         var errorDescription: String? {
             switch self {
             case .noGrantDoor:
@@ -380,6 +422,8 @@ final class ExampleModel {
                 "Guided probe run \(run) produced \(snapshots) snapshots; expected a streamed response."
             case .toolArgumentsProbeDidNotCall(let mode, let run, let calls):
                 "Tool argument probe \(mode) run \(run) made \(calls) valid calls; expected exactly one."
+            case .usageProbeMissingCompletion:
+                "Usage probe completed without one matching positive update and latest value."
             }
         }
     }

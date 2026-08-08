@@ -134,11 +134,11 @@ public actor SessionRegistry {
     /// has no model to disambiguate.
     ///
     /// ⚠️ What that leaves visible: `SessionOpen.modelID` still crosses the
-    /// wire and is now read by nothing at all, so a client asking for a model
-    /// this daemon does not serve is answered by the one it does, silently.
-    /// `HelloAck.models` is how a client is meant to know, but nothing
-    /// enforces it. That is a refusal the daemon does not have rather than a
-    /// claim it breaks, so it is logged, not fixed here.
+    /// wire but does not authoritatively select or refuse a model, so a client
+    /// asking for a model this daemon does not serve is answered by the one it
+    /// does, silently. `HelloAck.models` supplies a catalog without defining
+    /// which side owns selection. The unread-wire audit graduated that whole
+    /// contract to the Held model-selection-authority design item.
     public func openSession(
         version: UInt8 = Wire.baselineVersion
     ) -> (sessionID: UUID, token: String) {

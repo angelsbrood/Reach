@@ -116,6 +116,11 @@ duplicate.
 half-closes and then reads until end-of-stream, because the daemon sends
 nothing after the grant and half-closes only once it has read that
 confirmation — so **EOF is the acknowledgement**, and it costs no frame.
+The completion's body is authoritative too: `ok: true` collects the held
+ruling and records enrollment; `ok: false` records a refusal, leaves the
+ruled grant parked for the same-key re-knock, and closes without claiming
+success. This matches the device ceremony's rule that a negative completion
+never commits its final side effect.
 Without that wait the app returned straight into its own teardown, and an
 abortive close overtook the confirmation it had just sent: the ceremony
 succeeded, the app streamed, and the daemon logged a socket error where

@@ -133,14 +133,17 @@ struct Selftest: AsyncParsableCommand {
             return
         }
 
+        let reachModel = ReachLanguageModel(configuration: ReachExecutor.Configuration(
+            host: "127.0.0.1",
+            port: port,
+            modelID: filling.modelID,
+            identityLabel: runLabel,
+            connectTimeout: 45
+        ))
+        let usageStream = await reachModel.usage.updates()
+        var usageUpdates = usageStream.makeAsyncIterator()
         let session = LanguageModelSession(
-            model: ReachLanguageModel(configuration: ReachExecutor.Configuration(
-                host: "127.0.0.1",
-                port: port,
-                modelID: filling.modelID,
-                identityLabel: runLabel,
-                connectTimeout: 45
-            )),
+            model: reachModel,
             instructions: "You are terse."
         )
         let start = clock.now
@@ -159,7 +162,16 @@ struct Selftest: AsyncParsableCommand {
             print("SELFTEST: FAIL (empty or non-streaming)")
             throw ExitCode.failure
         }
+        guard let usage = await usageUpdates.next(),
+              usage.inputTokens > 0, usage.outputTokens > 0,
+              await reachModel.usage.latest == usage
+        else {
+            print("SELFTEST: FAIL (completed usage was not published)")
+            throw ExitCode.failure
+        }
+        print("[selftest] usage input=\(usage.inputTokens) output=\(usage.outputTokens) request=\(usage.requestID)")
         if mlx {
+            try await runUnconstrainedSamplingAudit(filling: filling)
             try await runGuidedExchange(
                 port: port,
                 modelID: filling.modelID,
@@ -167,6 +179,54 @@ struct Selftest: AsyncParsableCommand {
         }
         print(mlx ? "SELFTEST (mlx spine): PASS" : "SELFTEST (scripted spine): PASS")
         await daemon.stop()
+    }
+
+    /// The three explicit wire modes on the only route this pass changes:
+    /// unconstrained MLX generation. Unit tests hold the exact parameter
+    /// resolution; real weights prove each resulting pass remains live.
+    private func runUnconstrainedSamplingAudit(filling: any SlotFilling) async throws {
+        let modes: [(String, WireSampling)] = [
+            ("greedy", .greedy),
+            ("top-k", .topK(40, seed: 29)),
+            ("top-p", .topP(0.9, seed: 29)),
+        ]
+        for (label, sampling) in modes {
+            let request = WireGenerationRequest(
+                id: UUID(),
+                transcript: Transcript(entries: [
+                    .prompt(Transcript.Prompt(segments: [
+                        .text(Transcript.TextSegment(
+                            content: "In one short sentence, name a river feature."))
+                    ]))
+                ]),
+                options: WireGenerationOptions(
+                    maximumResponseTokens: 64,
+                    sampling: sampling
+                )
+            )
+            var text = ""
+            var usage: [(Int, Int)] = []
+            var complete = false
+            for try await event in filling.generate(request) {
+                switch event {
+                case .responseAppend(_, let delta, _, _): text += delta
+                case .usage(let input, let output): usage.append((input, output))
+                case .finished(.complete): complete = true
+                case .finished(let reason):
+                    print("SELFTEST (unconstrained sampling): FAIL (\(label): \(reason))")
+                    throw ExitCode.failure
+                default: break
+                }
+            }
+            guard complete, !text.isEmpty, usage.count == 1,
+                  usage[0].0 > 0, usage[0].1 > 0
+            else {
+                print("SELFTEST (unconstrained sampling): FAIL (\(label): text=\(text.count), usage=\(usage))")
+                throw ExitCode.failure
+            }
+            print("[selftest-sampling] \(label) output=\(text.count) usage=\(usage[0].0)/\(usage[0].1)")
+        }
+        print("SELFTEST (unconstrained sampling): PASS 3/3")
     }
 
     /// Real-weight response-schema acceptance in the executable layout where
@@ -226,13 +286,13 @@ struct Selftest: AsyncParsableCommand {
         modelID: String,
         identityLabel: String
     ) async throws {
-        let session = LanguageModelSession(
-            model: ReachLanguageModel(configuration: ReachExecutor.Configuration(
-                host: "127.0.0.1",
-                port: port,
-                modelID: modelID,
-                identityLabel: identityLabel,
-                connectTimeout: 45)))
+        let model = ReachLanguageModel(configuration: ReachExecutor.Configuration(
+            host: "127.0.0.1",
+            port: port,
+            modelID: modelID,
+            identityLabel: identityLabel,
+            connectTimeout: 45))
+        let session = LanguageModelSession(model: model)
         let stream = session.streamResponse(
             to: prompt,
             generating: type,
@@ -241,8 +301,12 @@ struct Selftest: AsyncParsableCommand {
         var snapshots = 0
         for try await _ in stream { snapshots += 1 }
         print("[selftest-guided] \(label) snapshots=\(snapshots) decoded=yes")
-        guard snapshots > 1 else {
-            print("SELFTEST (guided schemas): FAIL (\(label) did not stream)")
+        guard snapshots > 1,
+              let usage = await model.usage.latest,
+              usage.inputTokens > 0,
+              usage.outputTokens > 0
+        else {
+            print("SELFTEST (guided schemas): FAIL (\(label) did not stream or publish usage)")
             throw ExitCode.failure
         }
     }
@@ -358,6 +422,7 @@ struct Selftest: AsyncParsableCommand {
                 )
                 let start = ContinuousClock.now
                 var calls: [(String, String)] = []
+                var usage: [(Int, Int)] = []
                 var complete = false
                 for try await event in filling.generate(request) {
                     switch event {
@@ -365,6 +430,8 @@ struct Selftest: AsyncParsableCommand {
                         calls.append((name, content))
                     case .finished(.complete):
                         complete = true
+                    case .usage(let input, let output):
+                        usage.append((input, output))
                     case .finished(let reason):
                         print("SELFTEST (tool arguments): FAIL (\(mode)[\(run)] \(reason))")
                         throw ExitCode.failure
@@ -372,8 +439,10 @@ struct Selftest: AsyncParsableCommand {
                         break
                     }
                 }
-                guard complete, calls.count == 1, calls[0].0 == "record_audit" else {
-                    print("SELFTEST (tool arguments): FAIL (\(mode)[\(run)] calls=\(calls.count))")
+                guard complete, calls.count == 1, calls[0].0 == "record_audit",
+                      usage.count == 1, usage[0].0 > 0, usage[0].1 > 0
+                else {
+                    print("SELFTEST (tool arguments): FAIL (\(mode)[\(run)] calls=\(calls.count) usage=\(usage))")
                     throw ExitCode.failure
                 }
                 let decoded = try SelftestAuditArguments(
@@ -411,6 +480,7 @@ struct Selftest: AsyncParsableCommand {
             )
             var response = ""
             var callArguments: [String] = []
+            var usage: [(Int, Int)] = []
             var complete = false
             for try await event in filling.generate(request) {
                 switch event {
@@ -418,14 +488,17 @@ struct Selftest: AsyncParsableCommand {
                 case .toolCallAppendArguments(_, _, _, let content, _):
                     callArguments.append(content)
                 case .finished(.complete): complete = true
+                case .usage(let input, let output): usage.append((input, output))
                 case .finished(let reason):
                     print("SELFTEST (tool arguments): FAIL (schema+tools[\(run)] \(reason))")
                     throw ExitCode.failure
                 default: break
                 }
             }
-            guard complete, callArguments.isEmpty != response.isEmpty else {
-                print("SELFTEST (tool arguments): FAIL (schema+tools[\(run)] did not select exactly one route)")
+            guard complete, callArguments.isEmpty != response.isEmpty,
+                  usage.count == 1, usage[0].0 > 0, usage[0].1 > 0
+            else {
+                print("SELFTEST (tool arguments): FAIL (schema+tools[\(run)] route/usage mismatch: \(usage))")
                 throw ExitCode.failure
             }
             if let arguments = callArguments.first {

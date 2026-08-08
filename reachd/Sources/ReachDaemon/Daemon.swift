@@ -327,7 +327,9 @@ public final class Daemon: Sendable {
             switch raw.type {
             case .sessionOpen:
                 // Decoded so a malformed frame is still refused here; its
-                // `modelID` is read by nothing — see `openSession`.
+                // `modelID` is not authoritative yet — the unread-wire audit
+                // graduated catalog meaning, selection ownership, and
+                // mismatch refusal together rather than inventing one here.
                 _ = try raw.decode(SessionOpen.self)
                 let (sessionID, token) = await registry.openSession(version: version)
                 try await stream.send(

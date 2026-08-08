@@ -13,7 +13,7 @@ import Testing
 /// sentence minus the second machine.
 ///
 /// ⚠️ **Ports here are hand-picked literals and nothing checks them.** This
-/// suite owns 47414–47416 and 47418–47422. `.serialized` orders it against
+/// suite owns 47414–47416 and 47418–47424. `.serialized` orders it against
 /// itself only, so every other suite in this target runs concurrently with it
 /// and a clash surfaces as `ReachError.unreachable` — a *product* error about
 /// roads, which reads as a cold-start regression and is not one.
@@ -30,6 +30,39 @@ import Testing
 /// process holding the port, and `TestPorts` moves the whole block per process
 /// so the two cannot meet. Read the literals below as offsets, not addresses.
 @Suite(.serialized) struct SpineTests {
+    private struct NoUsageFilling: SlotFilling {
+        let modelID = "no-usage"
+        let displayName = "Legacy no-usage filling"
+        let capabilities: [String] = []
+
+        func prewarm() async throws {}
+
+        func generate(_ request: WireGenerationRequest) -> AsyncThrowingStream<WireEvent, Error> {
+            AsyncThrowingStream { continuation in
+                continuation.yield(.responseAppend(
+                    entryID: nil, text: "legacy", segmentID: nil, tokenCount: 1))
+                continuation.yield(.finished(.complete))
+                continuation.finish()
+            }
+        }
+    }
+
+    private struct UsageThenErrorFilling: SlotFilling {
+        let modelID = "usage-error"
+        let displayName = "Usage then error filling"
+        let capabilities: [String] = []
+
+        func prewarm() async throws {}
+
+        func generate(_ request: WireGenerationRequest) -> AsyncThrowingStream<WireEvent, Error> {
+            AsyncThrowingStream { continuation in
+                continuation.yield(.usage(inputTokens: 5, outputTokens: 8))
+                continuation.yield(.finished(.error("scripted failure")))
+                continuation.finish()
+            }
+        }
+    }
+
     /// Cleans up exactly what this call put in the keychain: the two
     /// identities it minted, and the roads filed under the label it minted
     /// them for.
@@ -57,7 +90,8 @@ import Testing
     private func startDaemon(
         port: UInt16,
         host: String = "127.0.0.1",
-        connectTimeout: Double = 45
+        connectTimeout: Double = 45,
+        filling: any SlotFilling = ScriptedFilling()
     ) async throws -> (Daemon, ReachExecutor.Configuration, @Sendable () -> Void) {
         let ca = try ClusterCA.create(commonName: "Reach Spine CA")
         let server = try ca.issueServer(commonName: "localhost", dnsNames: ["localhost"], ipAddresses: [[127, 0, 0, 1]])
@@ -75,10 +109,10 @@ import Testing
         var config = DaemonConfig()
         config.port = port
         config.clusterName = "spine"
-        config.modelID = "scripted"
+        config.modelID = filling.modelID
         let daemon = Daemon(
             config: config,
-            filling: ScriptedFilling(),
+            filling: filling,
             identity: Daemon.ListenerIdentity(identity: serverIdentity, caCertificate: caCert)
         )
         try await daemon.start(advertise: false)
@@ -91,7 +125,7 @@ import Testing
         let configuration = ReachExecutor.Configuration(
             host: host,
             port: port,
-            modelID: "scripted",
+            modelID: filling.modelID,
             identityLabel: label,
             connectTimeout: connectTimeout
         )
@@ -262,8 +296,11 @@ import Testing
         defer { discard() }
         defer { Task { await daemon.stop() } }
 
+        let model = ReachLanguageModel(configuration: configuration)
+        let updates = await model.usage.updates()
+        var usageUpdates = updates.makeAsyncIterator()
         let session = LanguageModelSession(
-            model: ReachLanguageModel(configuration: configuration),
+            model: model,
             instructions: "Scripted."
         )
         let stream = session.streamResponse(to: "Go.")
@@ -272,11 +309,52 @@ import Testing
             final = snapshot.content
         }
         #expect(final == ScriptedFilling().words.joined())
+        let firstUsage = try #require(await usageUpdates.next())
+        #expect(firstUsage.inputTokens == 3)
+        #expect(firstUsage.outputTokens == ScriptedFilling().words.count)
+        #expect(await model.usage.latest == firstUsage)
 
         // Second turn exercises transcript accumulation across the wire.
         let second = try await session.respond(to: "Again.")
         #expect(second.content == ScriptedFilling().words.joined())
         #expect(session.transcript.count >= 4)
+        let secondUsage = try #require(await usageUpdates.next())
+        #expect(secondUsage.inputTokens == 3)
+        #expect(secondUsage.outputTokens == ScriptedFilling().words.count)
+        #expect(secondUsage.requestID != firstUsage.requestID)
+        #expect(await model.usage.latest == secondUsage)
+    }
+
+    @Test func aLegacyDaemonWithoutUsageStillCompletesWithoutPublishing() async throws {
+        let (daemon, configuration, discard) = try await startDaemon(
+            port: TestPorts.port(47423),
+            filling: NoUsageFilling()
+        )
+        defer { discard() }
+        defer { Task { await daemon.stop() } }
+
+        let model = ReachLanguageModel(configuration: configuration)
+        let session = LanguageModelSession(model: model)
+        let response = try await session.respond(to: "Go.")
+
+        #expect(response.content == "legacy")
+        #expect(await model.usage.latest == nil)
+    }
+
+    @Test func usageThatPrecedesAnErrorIsNotPublishedAsCompleted() async throws {
+        let (daemon, configuration, discard) = try await startDaemon(
+            port: TestPorts.port(47424),
+            filling: UsageThenErrorFilling()
+        )
+        defer { discard() }
+        defer { Task { await daemon.stop() } }
+
+        let model = ReachLanguageModel(configuration: configuration)
+        let session = LanguageModelSession(model: model)
+        await #expect(throws: (any Error).self) {
+            _ = try await session.respond(to: "Go.")
+        }
+        #expect(await model.usage.latest == nil)
     }
 
     /// The away fall, loopback edition: a path change mid-generation
@@ -314,7 +392,8 @@ import Testing
         defer { discard() }
         defer { Task { await daemon.stop() } }
 
-        let session = LanguageModelSession(model: ReachLanguageModel(configuration: configuration))
+        let model = ReachLanguageModel(configuration: configuration)
+        let session = LanguageModelSession(model: model)
         let task = Task {
             let stream = session.streamResponse(to: "Go.")
             var count = 0
@@ -331,5 +410,6 @@ import Testing
         // happen is a completed full generation.
         _ = outcome
         task.cancel()
+        #expect(await model.usage.latest == nil)
     }
 }
