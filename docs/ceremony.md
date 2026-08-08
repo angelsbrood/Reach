@@ -13,14 +13,22 @@ human: its request parks until the keeper's sheet is ruled.
 reachd pair ──► QR { cluster, name, addrs, port, sport, caHash, token }
 keeper scans, then over reach-enroll/0 (server-auth TLS, CA-hash pinned):
 
-  EnrollBegin{token, deviceName}          phone ──► daemon
-  EnrollChallenge{nonce}                  daemon ──► phone
+  EnrollBegin{token, deviceName, versions?} phone ──► daemon
+  EnrollChallenge{nonce, version?}          daemon ──► phone
   EnrollCertRequest{devicePub, wgPub,
       popSig = SE-sign(nonce‖devicePub‖wgPub)}   phone ──► daemon
   EnrollGrant{deviceCert, caCert, wg{...}}       daemon ──► phone
   EnrollComplete                          phone ──► daemon
   EnrollConfirmed{applyPending}                  daemon ──► phone
 ```
+
+The optional fields negotiate the wire dialect before the token is consumed.
+The phone offers all supported values newest-first; the daemon selects its
+first preferred common value in the challenge. A missing offer or selection is
+a legacy peer and means v0. No common value returns `wire-version` without
+spending the QR's one-time authority. New decoders therefore understand old
+frames, while old decoders ignore the additive fields and continue speaking
+v0.
 
 One proof-of-possession signature binds the Secure Enclave identity key
 and the WireGuard key — one QR, two keys, literally. The identity key is
@@ -62,8 +70,9 @@ knocks at the enrollment door advertised under the same name
 (`_reach-enroll._udp`):
 
 ```
-  AppEnrollBegin{bundleID, displayName}   app ──► daemon
-  EnrollChallenge{nonce}                  daemon ──► app
+  AppEnrollBegin{bundleID, displayName,
+                 versions?}               app ──► daemon
+  EnrollChallenge{nonce, version?}         daemon ──► app
   AppEnrollCertRequest{appPub,
       popSig = sign(nonce‖appPub)}        app ──► daemon
                 ── the request PARKS (120 s window) ──
@@ -73,6 +82,15 @@ knocks at the enrollment door advertised under the same name
   AppEnrollGrant{appCert, caCert}  — or ErrorFrame(grant-denied / grant-timeout)
   EnrollComplete                          app ──► daemon
 ```
+
+Negotiation has the same legacy-v0 rule as the device half and completes before
+the request is parked. An incompatible app therefore leaves no pending request,
+ruled verdict or request-index entry for the keeper to discover. The app and
+keeper both reject a challenge selection they did not offer.
+
+The QR payload's `version` remains **2** and is a separate schema version. Wire
+dialects describe the QUIC frames exchanged after scanning; changing them does
+not change the QR's fields or force a new QR format.
 
 No confirming frame here, and the asymmetry is the point rather than an
 oversight. The desk **holds** a ruled verdict for ten minutes, and a re-knock

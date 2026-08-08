@@ -27,6 +27,33 @@ an **error rather than something to skip**: a peer that cannot name what it was
 sent should not guess. `FrameReassembler` takes arbitrary chunks off a stream
 and yields whole frames, one instance per stream direction.
 
+### Compatibility contract
+
+The ALPN names the **envelope generation**; `Hello`/`HelloAck` negotiate the
+JSON dialect carried inside it. Today both are generation 0, but they are
+deliberately separate constants. A dialect-only bump keeps `reach/0`, offers
+every supported dialect newest-first, and lets the daemon select its first
+preferred common value. Only a change to the length/type/body framing earns a
+new ALPN and deliberately partitions peers that cannot parse one another's
+envelopes. Serving multiple ALPNs waits until such a framing change exists.
+
+Three rules hold every future wire edit:
+
+1. An unknown **optional JSON key on an existing frame is additive-safe**.
+   Swift's decoder ignores it, and a missing optional key retains the legacy
+   meaning defined by that frame.
+2. A **new frame type requires a negotiated dialect**. Unknown type bytes are
+   fatal, so every `FrameType` names the first dialect that may send it and
+   both send and receive paths enforce the selected dialect.
+3. An incompatible **framing change requires an ALPN change**. It must be
+   deliberate and documented; a dialect bump alone never changes ALPN.
+
+S10 measured the premises before implementation: unknown optional keys decoded
+3/3; unknown type 255 failed 3/3 with `frame type 255 is not in this protocol
+version's vocabulary`; and mismatched authenticated and enrollment ALPNs each
+ended 3/3 as the opaque `stream open timeout`. The retained register is in
+[spikes.md](spikes.md).
+
 | | Frame | |
 |---|---|---|
 | **1** | `Hello` | versions offered, client name |
@@ -65,9 +92,13 @@ time the client's certificate is the thing being asked for.
 
 Both are found over Bonjour — `_reach._udp` for sessions,
 `_reach-enroll._udp` for the door, advertised under the same cluster name. The
-session advertisement carries one TXT key, `ca`: the base64url SHA-256 of the
-cluster CA's DER, which an enrolling app pins. (What that pin is and is not
-worth is in [the ceremony](ceremony.md).)
+session advertisement carries `ca`, the base64url SHA-256 of the cluster CA's
+DER, and `v`, the daemon's supported dialects comma-separated in newest-first
+preference order. The CA value is pinned during enrollment. The versions value
+is advisory UI/discovery context only: stored roads never see Bonjour, and no
+connection is accepted or rejected from TXT. The authenticated exchange is
+authoritative. (What the CA pin is and is not worth is in
+[the ceremony](ceremony.md).)
 
 QUIC idles at 30 s for sessions and 180 s for enrollment — the longer window so
 a request parked at the grant desk outlives the 120 s a human has to rule on
@@ -93,6 +124,14 @@ Client-opened, long-lived, one per connection.
   SessionOpened{sessionID, token,
                 capabilities}            daemon ──► client
 ```
+
+`Hello.versions` defaults to every dialect the app supports. The daemon chooses
+its first preferred common dialect before opening a session and echoes it in
+`HelloAck.version`; no intersection returns `ErrorFrame(code: "wire-version")`
+and creates no session. The client rejects a selection it did not offer. That
+selected value then belongs to the session: generation begin and re-attach,
+grants, keepalives, events and acknowledgements are all gated by it rather than
+falling back to the process's preferred dialect.
 
 `HelloAck.addrs` is the part that earns its keep. The daemon declares **every
 IPv4 address it answers on** — LAN, mesh, and any tunnel interface that happens

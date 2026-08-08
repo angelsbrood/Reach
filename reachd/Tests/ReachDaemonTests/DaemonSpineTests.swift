@@ -49,7 +49,7 @@ struct ScriptedFilling: SlotFilling {
         let (sessionID, token) = await registry.openSession()
         let genID = UUID()
         let filling = ScriptedFilling(words: Array(repeating: "tick ", count: 60), delayMilliseconds: 40)
-        let (stream, epoch) = try await registry.begin(
+        let (stream, epoch, _) = try await registry.begin(
             sessionID: sessionID, genID: genID, events: { filling.generate(.init(id: UUID(), transcript: .init())) }
         )
         var seen = 0
@@ -81,7 +81,7 @@ struct ScriptedFilling: SlotFilling {
         let filling = ScriptedFilling()
         let genID = UUID()
         let request = WireGenerationRequest(id: UUID(), transcript: Transcript())
-        let (first, epoch) = try await registry.begin(sessionID: sessionID, genID: genID) {
+        let (first, epoch, _) = try await registry.begin(sessionID: sessionID, genID: genID) {
             filling.generate(request)
         }
 
@@ -94,7 +94,7 @@ struct ScriptedFilling: SlotFilling {
         try? await Task.sleep(for: .milliseconds(120))
 
         // Re-attach from the last received seq; replay must start at 4.
-        let (second, _) = try await registry.attach(sessionID: sessionID, genID: genID, fromSeq: 3)
+        let (second, _, _) = try await registry.attach(sessionID: sessionID, genID: genID, fromSeq: 3)
         var tail: [Ev] = []
         for await ev in second {
             tail.append(ev)
@@ -128,7 +128,7 @@ struct ScriptedFilling: SlotFilling {
 
         let genID = UUID()
         let filling = ScriptedFilling(words: Array(repeating: "tick ", count: 20), delayMilliseconds: 0)
-        let (stream, _) = try await registry.begin(sessionID: sessionID, genID: genID) {
+        let (stream, _, _) = try await registry.begin(sessionID: sessionID, genID: genID) {
             filling.generate(WireGenerationRequest(id: UUID(), transcript: Transcript()))
         }
         var lastSeq: UInt64 = 0
@@ -162,7 +162,7 @@ struct ScriptedFilling: SlotFilling {
         var served = 0
         for fromSeq in 0..<lastSeq {
             do {
-                let (replay, _) = try await registry.attach(sessionID: sessionID, genID: genID, fromSeq: fromSeq)
+                let (replay, _, _) = try await registry.attach(sessionID: sessionID, genID: genID, fromSeq: fromSeq)
                 var seqs: [UInt64] = []
                 for await ev in replay { seqs.append(ev.seq) }
                 served += 1
@@ -187,7 +187,7 @@ struct ScriptedFilling: SlotFilling {
     /// satisfy the test above on its own.
     @Test func aReplayThatIsStillWholeIsServedUnchanged() async throws {
         let (registry, sessionID, genID, lastSeq) = try await overflowed(cap: 200)
-        let (replay, _) = try await registry.attach(sessionID: sessionID, genID: genID, fromSeq: lastSeq - 1)
+        let (replay, _, _) = try await registry.attach(sessionID: sessionID, genID: genID, fromSeq: lastSeq - 1)
         var seqs: [UInt64] = []
         for await ev in replay { seqs.append(ev.seq) }
         #expect(seqs == [lastSeq], "the top of the buffer was refused or came back wrong: \(seqs)")
@@ -211,7 +211,7 @@ struct ScriptedFilling: SlotFilling {
 
         let filling = ScriptedFilling()
         let genID = UUID()
-        let (first, epoch) = try await registry.begin(sessionID: sessionID, genID: genID) {
+        let (first, epoch, _) = try await registry.begin(sessionID: sessionID, genID: genID) {
             filling.generate(WireGenerationRequest(id: UUID(), transcript: Transcript()))
         }
         let received = await drain(first) { $0.count >= 4 }
@@ -222,7 +222,7 @@ struct ScriptedFilling: SlotFilling {
         await registry.ack(sessionID: sessionID, genID: genID, seq: 2, epoch: epoch)
         await registry.detach(sessionID: sessionID, genID: genID, epoch: epoch)
 
-        let (second, _) = try await registry.attach(sessionID: sessionID, genID: genID, fromSeq: 3)
+        let (second, _, _) = try await registry.attach(sessionID: sessionID, genID: genID, fromSeq: 3)
         var tail: [Ev] = []
         for await ev in second {
             tail.append(ev)
@@ -276,13 +276,13 @@ struct ScriptedFilling: SlotFilling {
         let filling = ScriptedFilling()
         let genID = UUID()
         let request = WireGenerationRequest(id: UUID(), transcript: Transcript())
-        let (first, firstEpoch) = try await registry.begin(sessionID: sessionID, genID: genID) {
+        let (first, firstEpoch, _) = try await registry.begin(sessionID: sessionID, genID: genID) {
             filling.generate(request)
         }
         _ = await drain(first) { $0.count >= 2 }
 
         // The phone comes back over the mesh.
-        let (second, _) = try await registry.attach(sessionID: sessionID, genID: genID, fromSeq: 0)
+        let (second, _, _) = try await registry.attach(sessionID: sessionID, genID: genID, fromSeq: 0)
 
         // Now the LAN connection finally notices it is dead.
         await registry.detach(sessionID: sessionID, genID: genID, epoch: firstEpoch)
@@ -304,11 +304,11 @@ struct ScriptedFilling: SlotFilling {
         let filling = ScriptedFilling()
         let genID = UUID()
         let request = WireGenerationRequest(id: UUID(), transcript: Transcript())
-        let (first, firstEpoch) = try await registry.begin(sessionID: sessionID, genID: genID) {
+        let (first, firstEpoch, _) = try await registry.begin(sessionID: sessionID, genID: genID) {
             filling.generate(request)
         }
         _ = await drain(first) { $0.count >= 2 }
-        let (second, _) = try await registry.attach(sessionID: sessionID, genID: genID, fromSeq: 0)
+        let (second, _, _) = try await registry.attach(sessionID: sessionID, genID: genID, fromSeq: 0)
 
         await registry.cancel(sessionID: sessionID, genID: genID, epoch: firstEpoch)
 
@@ -322,12 +322,12 @@ struct ScriptedFilling: SlotFilling {
         let request = WireGenerationRequest(id: UUID(), transcript: Transcript())
         let filling = ScriptedFilling()
 
-        let (first, _) = try await registry.begin(sessionID: sessionID, genID: genID) { filling.generate(request) }
+        let (first, _, _) = try await registry.begin(sessionID: sessionID, genID: genID) { filling.generate(request) }
         _ = await drain(first) { $0.count >= 2 }
 
         // A duplicated GenerateBegin (first-frame loss) must not start a
         // second generation; it re-attaches from 0.
-        let (again, _) = try await registry.begin(sessionID: sessionID, genID: genID) {
+        let (again, _, _) = try await registry.begin(sessionID: sessionID, genID: genID) {
             Issue.record("second filling start for the same genID")
             return filling.generate(request)
         }
@@ -377,7 +377,7 @@ struct ScriptedFilling: SlotFilling {
 
         let request = WireGenerationRequest(id: UUID(), transcript: Transcript())
         let filling = ScriptedFilling()
-        let (stream, _) = try await registry.begin(sessionID: sessionID, genID: UUID()) {
+        let (stream, _, _) = try await registry.begin(sessionID: sessionID, genID: UUID()) {
             filling.generate(request)
         }
         _ = await drain(stream) { $0.contains { if case .finished = $0.event { return true }; return false } }
@@ -396,7 +396,7 @@ struct ScriptedFilling: SlotFilling {
         var slow = ScriptedFilling()
         slow.delayMilliseconds = 500
         let request = WireGenerationRequest(id: UUID(), transcript: Transcript())
-        let (stream, epoch) = try await registry.begin(sessionID: sessionID, genID: genID) { [slow] in slow.generate(request) }
+        let (stream, epoch, _) = try await registry.begin(sessionID: sessionID, genID: genID) { [slow] in slow.generate(request) }
         _ = await drain(stream) { $0.count >= 1 }
         await registry.detach(sessionID: sessionID, genID: genID, epoch: epoch)
 
@@ -414,6 +414,32 @@ struct ScriptedFilling: SlotFilling {
         await #expect(throws: SessionRegistry.RegistryError.self) {
             try await registry.validate(sessionID: sessionID, token: "wrong")
         }
+    }
+
+    @Test func generationStreamsKeepTheSessionsNegotiatedVersion() async throws {
+        let registry = SessionRegistry()
+        let (sessionID, token) = await registry.openSession(version: 7)
+        let genID = UUID()
+        let (stream, _, begunVersion) = try await registry.begin(
+            sessionID: sessionID,
+            genID: genID
+        ) {
+            AsyncThrowingStream { continuation in
+                continuation.yield(.finished(.complete))
+                continuation.finish()
+            }
+        }
+        for await _ in stream {}
+        #expect(begunVersion == 7)
+
+        try await registry.validate(sessionID: sessionID, token: token)
+        let (replay, _, attachedVersion) = try await registry.attach(
+            sessionID: sessionID,
+            genID: genID,
+            fromSeq: nil
+        )
+        for await _ in replay {}
+        #expect(attachedVersion == 7)
     }
 }
 

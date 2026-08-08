@@ -48,7 +48,20 @@ private func roundTrip<F: WireFrame>(_ frame: F) throws -> F {
         withUnsafeBytes(of: &length) { blob.append(contentsOf: $0) }
         blob.append(255)
         blob.append(0x7B)
-        #expect(throws: WireError.self) { _ = try reassembler.feed(blob) }
+        do {
+            _ = try reassembler.feed(blob)
+            Issue.record("an unknown frame type was accepted")
+        } catch {
+            #expect("\(error)" == "frame type 255 is not in this protocol version's vocabulary")
+        }
+    }
+
+    @Test func unknownOptionalJSONFieldIsIgnored() throws {
+        let body = Data(#"{"client":"future-client","futureHint":true,"versions":[0]}"#.utf8)
+        let raw = RawFrame(type: .hello, body: body)
+        let decoded = try raw.decode(Hello.self)
+        #expect(decoded.client == "future-client")
+        #expect(decoded.versions == [0])
     }
 
     @Test func malformedBodyRejected() throws {
@@ -75,7 +88,7 @@ private func roundTrip<F: WireFrame>(_ frame: F) throws -> F {
 @Suite struct ControlFrameTests {
     @Test func helloRoundTrip() throws {
         let back = try roundTrip(Hello(client: "reachkit-test"))
-        #expect(back.versions == [Wire.version])
+        #expect(back.versions == Wire.supportedVersions)
         #expect(back.client == "reachkit-test")
     }
 
@@ -131,6 +144,25 @@ private func roundTrip<F: WireFrame>(_ frame: F) throws -> F {
     }
 
     @Test func enrollFramesRoundTrip() throws {
+        let begin = EnrollBegin(token: "token", deviceName: "phone")
+        #expect(try roundTrip(begin) == begin)
+        let challenge = EnrollChallenge(nonce: Data([0, 1]), version: 0)
+        #expect(try roundTrip(challenge) == challenge)
+
+        let legacyBegin = try RawFrame(
+            type: .enrollBegin,
+            body: Data(#"{"deviceName":"old phone","token":"old"}"#.utf8)
+        ).decode(EnrollBegin.self)
+        #expect(legacyBegin.versions == nil)
+        #expect(Wire.offeredOrLegacy(legacyBegin.versions) == [0])
+
+        let legacyChallenge = try RawFrame(
+            type: .enrollChallenge,
+            body: Data(#"{"nonce":"AA=="}"#.utf8)
+        ).decode(EnrollChallenge.self)
+        #expect(legacyChallenge.version == nil)
+        #expect(Wire.selectedOrLegacy(legacyChallenge.version) == 0)
+
         let request = EnrollCertRequest(
             devicePubDER: Data([1, 2, 3]),
             wgPubKey: Data(repeating: 9, count: 32),

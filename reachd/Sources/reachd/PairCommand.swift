@@ -19,12 +19,10 @@ struct Pair: AsyncParsableCommand {
     var png: String?
 
     struct Payload: Codable {
-        /// The ceremony this daemon speaks, and the tripwire for the pair of
-        /// builds. Bumped to 2 when the ceremony grew its confirming frame:
-        /// this QR is minted by the same binary that serves the ceremony, so a
-        /// keeper reading the version knows what the host will do, and a
-        /// mismatched pair refuses in one sentence rather than half-pairing a
-        /// device and reporting success.
+        /// The QR payload schema, independent of the negotiated wire dialect.
+        /// Bumped to 2 when the QR-backed ceremony grew its confirming frame;
+        /// ordinary wire evolution now negotiates in `EnrollBegin` and
+        /// `EnrollChallenge` and does not force this value to move.
         var v = 2
         var cluster: UUID
         var name: String

@@ -33,12 +33,11 @@ enum EnrollmentClient {
         var applyPending: Bool
     }
 
-    /// The ceremony this build speaks. The QR is minted by the same daemon that
-    /// serves the ceremony, so the QR's version IS the daemon's version — which
-    /// makes one integer a tripwire in both directions. It matters because the
-    /// ceremony now ends with a frame the daemon sends: an older daemon closes
-    /// its send side without one, so this build would read a clean end-of-stream
-    /// and report a pairing that fully succeeded as a failure, every time.
+    /// The QR payload schema this build reads. This remains 2 independently of
+    /// `Wire.version`: the QR describes how to reach and authenticate the door,
+    /// while the begin/challenge exchange negotiates the frames spoken after it
+    /// opens. It was bumped to 2 when the QR-backed ceremony gained a confirming
+    /// frame, not merely because the wire dialect changed.
     /// `nonisolated` because `EnrollError.errorDescription` is a nonisolated
     /// protocol requirement and names this number in the sentence it shows.
     nonisolated static let ceremonyVersion = 2
@@ -166,7 +165,12 @@ enum EnrollmentClient {
         defer { stream.cancel() }
         var frames = stream.frames.makeAsyncIterator()
 
-        try await stream.send(EnrollBegin(token: payload.token, deviceName: deviceName))
+        let offeredVersions = Wire.supportedVersions
+        try await stream.send(EnrollBegin(
+            token: payload.token,
+            deviceName: deviceName,
+            versions: offeredVersions
+        ))
         let challenged = await FrameEnding.next(from: &frames)
         guard case .frame(let challengeRaw) = challenged else {
             throw EnrollError.sequence(Self.spent(challenged, waitingFor: "the challenge"))
@@ -176,15 +180,25 @@ enum EnrollmentClient {
             throw EnrollError.refused("\(error.code): \(error.message)")
         }
         let challenge = try challengeRaw.decode(EnrollChallenge.self)
+        let version = Wire.selectedOrLegacy(challenge.version)
+        guard offeredVersions.contains(version) else {
+            throw EnrollError.refused(
+                "wire-version: \(Wire.mismatchMessage(app: offeredVersions, cluster: [version]))"
+            )
+        }
 
         let wgPub = wgKey.publicKey.rawRepresentation
         let popSig = try DeviceKey.sign(challenge.nonce + devicePub + wgPub, with: deviceKey)
-        try await stream.send(EnrollCertRequest(devicePubDER: devicePub, wgPubKey: wgPub, popSig: popSig))
+        try await stream.send(
+            EnrollCertRequest(devicePubDER: devicePub, wgPubKey: wgPub, popSig: popSig),
+            for: version
+        )
 
         let granted = await FrameEnding.next(from: &frames)
         guard case .frame(let grantRaw) = granted else {
             throw EnrollError.sequence(Self.spent(granted, waitingFor: "the grant"))
         }
+        try grantRaw.requireSupported(by: version)
         if grantRaw.type == .errorFrame {
             let error = try grantRaw.decode(ErrorFrame.self)
             throw EnrollError.refused("\(error.code): \(error.message)")
@@ -196,7 +210,7 @@ enum EnrollmentClient {
             throw EnrollError.sequence("granted CA does not match the pinned hash")
         }
         _ = try DeviceKey.installCertificate(grant.deviceCertDER)
-        try await stream.send(EnrollComplete(ok: true))
+        try await stream.send(EnrollComplete(ok: true), for: version)
         // Half-close, because `send` resolves on `.contentProcessed` — handed
         // to the transport, not flushed to the peer. The `defer` above cancels
         // the connection the moment this function returns, and an abortive
@@ -244,6 +258,7 @@ enum EnrollmentClient {
         guard case .frame(let confirmRaw) = ending else {
             throw EnrollError.sequence(Self.unconfirmed(ending))
         }
+        try confirmRaw.requireSupported(by: version)
         if confirmRaw.type == .errorFrame {
             let error = try confirmRaw.decode(ErrorFrame.self)
             throw EnrollError.refused("\(error.code): \(error.message)")

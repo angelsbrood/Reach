@@ -100,6 +100,7 @@ public actor ReachConnectionHub {
         public let sessionID: UUID
         public let token: String
         public let capabilities: [String]
+        public let version: UInt8
     }
 
     private struct Entry {
@@ -204,7 +205,8 @@ public actor ReachConnectionHub {
         let control = try await openStream(for: configuration)
         defer { control.cancel() }
         var frames = control.frames.makeAsyncIterator()
-        try await control.send(Hello(client: "ReachKit/\(Wire.version)"))
+        let offeredVersions = Wire.supportedVersions
+        try await control.send(Hello(versions: offeredVersions, client: "ReachKit/\(Wire.version)"))
         // `.closed` reached the old `else`; `.broke` did not, and left as
         // `TransportError.connectionFailed` — "could not open a connection to
         // the cluster" for a tunnel that had already opened, which is the
@@ -218,8 +220,13 @@ public actor ReachConnectionHub {
             throw ReachError.sessionRejected("\(error.code): \(error.message)")
         }
         let ack = try ackRaw.decode(HelloAck.self)
+        guard offeredVersions.contains(ack.version) else {
+            throw ReachError.sessionRejected(
+                "wire-version: \(Wire.mismatchMessage(app: offeredVersions, cluster: [ack.version]))"
+            )
+        }
         noteCandidates(from: ack, for: configuration)
-        try await control.send(SessionOpen(modelID: configuration.modelID))
+        try await control.send(SessionOpen(modelID: configuration.modelID), for: ack.version)
         let answered = await FrameEnding.next(from: &frames)
         guard case .frame(let openedRaw) = answered else {
             throw ReachError.transport(answered.detailing(
@@ -230,8 +237,14 @@ public actor ReachConnectionHub {
             let error = try openedRaw.decode(ErrorFrame.self)
             throw ReachError.sessionRejected("\(error.code): \(error.message)")
         }
+        try openedRaw.requireSupported(by: ack.version)
         let opened = try openedRaw.decode(SessionOpened.self)
-        let handle = SessionHandle(sessionID: opened.sessionID, token: opened.token, capabilities: opened.capabilities)
+        let handle = SessionHandle(
+            sessionID: opened.sessionID,
+            token: opened.token,
+            capabilities: opened.capabilities,
+            version: ack.version
+        )
         entries[configuration]?.session = handle
         return handle
     }

@@ -46,6 +46,20 @@ public enum FrameType: UInt8, Codable, Sendable, CaseIterable {
     case appEnrollBegin = 40
     case appEnrollCertRequest = 41
     case appEnrollGrant = 42
+
+    /// The first dialect that may send this type. Exhaustive on purpose: a
+    /// future enum case cannot compile until its compatibility gate is named.
+    public var introducedInVersion: UInt8 {
+        switch self {
+        case .hello, .helloAck, .sessionOpen, .sessionOpened,
+             .grantSubscribe, .grantEvent, .grantRule, .ping, .pong, .errorFrame,
+             .generateBegin, .generateReattach, .generateCancel, .evAck, .ev,
+             .enrollBegin, .enrollChallenge, .enrollCertRequest, .enrollGrant,
+             .enrollComplete, .enrollConfirmed, .appEnrollBegin,
+             .appEnrollCertRequest, .appEnrollGrant:
+            Wire.baselineVersion
+        }
+    }
 }
 
 /// A frame that can ride the wire. Bodies are JSON for v0; the envelope is
@@ -53,6 +67,11 @@ public enum FrameType: UInt8, Codable, Sendable, CaseIterable {
 /// plus the body.
 public protocol WireFrame: Codable, Sendable {
     static var frameType: FrameType { get }
+    static var introducedInVersion: UInt8 { get }
+}
+
+public extension WireFrame {
+    static var introducedInVersion: UInt8 { frameType.introducedInVersion }
 }
 
 /// A frame as read off the wire, before its body is decoded.
@@ -73,6 +92,12 @@ public struct RawFrame: Sendable {
             throw WireError.malformedFrame("\(type): \(error)")
         }
     }
+
+    /// A peer may know a frame type in source and still have negotiated an
+    /// older dialect that is not allowed to receive it.
+    public func requireSupported(by version: UInt8) throws {
+        try WireError.require(type: type, negotiatedVersion: version)
+    }
 }
 
 public enum WireError: Error, Sendable, CustomStringConvertible, LocalizedError {
@@ -80,6 +105,7 @@ public enum WireError: Error, Sendable, CustomStringConvertible, LocalizedError 
     case unknownFrameType(UInt8)
     case malformedFrame(String)
     case unexpectedFrame(FrameType)
+    case frameRequiresVersion(type: FrameType, introduced: UInt8, negotiated: UInt8)
 
     public var description: String {
         switch self {
@@ -91,10 +117,34 @@ public enum WireError: Error, Sendable, CustomStringConvertible, LocalizedError 
             "a frame did not decode: \(detail)"
         case .unexpectedFrame(let type):
             "received \(type) where the exchange expected something else"
+        case .frameRequiresVersion(let type, let introduced, let negotiated):
+            "\(type) belongs to protocol generation \(introduced), but this exchange negotiated generation \(negotiated)"
         }
     }
 
     public var errorDescription: String? { description }
+
+    public static func require(type: FrameType, negotiatedVersion: UInt8) throws {
+        try require(
+            type: type,
+            introducedInVersion: type.introducedInVersion,
+            negotiatedVersion: negotiatedVersion
+        )
+    }
+
+    public static func require(
+        type: FrameType,
+        introducedInVersion: UInt8,
+        negotiatedVersion: UInt8
+    ) throws {
+        guard introducedInVersion <= negotiatedVersion else {
+            throw WireError.frameRequiresVersion(
+                type: type,
+                introduced: introducedInVersion,
+                negotiated: negotiatedVersion
+            )
+        }
+    }
 }
 
 public enum FrameCodec {
@@ -102,7 +152,15 @@ public enum FrameCodec {
     /// a hard stop against nonsense lengths from a broken or hostile peer.
     public static let maxFrameLength: UInt32 = 16 * 1024 * 1024
 
-    public static func encode(_ frame: some WireFrame) throws -> Data {
+    public static func encode(
+        _ frame: some WireFrame,
+        for negotiatedVersion: UInt8 = Wire.baselineVersion
+    ) throws -> Data {
+        try WireError.require(
+            type: type(of: frame).frameType,
+            introducedInVersion: type(of: frame).introducedInVersion,
+            negotiatedVersion: negotiatedVersion
+        )
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         let body = try encoder.encode(frame)

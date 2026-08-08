@@ -76,9 +76,31 @@ public struct EnrollmentService: Sendable {
             guard let first = try await iterator.next() else { return }
             switch first.type {
             case .enrollBegin:
-                try await serveDevice(begin: try first.decode(EnrollBegin.self), stream: stream, iterator: &iterator)
+                let begin = try first.decode(EnrollBegin.self)
+                let offered = Wire.offeredOrLegacy(begin.versions)
+                guard let version = Wire.negotiate(offered: offered) else {
+                    try await refuseVersion(offered: offered, stream: stream)
+                    return
+                }
+                try await serveDevice(
+                    begin: begin,
+                    stream: stream,
+                    iterator: &iterator,
+                    version: version
+                )
             case .appEnrollBegin:
-                try await serveApp(begin: try first.decode(AppEnrollBegin.self), stream: stream, iterator: &iterator)
+                let begin = try first.decode(AppEnrollBegin.self)
+                let offered = Wire.offeredOrLegacy(begin.versions)
+                guard let version = Wire.negotiate(offered: offered) else {
+                    try await refuseVersion(offered: offered, stream: stream)
+                    return
+                }
+                try await serveApp(
+                    begin: begin,
+                    stream: stream,
+                    iterator: &iterator,
+                    version: version
+                )
             default:
                 try await stream.send(ErrorFrame(code: "enroll-sequence", message: "expected EnrollBegin or AppEnrollBegin"))
                 stream.cancel()
@@ -89,10 +111,23 @@ public struct EnrollmentService: Sendable {
         }
     }
 
+    /// Refuses before a token is consumed or an app request is parked.
+    private func refuseVersion(
+        offered: [UInt8],
+        stream: ReachTransport.QUICStream
+    ) async throws {
+        try await stream.send(ErrorFrame(
+            code: "wire-version",
+            message: Wire.mismatchMessage(app: offered, cluster: Wire.supportedVersions)
+        ))
+        stream.finishSending()
+    }
+
     private func serveDevice(
         begin: EnrollBegin,
         stream: ReachTransport.QUICStream,
-        iterator: inout AsyncThrowingStream<RawFrame, Error>.AsyncIterator
+        iterator: inout AsyncThrowingStream<RawFrame, Error>.AsyncIterator,
+        version: UInt8
     ) async throws {
         // Consumed on presentation, deliberately: holding the token open
         // across the round trip below would let a second device present it
@@ -110,7 +145,7 @@ public struct EnrollmentService: Sendable {
             try await stream.send(ErrorFrame(
                 code: "enroll-token",
                 message: "this QR is spent or expired — run `reachd pair` on the host for a fresh one"
-            ))
+            ), for: version)
             stream.cancel()
             return
         }
@@ -125,14 +160,14 @@ public struct EnrollmentService: Sendable {
             endpoint = try wgHost.currentEndpoint()
         } catch {
             Log.error("enrollment refused — no mesh endpoint: \(error)")
-            try await stream.send(ErrorFrame(code: "enroll-endpoint", message: "\(error)"))
+            try await stream.send(ErrorFrame(code: "enroll-endpoint", message: "\(error)"), for: version)
             stream.cancel()
             return
         }
 
         var nonce = Data(count: 32)
         nonce.withUnsafeMutableBytes { _ = SecRandomCopyBytes(kSecRandomDefault, 32, $0.baseAddress!) }
-        try await stream.send(EnrollChallenge(nonce: nonce))
+        try await stream.send(EnrollChallenge(nonce: nonce, version: version), for: version)
 
         // The same three endings as the confirming read below, and this one
         // answered two — worse, it said nothing at all about either. A stream
@@ -151,11 +186,12 @@ public struct EnrollmentService: Sendable {
             // Worth answering only when something is still listening, exactly
             // as below: a stream that closed or broke has no reader left.
             if case .frame = requested {
-                try? await stream.send(ErrorFrame(code: "enroll-sequence", message: "expected EnrollCertRequest"))
+                try? await stream.send(ErrorFrame(code: "enroll-sequence", message: "expected EnrollCertRequest"), for: version)
             }
             stream.cancel()
             return
         }
+        try requestRaw.requireSupported(by: version)
         let request = try requestRaw.decode(EnrollCertRequest.self)
 
         // Proof of possession over nonce ‖ devicePub ‖ wgPub with the
@@ -167,7 +203,7 @@ public struct EnrollmentService: Sendable {
             publicKey.isValidSignature(signature, for: signed),
             request.wgPubKey.count == 32
         else {
-            try await stream.send(ErrorFrame(code: "enroll-pop", message: "proof of possession failed"))
+            try await stream.send(ErrorFrame(code: "enroll-pop", message: "proof of possession failed"), for: version)
             stream.cancel()
             return
         }
@@ -191,7 +227,7 @@ public struct EnrollmentService: Sendable {
                 allowedIPs: ["\(wgHost.serverMeshIP)/32"],
                 keepaliveSeconds: 25
             )
-        ))
+        ), for: version)
 
         // Four answers, not one silent return. A stream that closed, a stream
         // that broke, a frame that was the wrong thing, and a device that said
@@ -212,11 +248,12 @@ public struct EnrollmentService: Sendable {
             // Worth answering only when something is still listening — a
             // stream that closed or broke has no reader on the other end.
             if case .frame = confirmation {
-                try? await stream.send(ErrorFrame(code: "enroll-sequence", message: "the ceremony ends with EnrollComplete"))
+                try? await stream.send(ErrorFrame(code: "enroll-sequence", message: "the ceremony ends with EnrollComplete"), for: version)
             }
             stream.cancel()
             return
         }
+        try completeRaw.requireSupported(by: version)
         // `ok` was decoded and discarded here, so a device reporting failure
         // read as success. It is the device's own verdict on the grant it just
         // installed; honour it.
@@ -244,7 +281,7 @@ public struct EnrollmentService: Sendable {
             // undo: the reservation keeps its address and its certificate and
             // has no road, which is exactly what doctor now reports.
             Log.error("enrollment refused — no road for \(begin.deviceName): \(error)")
-            try? await stream.send(ErrorFrame(code: "enroll-peer", message: "\(error)"))
+            try? await stream.send(ErrorFrame(code: "enroll-peer", message: "\(error)"), for: version)
             stream.cancel()
             return
         }
@@ -261,7 +298,7 @@ public struct EnrollmentService: Sendable {
         // log as nothing but an error. The peer is installed and the record is
         // admitted; there is nothing here to roll back.
         do {
-            try await stream.send(EnrollConfirmed(applyPending: applyPending))
+            try await stream.send(EnrollConfirmed(applyPending: applyPending), for: version)
         } catch {
             Log.error("device enrolled, but \(begin.deviceName) was never told: \(error). It will report the pairing as failed; re-pair to settle it.")
         }
@@ -276,11 +313,12 @@ public struct EnrollmentService: Sendable {
     private func serveApp(
         begin: AppEnrollBegin,
         stream: ReachTransport.QUICStream,
-        iterator: inout AsyncThrowingStream<RawFrame, Error>.AsyncIterator
+        iterator: inout AsyncThrowingStream<RawFrame, Error>.AsyncIterator,
+        version: UInt8
     ) async throws {
         var nonce = Data(count: 32)
         nonce.withUnsafeMutableBytes { _ = SecRandomCopyBytes(kSecRandomDefault, 32, $0.baseAddress!) }
-        try await stream.send(EnrollChallenge(nonce: nonce))
+        try await stream.send(EnrollChallenge(nonce: nonce, version: version), for: version)
 
         // The last instance of the shape in this file, closed by the grep the
         // other three earned. Losing this frame costs nothing durable — no
@@ -304,11 +342,12 @@ public struct EnrollmentService: Sendable {
             // Worth answering only when something is still listening, exactly
             // as the device half does at both of its reads.
             if case .frame = requested {
-                try? await stream.send(ErrorFrame(code: "enroll-sequence", message: "expected AppEnrollCertRequest"))
+                try? await stream.send(ErrorFrame(code: "enroll-sequence", message: "expected AppEnrollCertRequest"), for: version)
             }
             stream.cancel()
             return
         }
+        try requestRaw.requireSupported(by: version)
         let request = try requestRaw.decode(AppEnrollCertRequest.self)
 
         let signed = nonce + request.appPubX963
@@ -317,7 +356,7 @@ public struct EnrollmentService: Sendable {
             let signature = try? P256.Signing.ECDSASignature(derRepresentation: request.popSig),
             publicKey.isValidSignature(signature, for: signed)
         else {
-            try await stream.send(ErrorFrame(code: "enroll-pop", message: "proof of possession failed"))
+            try await stream.send(ErrorFrame(code: "enroll-pop", message: "proof of possession failed"), for: version)
             stream.cancel()
             return
         }
@@ -339,11 +378,11 @@ public struct EnrollmentService: Sendable {
             // the ceremony now; this stream just goes away.
             stream.cancel()
         case .denied:
-            try await stream.send(ErrorFrame(code: "grant-denied", message: "the keeper refused"))
+            try await stream.send(ErrorFrame(code: "grant-denied", message: "the keeper refused"), for: version)
             await desk.collected(fingerprint)
             stream.cancel()
         case .timedOut:
-            try await stream.send(ErrorFrame(code: "grant-timeout", message: "no ruling within the window"))
+            try await stream.send(ErrorFrame(code: "grant-timeout", message: "no ruling within the window"), for: version)
             stream.cancel()
         case .allowed(let ruler):
             let certificate = try ca.issueClientLeaf(
@@ -356,7 +395,7 @@ public struct EnrollmentService: Sendable {
             try await stream.send(AppEnrollGrant(
                 appCertDER: Data(serializer.serializedBytes),
                 caCertDER: try ca.certificateDER()
-            ))
+            ), for: version)
             // The same silence the device half had, and the same fix. This one
             // costs far less — the app holds a valid certificate the moment the
             // grant lands, and the verdict stays parked for its hold window, so
@@ -380,6 +419,7 @@ public struct EnrollmentService: Sendable {
                 stream.cancel()
                 return
             }
+            try completeRaw.requireSupported(by: version)
             _ = try completeRaw.decode(EnrollComplete.self)
             // Only a confirmed delivery clears the held verdict — anything
             // short of EnrollComplete leaves it for the app's next knock.

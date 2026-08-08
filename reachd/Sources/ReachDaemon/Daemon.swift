@@ -145,7 +145,7 @@ public final class Daemon: Sendable {
             // reads it here and holds the enrollment channel to it.
             let caHash = Wire.base64URL(Data(SHA256.hash(data: IdentityStore.der(of: tls.caCertificate))))
             listener.advertise(name: config.clusterName, txt: [
-                "v": "\(Wire.version)",
+                Wire.txtVersionsKey: Wire.txtVersionsValue,
                 "model": filling.modelID,
                 Wire.txtCAHashKey: caHash,
             ])
@@ -221,8 +221,16 @@ public final class Daemon: Sendable {
             }
             switch first.type {
             case .hello:
-                _ = try first.decode(Hello.self)
-                let ending = try await controlLoop(stream: stream, iterator: &iterator)
+                let hello = try first.decode(Hello.self)
+                guard let version = Wire.negotiate(offered: hello.versions) else {
+                    try await stream.send(ErrorFrame(
+                        code: "wire-version",
+                        message: Wire.mismatchMessage(app: hello.versions, cluster: Wire.supportedVersions)
+                    ))
+                    stream.finishSending()
+                    return
+                }
+                let ending = try await controlLoop(stream: stream, iterator: &iterator, version: version)
                 // How a control stream ends is a decision, so it is made where
                 // the decision belongs and logged from the answer — not left
                 // to fall into the catch below, which is where it used to go.
@@ -263,14 +271,16 @@ public final class Daemon: Sendable {
     /// frame that will not decode. Those are faults and belong in the catch.
     private func controlLoop(
         stream: ReachTransport.QUICStream,
-        iterator: inout AsyncThrowingStream<RawFrame, Error>.AsyncIterator
+        iterator: inout AsyncThrowingStream<RawFrame, Error>.AsyncIterator,
+        version: UInt8
     ) async throws -> FrameEnding {
         try await stream.send(HelloAck(
+            version: version,
             cluster: config.clusterName,
             models: [ModelDescriptor(id: filling.modelID, displayName: filling.displayName, capabilities: filling.capabilities)],
             addrs: LocalAddresses.ipv4().map { $0.map(String.init).joined(separator: ".") },
             port: config.port
-        ))
+        ), for: version)
         // The admin device, once this stream proves it is one; grant events
         // ride back on this same stream while the loop keeps consuming.
         var admin: DeviceRegistry.Device?
@@ -279,13 +289,17 @@ public final class Daemon: Sendable {
         while true {
             let next = await FrameEnding.next(from: &iterator)
             guard case .frame(let raw) = next else { return next }
+            try raw.requireSupported(by: version)
             switch raw.type {
             case .sessionOpen:
                 // Decoded so a malformed frame is still refused here; its
                 // `modelID` is read by nothing — see `openSession`.
                 _ = try raw.decode(SessionOpen.self)
-                let (sessionID, token) = await registry.openSession()
-                try await stream.send(SessionOpened(sessionID: sessionID, token: token, capabilities: filling.capabilities))
+                let (sessionID, token) = await registry.openSession(version: version)
+                try await stream.send(
+                    SessionOpened(sessionID: sessionID, token: token, capabilities: filling.capabilities),
+                    for: version
+                )
                 // Which road the session was *born* on. The re-attach below
                 // has said this since the walk-out take, for a reason that
                 // applies here word for word — a 10.86.0.x on the Mac's
@@ -303,7 +317,7 @@ public final class Daemon: Sendable {
             case .grantSubscribe:
                 _ = try raw.decode(GrantSubscribe.self)
                 guard let grants, let device = await adminDevice(on: stream, grants: grants) else {
-                    try await stream.send(ErrorFrame(code: "grant-denied", message: "admin device certificate required"))
+                    try await stream.send(ErrorFrame(code: "grant-denied", message: "admin device certificate required"), for: version)
                     continue
                 }
                 admin = device
@@ -311,7 +325,7 @@ public final class Daemon: Sendable {
                 let events = await grants.desk.subscribe()
                 forwarder = Task {
                     for await event in events {
-                        try? await stream.send(event)
+                        try? await stream.send(event, for: version)
                     }
                 }
             case .grantRule:
@@ -320,17 +334,17 @@ public final class Daemon: Sendable {
                     admin = await adminDevice(on: stream, grants: grants)
                 }
                 guard let grants, let device = admin else {
-                    try await stream.send(ErrorFrame(code: "grant-denied", message: "admin device certificate required"))
+                    try await stream.send(ErrorFrame(code: "grant-denied", message: "admin device certificate required"), for: version)
                     continue
                 }
                 if await !grants.desk.rule(requestID: rule.requestID, allow: rule.allow, ruler: device.id) {
-                    try await stream.send(ErrorFrame(code: "grant-unknown", message: "no pending request \(rule.requestID)"))
+                    try await stream.send(ErrorFrame(code: "grant-unknown", message: "no pending request \(rule.requestID)"), for: version)
                 }
             case .ping:
                 let ping = try raw.decode(Ping.self)
-                try await stream.send(Pong(nonce: ping.nonce))
+                try await stream.send(Pong(nonce: ping.nonce), for: version)
             default:
-                try await stream.send(ErrorFrame(code: "unexpected-frame", message: "\(raw.type) on control stream"))
+                try await stream.send(ErrorFrame(code: "unexpected-frame", message: "\(raw.type) on control stream"), for: version)
             }
         }
     }
@@ -355,8 +369,9 @@ public final class Daemon: Sendable {
         let filling = self.filling
         let events: AsyncStream<Ev>
         let epoch: UInt64
+        let version: UInt8
         do {
-            (events, epoch) = try await registry.begin(
+            (events, epoch, version) = try await registry.begin(
                 sessionID: begin.sessionID,
                 genID: begin.genID,
                 events: { filling.generate(begin.request) }
@@ -370,7 +385,15 @@ public final class Daemon: Sendable {
             stream.cancel()
             return
         }
-        try await pump(events: events, stream: stream, iterator: &iterator, sessionID: begin.sessionID, genID: begin.genID, epoch: epoch)
+        try await pump(
+            events: events,
+            stream: stream,
+            iterator: &iterator,
+            sessionID: begin.sessionID,
+            genID: begin.genID,
+            epoch: epoch,
+            version: version
+        )
     }
 
     private func reattachLoop(
@@ -380,9 +403,14 @@ public final class Daemon: Sendable {
     ) async throws {
         let events: AsyncStream<Ev>
         let epoch: UInt64
+        let version: UInt8
         do {
             try await registry.validate(sessionID: frame.sessionID, token: frame.token)
-            (events, epoch) = try await registry.attach(sessionID: frame.sessionID, genID: frame.genID, fromSeq: frame.fromSeq)
+            (events, epoch, version) = try await registry.attach(
+                sessionID: frame.sessionID,
+                genID: frame.genID,
+                fromSeq: frame.fromSeq
+            )
         } catch {
             try await stream.send(ErrorFrame(code: "reattach-rejected", message: "\(error)"))
             stream.cancel()
@@ -395,7 +423,15 @@ public final class Daemon: Sendable {
         // nothing. A 10.86.0.x here, on the Mac's terminal and in shot, is
         // the difference between the claim and the evidence for it.
         Log.info("generation \(frame.genID) re-attached from \(stream.remoteEndpointDescription() ?? "an unnamed path") at seq \(frame.fromSeq)")
-        try await pump(events: events, stream: stream, iterator: &iterator, sessionID: frame.sessionID, genID: frame.genID, epoch: epoch)
+        try await pump(
+            events: events,
+            stream: stream,
+            iterator: &iterator,
+            sessionID: frame.sessionID,
+            genID: frame.genID,
+            epoch: epoch,
+            version: version
+        )
     }
 
     /// Sends seq-stamped events while consuming acks/cancels, detaching the
@@ -406,14 +442,15 @@ public final class Daemon: Sendable {
         iterator: inout AsyncThrowingStream<RawFrame, Error>.AsyncIterator,
         sessionID: UUID,
         genID: UUID,
-        epoch: UInt64
+        epoch: UInt64,
+        version: UInt8
     ) async throws {
         let registry = self.registry
         let sender = Task {
             var clean = true
             for await ev in events {
                 do {
-                    try await stream.send(ev)
+                    try await stream.send(ev, for: version)
                 } catch {
                     clean = false
                     break
@@ -427,6 +464,7 @@ public final class Daemon: Sendable {
         }
         do {
             while let raw = try await iterator.next() {
+                try raw.requireSupported(by: version)
                 switch raw.type {
                 case .evAck:
                     let ack = try raw.decode(EvAck.self)

@@ -144,7 +144,12 @@ public enum ReachEnrollment {
         defer { stream.cancel() }
         var frames = stream.frames.makeAsyncIterator()
 
-        try await stream.send(AppEnrollBegin(bundleID: bundle, displayName: name))
+        let offeredVersions = Wire.supportedVersions
+        try await stream.send(AppEnrollBegin(
+            bundleID: bundle,
+            displayName: name,
+            versions: offeredVersions
+        ))
         // Three endings, and this shape answered two. A reset THROWS out of
         // `next()`, and a throw cannot reach a `guard`'s `else`, so it went to
         // the retry loop's generic catch above and left as
@@ -162,10 +167,17 @@ public enum ReachEnrollment {
             throw ReachEnrollmentError.refused(code: error.code, message: error.message)
         }
         let challenge = try challengeRaw.decode(EnrollChallenge.self)
+        let version = Wire.selectedOrLegacy(challenge.version)
+        guard offeredVersions.contains(version) else {
+            throw ReachEnrollmentError.refused(
+                code: "wire-version",
+                message: Wire.mismatchMessage(app: offeredVersions, cluster: [version])
+            )
+        }
 
         let pub = key.publicKey.x963Representation
         let popSig = try key.signature(for: challenge.nonce + pub).derRepresentation
-        try await stream.send(AppEnrollCertRequest(appPubX963: pub, popSig: popSig))
+        try await stream.send(AppEnrollCertRequest(appPubX963: pub, popSig: popSig), for: version)
 
         // The parked wait: nothing moves until a human rules the sheet — which
         // is exactly why this read has to answer all three endings. On a
@@ -196,6 +208,7 @@ public enum ReachEnrollment {
                 "the connection ended while the request was parked on the keeper's sheet — usually the ruling is not lost, the cluster holds it for ten minutes and this app's next knock collects it; if the cluster restarted or that window passed, the sheet comes round once more"
             ))
         }
+        try grantRaw.requireSupported(by: version)
         if grantRaw.type == .errorFrame {
             let error = try grantRaw.decode(ErrorFrame.self)
             throw ReachEnrollmentError.refused(code: error.code, message: error.message)
@@ -224,7 +237,7 @@ public enum ReachEnrollment {
             label: identityLabel
         )
         try KeychainIdentity.storeCertificate(der: grant.caCertDER, label: identityLabel + ".ca")
-        try await stream.send(EnrollComplete(ok: true))
+        try await stream.send(EnrollComplete(ok: true), for: version)
         // Same half-close as the device ceremony: `defer` cancels below, and a
         // reset where a FIN belongs can take this frame with it. Here it only
         // costs the desk a held verdict it would expire anyway — the app keeps

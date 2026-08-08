@@ -8,7 +8,7 @@ public struct Hello: WireFrame, Equatable {
     public var versions: [UInt8]
     public var client: String
 
-    public init(versions: [UInt8] = [Wire.version], client: String) {
+    public init(versions: [UInt8] = Wire.supportedVersions, client: String) {
         self.versions = versions
         self.client = client
     }
@@ -230,19 +230,25 @@ public struct EnrollBegin: WireFrame, Equatable {
     public static let frameType = FrameType.enrollBegin
     public var token: String
     public var deviceName: String
+    /// Optional so a pre-negotiation peer decodes as legacy v0.
+    public var versions: [UInt8]?
 
-    public init(token: String, deviceName: String) {
+    public init(token: String, deviceName: String, versions: [UInt8]? = Wire.supportedVersions) {
         self.token = token
         self.deviceName = deviceName
+        self.versions = versions
     }
 }
 
 public struct EnrollChallenge: WireFrame, Equatable {
     public static let frameType = FrameType.enrollChallenge
     public var nonce: Data
+    /// The daemon's selection. Missing means a legacy daemon speaking v0.
+    public var version: UInt8?
 
-    public init(nonce: Data) {
+    public init(nonce: Data, version: UInt8? = nil) {
         self.nonce = nonce
+        self.version = version
     }
 }
 
@@ -328,10 +334,13 @@ public struct AppEnrollBegin: WireFrame, Equatable {
     public static let frameType = FrameType.appEnrollBegin
     public var bundleID: String
     public var displayName: String
+    /// Optional so a pre-negotiation peer decodes as legacy v0.
+    public var versions: [UInt8]?
 
-    public init(bundleID: String, displayName: String) {
+    public init(bundleID: String, displayName: String, versions: [UInt8]? = Wire.supportedVersions) {
         self.bundleID = bundleID
         self.displayName = displayName
+        self.versions = versions
     }
 }
 

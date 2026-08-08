@@ -107,6 +107,10 @@ public actor SessionRegistry {
 
     private struct SessionRecord {
         var tokenHash: SHA256Digest
+        /// The dialect selected on this session's control stream. Generation
+        /// streams are separate QUIC streams, so this is the bridge that keeps
+        /// their vocabulary inside the agreement.
+        var version: UInt8
         var generations: [UUID: GenerationRecord] = [:]
         var lastSeen: ContinuousClock.Instant
     }
@@ -135,11 +139,14 @@ public actor SessionRegistry {
     /// `HelloAck.models` is how a client is meant to know, but nothing
     /// enforces it. That is a refusal the daemon does not have rather than a
     /// claim it breaks, so it is logged, not fixed here.
-    public func openSession() -> (sessionID: UUID, token: String) {
+    public func openSession(
+        version: UInt8 = Wire.baselineVersion
+    ) -> (sessionID: UUID, token: String) {
         let sessionID = UUID()
         let token = Data((0..<32).map { _ in UInt8.random(in: .min ... .max) }).base64EncodedString()
         sessions[sessionID] = SessionRecord(
             tokenHash: SHA256.hash(data: Data(token.utf8)),
+            version: version,
             lastSeen: clock.now
         )
         return (sessionID, token)
@@ -194,7 +201,7 @@ public actor SessionRegistry {
         sessionID: UUID,
         genID: UUID,
         events: @escaping @Sendable () -> AsyncThrowingStream<WireEvent, Error>
-    ) throws -> (stream: AsyncStream<Ev>, epoch: UInt64) {
+    ) throws -> (stream: AsyncStream<Ev>, epoch: UInt64, version: UInt8) {
         guard sessions[sessionID] != nil else { throw RegistryError.unknownSession }
         if sessions[sessionID]!.generations[genID] != nil {
             // First-frame-loss idempotency (ruling 4). This delegates, so it
@@ -217,7 +224,7 @@ public actor SessionRegistry {
             }
         }
         sessions[sessionID]!.generations[genID]!.task = task
-        return (stream, record.epoch)
+        return (stream, record.epoch, sessions[sessionID]!.version)
     }
 
     /// Re-attach a live or buffered generation, replaying from `fromSeq`
@@ -225,7 +232,11 @@ public actor SessionRegistry {
     ///
     /// Throws `replayOutgrewTheBuffer` rather than serving a replay that
     /// begins inside a span the cap dropped — see the guard below.
-    public func attach(sessionID: UUID, genID: UUID, fromSeq: UInt64?) throws -> (stream: AsyncStream<Ev>, epoch: UInt64) {
+    public func attach(
+        sessionID: UUID,
+        genID: UUID,
+        fromSeq: UInt64?
+    ) throws -> (stream: AsyncStream<Ev>, epoch: UInt64, version: UInt8) {
         guard var session = sessions[sessionID] else { throw RegistryError.unknownSession }
         guard var record = session.generations[genID] else { throw RegistryError.unknownGeneration }
         // A client holding through `fromSeq` needs `fromSeq + 1` onward, and
@@ -258,7 +269,7 @@ public actor SessionRegistry {
         }
         session.generations[genID] = record
         sessions[sessionID] = session
-        return (stream, record.epoch)
+        return (stream, record.epoch, session.version)
     }
 
     /// Cumulative ack: trim the buffer at and below `seq`.

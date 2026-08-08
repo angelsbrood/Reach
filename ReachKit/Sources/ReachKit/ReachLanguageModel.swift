@@ -166,14 +166,18 @@ public struct ReachExecutor: FoundationModels.LanguageModelExecutor {
                         token: live.token,
                         genID: genID,
                         fromSeq: lastReceived
-                    ))
+                    ), for: live.version)
                 } else {
-                    try await stream.send(GenerateBegin(sessionID: live.sessionID, genID: genID, request: wire))
+                    try await stream.send(
+                        GenerateBegin(sessionID: live.sessionID, genID: genID, request: wire),
+                        for: live.version
+                    )
                 }
 
                 for try await raw in stream.frames {
+                    try raw.requireSupported(by: live.version)
                     if Task.isCancelled {
-                        try? await stream.send(GenerateCancel(genID: genID))
+                        try? await stream.send(GenerateCancel(genID: genID), for: live.version)
                     }
                     switch raw.type {
                     case .ev:
@@ -183,11 +187,11 @@ public struct ReachExecutor: FoundationModels.LanguageModelExecutor {
                         reconnectDeadline = ContinuousClock.now + .seconds(120)
                         unacked += 1
                         if unacked >= 16 {
-                            try? await stream.send(EvAck(seq: ev.seq))
+                            try? await stream.send(EvAck(seq: ev.seq), for: live.version)
                             unacked = 0
                         }
                         if try await forward(ev.event, into: channel) {
-                            try? await stream.send(EvAck(seq: ev.seq))
+                            try? await stream.send(EvAck(seq: ev.seq), for: live.version)
                             return
                         }
                     case .errorFrame:

@@ -208,6 +208,75 @@ import X509
 
     // MARK: Tests
 
+    @Test func ceremonyVersionRefusalSpendsNothingAndParksNothing() async throws {
+        let fixture = try await makeFixture(
+            sessionPort: TestPorts.port(47456),
+            enrollPort: TestPorts.port(47457)
+        )
+        defer { fixture.cleanup() }
+
+        let token = fixture.tokens.mint()
+        let device = try await fixture.enrollDialer.openStream(timeout: 45)
+        var deviceFrames = device.frames.makeAsyncIterator()
+        try await device.send(EnrollBegin(
+            token: token,
+            deviceName: "future-phone",
+            versions: [1]
+        ))
+        let deviceError = try (try #require(try await deviceFrames.next())).decode(ErrorFrame.self)
+        #expect(deviceError.code == "wire-version")
+        #expect(deviceError.message.hasPrefix("your cluster speaks an older generation"))
+        device.cancel()
+
+        // The mismatch is checked before the one-time authority is touched.
+        #expect(fixture.tokens.consume(token))
+        #expect(await fixture.devices.all.isEmpty)
+
+        let app = try await fixture.enrollDialer.openStream(timeout: 45)
+        var appFrames = app.frames.makeAsyncIterator()
+        try await app.send(AppEnrollBegin(
+            bundleID: "systems.reach.future-only",
+            displayName: "Future Only",
+            versions: [1]
+        ))
+        let appError = try (try #require(try await appFrames.next())).decode(ErrorFrame.self)
+        #expect(appError.code == "wire-version")
+        app.cancel()
+
+        let footprint = await fixture.desk.footprint
+        #expect(footprint.pending == 0)
+        #expect(footprint.ruled == 0)
+        #expect(footprint.index == 0)
+
+        // A begin frame from before negotiation had no `versions` key. New
+        // daemons interpret both ceremonies as v0 and answer additively.
+        let legacyDevice = try await fixture.enrollDialer.openStream(timeout: 45)
+        var legacyDeviceFrames = legacyDevice.frames.makeAsyncIterator()
+        try await legacyDevice.send(EnrollBegin(
+            token: fixture.tokens.mint(),
+            deviceName: "legacy-phone",
+            versions: nil
+        ))
+        let deviceChallenge = try (try #require(
+            try await legacyDeviceFrames.next()
+        )).decode(EnrollChallenge.self)
+        #expect(deviceChallenge.version == 0)
+        legacyDevice.cancel()
+
+        let legacyApp = try await fixture.enrollDialer.openStream(timeout: 45)
+        var legacyAppFrames = legacyApp.frames.makeAsyncIterator()
+        try await legacyApp.send(AppEnrollBegin(
+            bundleID: "systems.reach.legacy",
+            displayName: "Legacy",
+            versions: nil
+        ))
+        let appChallenge = try (try #require(
+            try await legacyAppFrames.next()
+        )).decode(EnrollChallenge.self)
+        #expect(appChallenge.version == 0)
+        legacyApp.cancel()
+    }
+
     @Test func sheetRulesAppOntoTheCluster() async throws {
         let fixture = try await makeFixture(sessionPort: TestPorts.port(47440), enrollPort: TestPorts.port(47441))
         defer { fixture.cleanup() }

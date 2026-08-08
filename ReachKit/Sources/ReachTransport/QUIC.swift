@@ -140,8 +140,14 @@ public final class QUICStream: Sendable {
     /// Frames as they arrive, in order, until FIN or failure.
     public var frames: AsyncThrowingStream<RawFrame, Error> { incoming }
 
-    public func send(_ frame: some WireFrame) async throws {
-        let data = try FrameCodec.encode(frame)
+    /// Bare sends are baseline-v0 sends. Once an exchange has negotiated, its
+    /// selected version is passed explicitly; a future frame cannot therefore
+    /// slip onto a legacy exchange by using the old call shape.
+    public func send(
+        _ frame: some WireFrame,
+        for negotiatedVersion: UInt8 = Wire.baselineVersion
+    ) async throws {
+        let data = try FrameCodec.encode(frame, for: negotiatedVersion)
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             connection.send(content: data, completion: .contentProcessed { error in
                 if let error {

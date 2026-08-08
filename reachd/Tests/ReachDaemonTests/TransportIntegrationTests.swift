@@ -374,4 +374,57 @@ final class IdentityBin: @unchecked Sendable {
         }()
         #expect(!outcome.hasPrefix("received"), "cert-less client obtained service: \(outcome)")
     }
+
+    @Test func dialectsNegotiateBeforeASessionExists() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+
+        var config = DaemonConfig()
+        config.port = TestPorts.port(47458)
+        config.clusterName = "versions-test"
+        let registry = SessionRegistry()
+        let daemon = Daemon(
+            config: config,
+            filling: ScriptedFilling(),
+            identity: Daemon.ListenerIdentity(
+                identity: fixture.serverIdentity,
+                caCertificate: fixture.caCert
+            ),
+            registry: registry
+        )
+        try await daemon.start(advertise: false)
+        defer { Task { await daemon.stop() } }
+
+        let dialer = QUICDialer(
+            endpoint: .hostPort(
+                host: "127.0.0.1",
+                port: .init(rawValue: TestPorts.port(47458))!
+            ),
+            parameters: .reachQUIC(options: TLSBuilder.clientOptions(
+                alpn: Wire.alpn,
+                identity: fixture.clientIdentity,
+                serverTrustRoots: [fixture.caCert]
+            ))
+        )
+
+        let incompatible = try await dialer.openStream(timeout: 45)
+        defer { incompatible.cancel() }
+        var refusedFrames = incompatible.frames.makeAsyncIterator()
+        try await incompatible.send(Hello(versions: [1], client: "future-only"))
+        let refused = try #require(try await refusedFrames.next())
+        let error = try refused.decode(ErrorFrame.self)
+        #expect(error.code == "wire-version")
+        #expect(error.message.hasPrefix("your cluster speaks an older generation"))
+        #expect(await registry.residentSessions == 0)
+
+        let compatible = try await dialer.openStream(timeout: 45)
+        defer { compatible.cancel() }
+        var frames = compatible.frames.makeAsyncIterator()
+        try await compatible.send(Hello(versions: [1, 0], client: "future-compatible"))
+        let ack = try (try #require(try await frames.next())).decode(HelloAck.self)
+        #expect(ack.version == 0)
+        try await compatible.send(SessionOpen(modelID: "scripted"), for: ack.version)
+        _ = try (try #require(try await frames.next())).decode(SessionOpened.self)
+        #expect(await registry.residentSessions == 1)
+    }
 }

@@ -13,6 +13,27 @@ the decision. Kill criteria come from the pre-filing plan.
 | S5 | Does a road the user already owns — their own tailnet — work as a Reach candidate without code? | **PASS** (2026-07-24) — by construction, then confirmed on hardware: the session fell to the tailnet with the Reach tunnel down, and the mesh sat idle |
 | S6 | How does the framework's session drive a tool round trip through a third-party executor? | **PASS** (2026-08-05) — the transcript loop, and it is forced: the channel is send-only, so no `respond` call can receive tool output. `capabilities` is a hard gate, not a label |
 | S7 | Does the slot model emit tool calls the host can parse? | **PASS** (2026-08-05) — `gemma-4-e4b` 5/5, ~0.85 s per round trip; MLX parses the call itself, and the grammar has no escaping, which is why arguments cross whole |
+| S10 | What does a pre-negotiation peer actually survive? | **PASS** (2026-08-08) — unknown optional JSON keys tolerated 3/3; unknown type 255 fatal 3/3; authenticated and enrollment ALPN mismatches each ended in opaque `stream open timeout` 3/3 |
+
+## S10 — what an old peer actually survives (2026-08-08)
+
+Measured before the negotiation implementation in the loopback rig, three
+times per case:
+
+- An existing frame with an unknown optional JSON key decoded successfully
+  **3/3**. This is the additive-field tool.
+- Unknown frame type byte 255 failed **3/3** with the exact error `frame type
+  255 is not in this protocol version's vocabulary`. A new type is therefore
+  never additive by itself.
+- An authenticated client offering `reach/255` to a `reach/0` listener failed
+  **3/3** as `could not open a connection to the cluster: stream open timeout`.
+- An enrollment client offering `reach-enroll/255` to a `reach-enroll/0`
+  listener failed **3/3** with the same timeout.
+
+The last two are the retained before-state: ALPN remains the hard boundary for
+an envelope change, but dialect incompatibility now reaches the stable
+generation-0 envelope and returns a directional `wire-version` frame before
+creating a session, consuming a device token, or parking an app request.
 
 ## S6 — the framework runs the tool and comes back (2026-08-05)
 

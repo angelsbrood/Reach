@@ -50,6 +50,7 @@ final class GrantConsole {
 
     private var loop: Task<Void, Never>?
     private var control: ReachTransport.QUICStream?
+    private var controlVersion: UInt8?
 
     func start() {
         guard loop == nil else { return }
@@ -97,13 +98,16 @@ final class GrantConsole {
     /// parked until its grant window expired. The one place the operator
     /// looks would have been the one place that could not tell them.
     func rule(_ event: GrantEvent, allow: Bool) {
-        guard let control else {
+        guard let control, let controlVersion else {
             state = .unavailable("not connected to the cluster — the ruling was not sent")
             return
         }
         Task { [weak self] in
             do {
-                try await control.send(GrantRule(requestID: event.requestID, allow: allow))
+                try await control.send(
+                    GrantRule(requestID: event.requestID, allow: allow),
+                    for: controlVersion
+                )
                 guard let self else { return }
                 self.pending.removeAll { $0.requestID == event.requestID }
                 self.ruledLog.append("\(allow ? "allowed" : "denied") \(event.displayName) (\(event.bundleID))")
@@ -138,6 +142,11 @@ final class GrantConsole {
                 dropConnection()
                 try? await Task.sleep(for: .seconds(30))
                 continue
+            } catch let mismatch as VersionMismatch {
+                state = .unavailable(mismatch.description)
+                dropConnection()
+                try? await Task.sleep(for: .seconds(30))
+                continue
             } catch {
                 // A deliberate re-dial (refresh) tears the stream down on
                 // purpose, and the error it produces is not news — saying
@@ -158,10 +167,15 @@ final class GrantConsole {
     /// straight back when the watch reconnects.
     private func dropConnection() {
         control = nil
+        controlVersion = nil
         pending.removeAll()
     }
 
     private struct NotAdmin: Error {}
+
+    private struct VersionMismatch: Error, CustomStringConvertible {
+        let description: String
+    }
 
     /// The console's control stream ended before the cluster's hello ack.
     ///
@@ -206,19 +220,36 @@ final class GrantConsole {
         control = stream
         var frames = stream.frames.makeAsyncIterator()
 
-        try await stream.send(Hello(client: "Keeper/\(Wire.version)"))
+        let offeredVersions = Wire.supportedVersions
+        try await stream.send(Hello(versions: offeredVersions, client: "Keeper/\(Wire.version)"))
         let acked = await FrameEnding.next(from: &frames)
-        guard case .frame(let ack) = acked, ack.type == .helloAck else {
+        guard case .frame(let ackRaw) = acked else {
             throw NoHelloAck(ending: acked)
         }
-        try await stream.send(GrantSubscribe())
+        if ackRaw.type == .errorFrame {
+            let error = try ackRaw.decode(ErrorFrame.self)
+            if error.code == "wire-version" {
+                throw VersionMismatch(description: error.message)
+            }
+            throw NoHelloAck(ending: acked)
+        }
+        guard ackRaw.type == .helloAck else { throw NoHelloAck(ending: acked) }
+        let ack = try ackRaw.decode(HelloAck.self)
+        guard offeredVersions.contains(ack.version) else {
+            throw VersionMismatch(description: Wire.mismatchMessage(
+                app: offeredVersions,
+                cluster: [ack.version]
+            ))
+        }
+        controlVersion = ack.version
+        try await stream.send(GrantSubscribe(), for: ack.version)
         state = .watching(cluster: record.name)
 
         // The session tunnel idles out at 30 s; the console holds it open.
         let pinger = Task {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(10))
-                try? await stream.send(Ping(nonce: UInt64.random(in: .min ... .max)))
+                try? await stream.send(Ping(nonce: UInt64.random(in: .min ... .max)), for: ack.version)
             }
         }
         defer {
@@ -227,6 +258,7 @@ final class GrantConsole {
         }
 
         while let raw = try await frames.next() {
+            try raw.requireSupported(by: ack.version)
             switch raw.type {
             case .grantEvent:
                 let event = try raw.decode(GrantEvent.self)
