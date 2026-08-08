@@ -16,6 +16,142 @@ the decision. Kill criteria come from the pre-filing plan.
 | S10 | What does a pre-negotiation peer actually survive? | **PASS** (2026-08-08) — unknown optional JSON keys tolerated 3/3; unknown type 255 fatal 3/3; authenticated and enrollment ALPN mismatches each ended in opaque `stream open timeout` 3/3 |
 | S11 | What does a real `@Generable` response do before the daemon honors its schema? | **FAIL / FUNCTION GAP** (2026-08-08) — all six shapes, three runs each with prompt schema on and off, were refused by FoundationModels before the executor ran: 36/36 exact `unsupportedCapability`; no schema or transcript crossed the wire |
 | S12 | Can the pinned grammar engine constrain FoundationModels schemas within the warmed latency gate? | **PASS** (2026-08-08) — five schema shapes compiled; warmed first accepted delta 30–39 ms; xgrammar 0.1.30 cannot fork, so the required fresh-compile fallback costs ~13 ms for the two-field schema and ~120–135 ms for the adversarial benchmark |
+| S13 | Can generic structural guidance repair allowed tool calls and force required calls across the planned schema range? | **STOP / REPLAY FAILED** (2026-08-08) — nested and fixed-array calls failed unconstrained 3/3 and repaired 3/3, and generic required produced a valid Gemma 4 call; the adversarial replay nevertheless exhausted 512 tokens through legal numeric runaway 3/3, firing the plan's stop before implementation |
+| S14 | Was S13's adversarial stop a missing parser, or a wrong completion policy? | **PASS** (2026-08-08) — treating comma as a structural exit and digits as content completed the exact adversarial schema 3/3; negative, decimal and nested-number controls also passed 3/3, so no parsing table or Swift schema state machine was needed |
+
+## S13 — constrained calls have a greedy adversarial cliff (2026-08-08)
+
+**Question and kill.** Can the pinned engine compose a model-format-neutral
+strict JSON tool envelope with the existing parser, repair candidate arguments
+without leaking the originals, and force `.required` across simple, nested,
+enum, fixed-array, optional, multi-tool and adversarial schemas? The locked
+criterion was explicit: if constrained replay itself failed, record S13 and
+stop rather than ship a partial argument guarantee.
+
+**Verdict: STOP.** Tier 1 and Tier 2 were not implemented. The ordinary
+breaking shapes established the function gap and showed that replay can close
+it, but the adversarial replay failed **3/3** at the existing 512-token default.
+Every failure remained inside the grammar, greedily extending a legal integer
+until the budget ended, and returned the exact existing product error `the
+cluster could not finish the constrained response within its 512-token limit`.
+No unconstrained fallback or tool execution occurred.
+
+### Pinned source and test surface
+
+- Revision `83f3ef6dc5bc24daeea33cfd9e18ab1383bb0bc8` confirms that
+  `MLXLMCommon.ToolCallProcessor` streams ordinary prose incrementally but
+  exposes a tool call only after its full native span has parsed. There is no
+  safe incremental argument surface, so Tier 3 remains an evidenced seam.
+- The pinned adapter already implements generic required calls with an
+  xgrammar structural tag and a strict JSON `{name, arguments}` envelope. A
+  real `mlx-community/gemma-4-e2b-it-4bit` characterization terminated its
+  grammar, parsed `set_flashlight`, and completed 24 generated tokens in
+  **595 ms**. Its final buffer was valid JSON and selected the offered tool.
+- The dependency's own `ToolCallingSchemaTests` passed **11/12** from a clean
+  `/private/tmp` scratch build. The sole failure is a stale
+  builder/assertion mismatch at `ToolCallingSchemaTests.swift:280`: the test
+  expects `elements[0].content.json_schema`, while the current builder makes
+  `content` the per-tool `or`. The workspace build first hit attributable
+  Finder/resource-fork codesigning metadata; the scratch rerun removed that
+  harness fault.
+
+### Real Reach/Gemma comparison
+
+The pre-change Reach path ran against cached
+`mlx-community/gemma-4-E2B-it-qat-4bit`. Each allowed candidate was observed
+whole from today's native parser, then replayed as response JSON under the
+same deterministic grammar engine and the candidate tool's schema. Prompt
+schema inclusion was disabled. Times below are wall-clock ranges over three
+runs; allowed "complete" is completed-call delivery because no raw argument
+fragment exists.
+
+| Shape | Unconstrained valid | Constrained replay valid | Allowed complete | Replay first accepted delta | Replay complete |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| simple | 3/3 | 3/3 | 403–412 ms | 370–1,011 ms | 733–1,363 ms |
+| nested `$defs` | **0/3** | **3/3** | 673–745 ms | 63–72 ms | 952–1,048 ms |
+| enum | 3/3 | 3/3 | 346–365 ms | 59–69 ms | 330–352 ms |
+| fixed array | **0/3** | **3/3** | 385–481 ms | 59–77 ms | 514–763 ms |
+| optional | 3/3 | 3/3 | 336–366 ms | 363–372 ms | 594–623 ms |
+| two offered tools | 3/3 | 3/3 | 403–413 ms | 361–372 ms | 715–733 ms |
+| adversarial nested pattern/range/arrays | **0/3** | **0/3** | 791–848 ms | 382–408 ms | 20.43–21.06 s, then budget error |
+
+The nested baseline encoded `destination` as a string rather than its object
+**3/3**. The fixed-array baseline emitted malformed shapes such as
+`{"values":"[3"}` or a spurious `properties` string **3/3**. Replay repaired
+both to schema-valid JSON **3/3**, so either is a genuine future Simulator
+comparison discovered in S13 rather than invented afterward.
+
+The adversarial schema nested `$defs`, a regex-constrained code, an exact
+integer range, and fixed arrays. Its deliberately conflicting candidate was
+invalid **3/3**. Replay began correctly but greedy sampling entered the first
+integer array and emitted one unbounded integer for the remainder of the
+budget **3/3**. This is a fidelity failure within the allowed grammar, not a
+schema-compile failure, and it is why legality alone cannot support the
+pass's promised every-call guarantee.
+
+### Grammar construction measurements
+
+With the real QAT Gemma tokenizer, warm model load was **5,020 ms** and the
+one-time grammar tokenizer build was **625 ms**. Bare, model-neutral structural
+grammars compiled in **301 ms** simple, **6 ms** nested, **3 ms** enum,
+**4 ms** fixed array, **308 ms** optional, **301 ms** second tool, and
+**312 ms** adversarial. The seven-tool combined source was 3,232 bytes and
+compiled in **417 ms**; a repeated fresh compile took **413 ms**.
+`GrammarConstraint.clone()` failed immediately with
+`forkFailed("xg_matcher_fork: Fork() not available in xgrammar v0.1.30")`, so
+the repeated cost is the required isolation fallback rather than a cache hit.
+
+**What this rules.** The model-neutral envelope and generic required path are
+technically viable, and Tier 3 is unavailable on the pinned processor, but
+Tier 1's universal guarantee is not viable with the present greedy guided
+loop. Per the founder-approved stop condition, Reach's implementation,
+`docs/wire.md`, public interfaces, installed daemon and dialect v0 remain
+unchanged; `PLAN-toolargs.md` stays live for a future re-ruling rather than
+retiring.
+
+## S14 — numbers needed an exit, not a parser (2026-08-08)
+
+**Question and bounded ruling.** S13 proved the adversarial output stayed
+inside xgrammar yet never finished an integer. The founder authorized one
+narrow experiment before any wider implementation: stop classifying digits as
+JSON-closing tokens, classify comma as the separator that ends a scalar, and
+rerun the exact failed schema plus negative, decimal and nested-number
+controls. Only if that failed could the work widen to a bounded schema/state
+machine; no general parsing table was authorized or built.
+
+**Cause.** The pinned `GuidedGenerationLoop` enters a hard completion zone by
+penalizing every token except the closing-bias set, then takes greedy argmax.
+That set contained every single digit but not comma. Xgrammar's integer rule
+was already correct — `("0" | "-"? [1-9] [0-9]*)` — so after the first digit
+both another digit and the field separator were legal, but policy rewarded the
+digit and suppressed the exit forever. A digit is scalar content; comma is the
+structural exit.
+
+**Result: PASS, 12/12.** Reach retained the pinned dependency and supplied the
+correct model-wide completion bias locally: EOS remains tier 1; quote, right
+brace, right bracket and comma are tier 2; digits receive no closing reward.
+The grammar mask still forces a first digit when one is required.
+
+| Shape | Result | Complete time over 3 runs |
+| --- | ---: | ---: |
+| exact S13 adversarial nested pattern/range/fixed arrays | **3/3** | 5.25–7.07 s |
+| negative bounded integer | **3/3** | 0.41–0.52 s |
+| decimal plus following integer | **3/3** | 0.55–0.57 s |
+| two nested integer/decimal objects | **3/3** | 1.77–1.84 s |
+
+Every output reached grammar acceptance and decoded through its requested
+`@Generable` type. The adversarial outputs satisfied the exact integer 73,
+regex codes and all three fixed-array counts. No fallback, schema rewrite or
+state machine ran.
+
+**Implementation confirmation.** After the S14 gate passed, the permanent
+Gemma E2B self-test offered two tools and exercised the S13 breaking shape.
+Private `.allowed` proposal/replay passed **3/3** in 5.37–6.49 s; generic
+`.required` dispatch passed **3/3** in 5.24–5.33 s; schema-plus-tools selected
+a constrained response **3/3**; and a one-token required budget returned the
+legible constrained-generation error **1/1**. A separate mTLS loopback carried
+two repeated calls as two whole, ordered events. Tier 3 remains out for the
+unchanged S13 reason: the pinned native processor exposes only completed calls.
 
 ## S11 — the framework refused the missing capability (2026-08-08)
 

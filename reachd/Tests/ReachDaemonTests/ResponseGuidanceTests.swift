@@ -150,24 +150,13 @@ struct ResponseGuidanceTests {
             reason: "the model ended before the grammar accepted the response"))
     }
 
-    @Test func schemaToolProbeSelectsCallsAndNeverItsProse() {
-        var noCall = SchemaToolProbeBuffer()
-        noCall.appendUsage(.usage(inputTokens: 10, outputTokens: 4))
-        #expect(noCall.selectedToolEvents == nil)
-
-        let call = WireEvent.toolCallAppendArguments(
-            entryID: "tools",
-            id: "call-1",
-            name: "clock",
-            content: #"{"zone":"UTC"}"#,
-            tokenCount: 1)
-        var withCall = SchemaToolProbeBuffer()
-        withCall.appendToolCall(call)
-        withCall.appendUsage(.usage(inputTokens: 10, outputTokens: 7))
-        #expect(withCall.selectedToolEvents == [
-            call,
-            .usage(inputTokens: 10, outputTokens: 7),
-        ])
+    @Test func completionPolicyPrefersStructuralExitsRatherThanMoreDigits() {
+        for token in ["\"", "}", "]", ","] {
+            #expect(CompletionGuidance.isClosingToken(token))
+        }
+        for token in ["0", "1", "5", "9", "-", ".", "e"] {
+            #expect(!CompletionGuidance.isClosingToken(token))
+        }
     }
 
     private static func object(_ json: String) throws -> [String: Any] {

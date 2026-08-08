@@ -108,6 +108,21 @@ needs no `sudo`; either works. `service install` refuses a binary with no
 without asking — so an agent pointed there works until the day it silently
 does not.
 
+⚠️ **MLX commands currently need the canonical installed path.** Measured on
+8 August 2026, invoking `selftest --mlx` through the `~/.local/bin/reachd`
+symlink made the pinned MLX runtime search beside `~/.local/bin` and refuse
+with `Failed to load the default metallib`; invoking the same installed binary
+beside its seven bundles passed. Until launch-path normalization lands, run
+GPU-bearing diagnostics (and a manual `serve`) as:
+
+```
+~/.local/libexec/reach/reachd selftest --mlx
+```
+
+`service install` is safe through the symlink: it resolves symlinks before
+writing the plist, so the supervised agent records
+`~/.local/libexec/reach/reachd` and uses the adjacent bundles.
+
 ### ⚠️ Reinstalling can quietly destroy the cluster
 
 A `serve` that cannot find its CA does not fail — it **mints a fresh one**,

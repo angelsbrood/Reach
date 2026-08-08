@@ -71,24 +71,3 @@ enum ResponseGuidanceError: Error, Sendable, Equatable, CustomStringConvertible,
 
     var errorDescription: String? { description }
 }
-
-/// Buffers the ordinary tool-aware probe without letting its prose escape.
-/// A real tool call selects the buffered tool/usage events; no call selects a
-/// fresh grammar-constrained response and discards the probe entirely.
-struct SchemaToolProbeBuffer {
-    private(set) var events: [WireEvent] = []
-    private(set) var sawToolCall = false
-
-    mutating func appendToolCall(_ event: WireEvent) {
-        sawToolCall = true
-        events.append(event)
-    }
-
-    mutating func appendUsage(_ event: WireEvent) {
-        events.append(event)
-    }
-
-    var selectedToolEvents: [WireEvent]? {
-        sawToolCall ? events : nil
-    }
-}

@@ -17,10 +17,9 @@ enum ToolRendering {
     ///
     /// `.disallowed` renders nothing, which is the whole of how the mode is
     /// honored: a model that was never told the tools exist cannot call them.
-    /// That is exact rather than best-effort, and it is the only enforcement
-    /// available without constrained decoding — `.required` has no forcing
-    /// mechanism here and is a named seam in `docs/wire.md` rather than a
-    /// silent promise.
+    /// `.allowed` uses this prompt shape only for the private proposal pass;
+    /// `.required` uses it as context while a structural grammar forces one
+    /// of the offered calls.
     static func specs(for request: WireGenerationRequest) throws -> [[String: any Sendable]]? {
         guard request.options.toolCalling != .disallowed, !request.tools.isEmpty else {
             return nil

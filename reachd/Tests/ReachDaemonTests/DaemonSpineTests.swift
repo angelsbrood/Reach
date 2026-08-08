@@ -37,6 +37,43 @@ struct ScriptedFilling: SlotFilling {
     }
 }
 
+struct ScriptedToolFilling: SlotFilling {
+    let modelID = "scripted-tools"
+    let displayName = "Scripted Tools"
+    let capabilities: [String] = []
+
+    func prewarm() async throws {}
+
+    func generate(_ request: WireGenerationRequest) -> AsyncThrowingStream<WireEvent, Error> {
+        AsyncThrowingStream { continuation in
+            guard request.options.toolCalling == .required,
+                  request.tools.map(\.name) == ["record"]
+            else {
+                continuation.yield(.finished(.error("required tool request changed in transit")))
+                continuation.finish()
+                return
+            }
+            continuation.yield(.toolCallAppendArguments(
+                entryID: "calls",
+                id: "first",
+                name: "record",
+                content: #"{"value":1}"#,
+                tokenCount: 1
+            ))
+            continuation.yield(.toolCallAppendArguments(
+                entryID: "calls",
+                id: "second",
+                name: "record",
+                content: #"{"value":2}"#,
+                tokenCount: 1
+            ))
+            continuation.yield(.usage(inputTokens: 7, outputTokens: 11))
+            continuation.yield(.finished(.complete))
+            continuation.finish()
+        }
+    }
+}
+
 @Suite struct SessionRegistryTests {
     /// Does a cancelled generation actually reach a terminal state?
     ///
@@ -444,6 +481,89 @@ struct ScriptedFilling: SlotFilling {
 }
 
 @Suite(.serialized) struct DaemonResumeTests {
+    @Test func requiredToolArgumentsStayWholeAndOrderedAcrossLoopback() async throws {
+        let ca = try ClusterCA.create(commonName: "Reach Tool Wire CA")
+        let server = try ca.issueServer(
+            commonName: "localhost",
+            dnsNames: ["localhost"],
+            ipAddresses: [[127, 0, 0, 1]])
+        let client = try ca.issueClient(
+            commonName: "tool-wire-client",
+            uri: "reach://device/tool-wire")
+        let serverIdentity = try IdentityMaterializer.materialize(
+            server, label: "reach-tool-wire-server-\(UUID())")
+        let clientIdentity = try IdentityMaterializer.materialize(
+            client, label: "reach-tool-wire-client-\(UUID())")
+        let boxes = [IdentityBox(serverIdentity), IdentityBox(clientIdentity)]
+        defer { for box in boxes { KeychainIdentity.remove(identity: box.identity) } }
+        let caCert = try IdentityStore.certificate(fromDER: ca.certificateDER())
+
+        var config = DaemonConfig()
+        config.port = TestPorts.port(47479)
+        config.clusterName = "tool-wire-test"
+        let daemon = Daemon(
+            config: config,
+            filling: ScriptedToolFilling(),
+            identity: Daemon.ListenerIdentity(
+                identity: serverIdentity,
+                caCertificate: caCert)
+        )
+        try await daemon.start(advertise: false)
+        defer { Task { await daemon.stop() } }
+
+        let dialer = QUICDialer(
+            endpoint: .hostPort(
+                host: "127.0.0.1",
+                port: .init(rawValue: TestPorts.port(47479))!),
+            parameters: .reachQUIC(options: TLSBuilder.clientOptions(
+                alpn: Wire.alpn,
+                identity: clientIdentity,
+                serverTrustRoots: [caCert]))
+        )
+        let control = try await dialer.openStream(timeout: 45)
+        defer { control.cancel() }
+        var controlFrames = control.frames.makeAsyncIterator()
+        try await control.send(Hello(client: "tool-wire-test"))
+        _ = try (try #require(try await controlFrames.next())).decode(HelloAck.self)
+        try await control.send(SessionOpen(modelID: "scripted-tools"))
+        let opened = try (try #require(try await controlFrames.next()))
+            .decode(SessionOpened.self)
+
+        let stream = try await dialer.openStream(timeout: 45)
+        defer { stream.cancel() }
+        let tool = WireToolDefinition(
+            name: "record",
+            description: "Record a value.",
+            parameters: GenerationSchema(type: GeneratedContent.self, properties: [])
+        )
+        try await stream.send(GenerateBegin(
+            sessionID: opened.sessionID,
+            genID: UUID(),
+            request: WireGenerationRequest(
+                id: UUID(),
+                transcript: Transcript(),
+                tools: [tool],
+                options: WireGenerationOptions(toolCalling: .required)
+            )
+        ))
+        var received: [WireEvent] = []
+        for try await raw in stream.frames where raw.type == .ev {
+            let event = try raw.decode(Ev.self).event
+            received.append(event)
+            if case .finished = event { break }
+        }
+        let calls = received.compactMap { event -> (String, String, String)? in
+            if case .toolCallAppendArguments(_, let id, let name, let content, _) = event {
+                return (id, name, content)
+            }
+            return nil
+        }
+        #expect(calls.map(\.0) == ["first", "second"])
+        #expect(calls.map(\.1) == ["record", "record"])
+        #expect(calls.map(\.2) == [#"{"value":1}"#, #"{"value":2}"#])
+        #expect(received.contains { if case .finished(.complete) = $0 { true } else { false } })
+    }
+
     /// The resume test: a generation's transport dies mid-stream; the
     /// client reconnects (any path) and re-attaches; the concatenated text
     /// is byte-identical to an uninterrupted run.

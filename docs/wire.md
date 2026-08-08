@@ -304,12 +304,29 @@ usage from the prepared input and accepted output tokens, and reports
 request's token budget is an error rather than successful incomplete JSON.
 Requests without a schema stay on the established sampler unchanged.
 
-If a request contains both a response schema and tools, the existing
-unconstrained tool detector gets the first opportunity while its prose is
-buffered. A tool call crosses exactly as before; if there is no call, the
-probe's prose is discarded and a fresh grammar-constrained response streams.
-This ordering constrains the response without pretending that tool arguments
-or `.required` are already constrained.
+Every offered tool schema is deterministically encoded and compiled before
+sampling. The grammar is a model-format-neutral strict JSON envelope,
+`{"name": <offered name>, "arguments": <that tool's schema>}`; tool order is
+request order, duplicate names are refused, and response and tool grammar
+caches have distinct key spaces.
+
+For `.allowed` (and a missing mode), the existing native detector remains the
+model's opportunity to choose prose or one or more tools. A parsed call is only
+a private proposal: its id, selected name, order and candidate values are
+retained, but its arguments never cross the wire. Each proposal is replayed
+through that tool's one-alternative grammar under deterministic daemon-only
+correction context, and only the accepted arguments are emitted. Repeated and
+multiple calls keep source order and share their turn's entry id.
+
+With a response schema and `.allowed`, probe prose remains buffered. A detected
+call selects constrained call replay; no call discards the probe prose and
+streams the constrained response. `.required` skips the unconstrained probe
+entirely and runs the all-tools grammar, so it can produce only a valid offered
+call or a legible error; a response schema does not override that requirement.
+`.disallowed` still omits tools entirely. Actual probe and guided-pass usage is
+summed, cancellation remains cancellation, and `.complete` follows only after
+every selected grammar accepts. None of this adds a frame or changes dialect
+v0; tool execution remains exclusively in the adopting app.
 
 ## Named seams (v0, deliberate)
 
@@ -317,9 +334,9 @@ or `.required` are already constrained.
   public read accessor — the `Kind` enum exists but nothing returns it. Greedy
   survives because it is detectable through `Equatable`; every other mode rides
   as `nil` and the host applies its own defaults. The constrained response path
-  is also currently greedy: its grammar controls which tokens are legal, not
-  the fidelity of how a legal token is sampled. Feedback-worthy upstream, and
-  resolved by the same rebase.
+  and tool-argument paths are also currently greedy: their grammars control
+  which tokens are legal, not the fidelity of how a legal token is sampled.
+  Feedback-worthy upstream, and resolved by the same rebase.
 - **Request `metadata` is dropped.** Its values are existential
   `Sendable & Codable & Equatable`, which JSON coding cannot carry generically.
 - **Structured partial snapshots do not cross the wire.** The daemon streams
@@ -329,21 +346,14 @@ or `.required` are already constrained.
   response-schema enforcement.
 - **Tool arguments arrive whole, not streamed.** Response text still streams
   token by token; a call's arguments cross in one `toolCallAppendArguments`.
-  This is what the grammar forces rather than a shortcut: the slot model's
-  call syntax has no escape mechanism, so a fragment emitted before the closing
-  token can turn out to have been part of a string value, and this wire has no
-  way to take one back. Apple's own MLX-backed executor emits whole for the
-  same reason. Streaming arguments becomes possible with constrained decoding,
-  which is the seam below.
-- **Tool arguments are not constrained-decoded.** The model emits its natural
-  syntax and the host parses and validates; nothing forces the arguments to
-  match the tool's schema during generation. Guided argument decoding is funded
-  scope, and it is the same seam that would make streamed arguments safe.
-- **`ToolCallingMode.required` is best-effort.** `.disallowed` is exact — the
-  tools are simply never rendered, so there is nothing to call. `.required` has
-  no forcing mechanism without constrained decoding: the definitions are
-  rendered and the model is asked, and a model that answers in prose instead is
-  not overridden.
+  Arguments are grammar-constrained before that event, but the pinned native
+  `ToolCallProcessor` exposes only completed candidate calls and the public
+  event has no retraction mechanism. Safe incremental argument delivery is
+  therefore a Tier 3 M3 seam rather than an implied future chunking toggle.
+- **Usage has no ReachKit public accessor.** The daemon counts the real probe
+  and constrained passes and the wire carries `.usage`; the client executor
+  still drops it because FoundationModels exposes no appropriate update
+  surface. A ReachKit-owned usage API remains follow-on work.
 - **Bodies are JSON.** Chosen for legibility while the shape is still moving —
   every frame on this wire can be read by a human with a hex dump and patience,
   which during a ceremony debugged at a kitchen table is worth more than bytes.

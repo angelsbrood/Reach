@@ -89,53 +89,26 @@ public final class MLXFilling: SlotFilling {
                 let maxTokens = request.options.maximumResponseTokens ?? 512
                 let temperature = request.options.temperature
                 let schemaJSON = try request.schema.map(ResponseGuidance.schemaJSON)
-                // Outside `perform`, because a tool whose schema will not
-                // render is a refusal to answer rather than an empty answer,
-                // and this is where the throw is still legible.
                 let tools = try ToolRendering.specs(for: request)
-                // One entry id for the whole turn's calls: the framework groups
-                // them under a single `toolCalls` transcript entry, and minting
-                // a fresh id per call would scatter one turn across several.
+                let toolMode = request.options.toolCalling ?? .allowed
+                let toolPlan: ToolGuidancePlan?
+                if tools != nil {
+                    toolPlan = try ToolGuidance.plan(for: request.tools)
+                } else {
+                    toolPlan = nil
+                }
+                if toolMode == .required, toolPlan == nil {
+                    throw ToolGuidanceError.requiredWithoutTools
+                }
                 let toolCallsEntryID = UUID().uuidString
 
-                if let schemaJSON {
-                    try await container.perform { context in
-                        let xgTokenizer: GrammarTokenizer
-                        let constraint: GrammarConstraint
-                        do {
-                            xgTokenizer = try await box.grammarTokenizer(
-                                tokenizer: context.tokenizer)
-                            constraint = try await box.constraint(
-                                schemaJSON: schemaJSON,
-                                tokenizer: xgTokenizer,
-                                hostTokenizer: context.tokenizer)
-                        } catch {
-                            throw ResponseGuidance.unsupported(error)
-                        }
-                        let bias = await box.tokenizerBias(tokenizer: context.tokenizer)
-
-                        // Deliberately identical to the established prompt
-                        // preparation below: schemas constrain the response,
-                        // not the input or the model's chat template.
-                        let chat: [Chat.Message] = try messages.map { message in
-                            switch message.role {
-                            case .system: return .system(message.text)
-                            case .user: return .user(message.text)
-                            case .tool:
-                                if case .output(let callID) = message.tool {
-                                    return .tool(message.text, id: callID)
-                                }
-                                return .tool(message.text)
-                            case .assistant:
-                                if case .calls(let calls) = message.tool {
-                                    return .assistant(
-                                        message.text,
-                                        toolCalls: try calls.map(Self.toolCall(from:))
-                                    )
-                                }
-                                return .assistant(message.text)
-                            }
-                        }
+                // Keep the no-schema/no-tools path outside the model actor
+                // exactly as before this pass. Tool guidance must not alter
+                // ordinary prompt preparation, sampling, event order, usage,
+                // or the lifetime for which the container is borrowed.
+                if schemaJSON == nil, toolPlan == nil {
+                    let events = try await container.perform { context in
+                        let chat = try Self.chat(from: messages)
                         let input = try await context.processor.prepare(
                             input: UserInput(
                                 chat: chat,
@@ -143,56 +116,246 @@ public final class MLXFilling: SlotFilling {
                                 additionalContext: ["enable_thinking": false]
                             )
                         )
+                        var parameters = GenerateParameters(maxTokens: maxTokens)
+                        if let temperature { parameters.temperature = Float(temperature) }
+                        return try MLXLMCommon.generate(
+                            input: input,
+                            parameters: parameters,
+                            context: context,
+                            tools: tools
+                        )
+                    }
+                    for await event in events {
+                        try Task.checkCancellation()
+                        switch event {
+                        case .chunk(let chunk):
+                            continuation.yield(.responseAppend(
+                                entryID: nil,
+                                text: chunk,
+                                segmentID: nil,
+                                tokenCount: 1
+                            ))
+                        case .info(let info):
+                            continuation.yield(.usage(
+                                inputTokens: info.promptTokenCount,
+                                outputTokens: info.generationTokenCount
+                            ))
+                        case .toolCall:
+                            throw ToolGuidanceError.incompleteOutput(
+                                "an unconstrained call escaped a request with no offered tools")
+                        }
+                    }
+                    continuation.yield(.finished(.complete))
+                    continuation.finish()
+                    return
+                }
 
-                        // Tool arguments remain on the existing unconstrained
-                        // detector path. Prose is held back until the probe has
-                        // either produced a call or definitively has not: a
-                        // failed probe must not leak unconstrained response text
-                        // before the grammar-owned answer begins.
-                        if let tools {
-                            var parameters = GenerateParameters(maxTokens: maxTokens)
-                            if let temperature {
-                                parameters.temperature = Float(temperature)
+                try await container.perform { context in
+                    let chat = try Self.chat(from: messages)
+                    let input = try await context.processor.prepare(
+                        input: UserInput(
+                            chat: chat,
+                            tools: tools,
+                            additionalContext: ["enable_thinking": false]
+                        )
+                    )
+
+                    var xgTokenizer: GrammarTokenizer?
+                    var bias: GuidanceBias?
+                    var toolConstraints: [String: GrammarConstraint] = [:]
+                    var requiredConstraint: GrammarConstraint?
+
+                    if schemaJSON != nil || toolPlan != nil {
+                        xgTokenizer = try await box.grammarTokenizer(tokenizer: context.tokenizer)
+                        bias = await box.tokenizerBias(tokenizer: context.tokenizer)
+                    }
+
+                    // Refuse unsupported argument schemas before the model can
+                    // emit prose, select a call, or cause any adopting-app work.
+                    if let toolPlan, let xgTokenizer {
+                        for tool in toolPlan.tools {
+                            do {
+                                toolConstraints[tool.name] = try await box.structuralConstraint(
+                                    structuralTag: tool.structuralTag,
+                                    tokenizer: xgTokenizer,
+                                    hostTokenizer: context.tokenizer
+                                )
+                            } catch {
+                                throw ToolGuidance.unsupported(tool: tool.name, error: error)
                             }
-                            var buffered = SchemaToolProbeBuffer()
-                            let probe = try MLXLMCommon.generate(
-                                input: input,
-                                parameters: parameters,
-                                context: context,
-                                tools: tools
-                            )
-                            for await event in probe {
-                                try Task.checkCancellation()
-                                switch event {
-                                case .chunk:
-                                    break
-                                case .info(let info):
-                                    buffered.appendUsage(.usage(
-                                        inputTokens: info.promptTokenCount,
-                                        outputTokens: info.generationTokenCount
-                                    ))
-                                case .toolCall(let call):
-                                    guard let arguments = Self.argumentsJSON(of: call) else {
-                                        continue
-                                    }
-                                    buffered.appendToolCall(.toolCallAppendArguments(
-                                        entryID: toolCallsEntryID,
-                                        id: call.id ?? UUID().uuidString,
-                                        name: call.function.name,
-                                        content: arguments,
+                        }
+                        if toolMode == .required {
+                            if toolPlan.tools.count == 1 {
+                                requiredConstraint = toolConstraints[toolPlan.tools[0].name]
+                            } else {
+                                do {
+                                    requiredConstraint = try await box.structuralConstraint(
+                                        structuralTag: toolPlan.combinedStructuralTag,
+                                        tokenizer: xgTokenizer,
+                                        hostTokenizer: context.tokenizer
+                                    )
+                                } catch {
+                                    throw ToolGuidance.unsupported(
+                                        tool: toolPlan.tools.map(\.name).joined(separator: ", "),
+                                        error: error
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    var usage = AccumulatedUsage()
+
+                    if toolMode == .required,
+                       let toolPlan,
+                       let constraint = requiredConstraint,
+                       let xgTokenizer,
+                       let bias
+                    {
+                        let generated = try Self.runToolGuidance(
+                            input: input,
+                            context: context,
+                            constraint: constraint,
+                            grammarTokenizer: xgTokenizer,
+                            bias: bias,
+                            tools: toolPlan.tools,
+                            maxTokens: maxTokens,
+                            label: toolPlan.tools.map(\.name).joined(separator: ", ")
+                        )
+                        usage.add(input: input.text.tokens.size, output: generated.tokenCount)
+                        let accepted = try ToolGuidance.parseEnvelope(
+                            generated.text,
+                            offeredNames: Set(toolPlan.tools.map(\.name))
+                        )
+                        continuation.yield(.toolCallAppendArguments(
+                            entryID: toolCallsEntryID,
+                            id: UUID().uuidString,
+                            name: accepted.name,
+                            content: accepted.argumentsJSON,
+                            tokenCount: 1
+                        ))
+                        continuation.yield(usage.event)
+                        return
+                    }
+
+                    if let toolPlan, let tools {
+                        guard let xgTokenizer, let bias else {
+                            throw ToolGuidanceError.incompleteOutput(
+                                "the grammar tokenizer was not prepared for offered tools")
+                        }
+                        var parameters = GenerateParameters(maxTokens: maxTokens)
+                        if let temperature { parameters.temperature = Float(temperature) }
+                        var proposals: [ProposedToolCall] = []
+                        let probe = try MLXLMCommon.generate(
+                            input: input,
+                            parameters: parameters,
+                            context: context,
+                            tools: tools
+                        )
+                        for await event in probe {
+                            try Task.checkCancellation()
+                            switch event {
+                            case .chunk(let chunk):
+                                // Schema probes remain private; ordinary prose
+                                // retains its established streaming behavior.
+                                if ToolRouting.streamsProbeProse(
+                                    hasResponseSchema: schemaJSON != nil)
+                                {
+                                    continuation.yield(.responseAppend(
+                                        entryID: nil,
+                                        text: chunk,
+                                        segmentID: nil,
                                         tokenCount: 1
                                     ))
                                 }
-                            }
-                            if let toolEvents = buffered.selectedToolEvents {
-                                for event in toolEvents { continuation.yield(event) }
-                                return
+                            case .info(let info):
+                                usage.add(
+                                    input: info.promptTokenCount,
+                                    output: info.generationTokenCount
+                                )
+                            case .toolCall(let call):
+                                proposals.append(try ToolGuidance.proposedCall(call))
                             }
                         }
 
+                        let selection = ToolRouting.selection(
+                            proposals: proposals,
+                            hasResponseSchema: schemaJSON != nil
+                        )
+                        if case .calls = selection {
+                            for (proposal, tool) in try ToolRouting.replayPairs(
+                                proposals: proposals,
+                                plan: toolPlan
+                            ) {
+                                let constraint: GrammarConstraint
+                                if let precompiled = toolConstraints.removeValue(forKey: tool.name) {
+                                    constraint = precompiled
+                                } else {
+                                    do {
+                                        constraint = try await box.structuralConstraint(
+                                            structuralTag: tool.structuralTag,
+                                            tokenizer: xgTokenizer,
+                                            hostTokenizer: context.tokenizer
+                                        )
+                                    } catch {
+                                        throw ToolGuidance.unsupported(tool: tool.name, error: error)
+                                    }
+                                }
+                                let replayInput = try await Self.replayInput(
+                                    proposal: proposal,
+                                    context: context
+                                )
+                                let generated = try Self.runToolGuidance(
+                                    input: replayInput,
+                                    context: context,
+                                    constraint: constraint,
+                                    grammarTokenizer: xgTokenizer,
+                                    bias: bias,
+                                    tools: [tool],
+                                    maxTokens: maxTokens,
+                                    label: tool.name
+                                )
+                                usage.add(
+                                    input: replayInput.text.tokens.size,
+                                    output: generated.tokenCount
+                                )
+                                let accepted = try ToolGuidance.parseEnvelope(
+                                    generated.text,
+                                    offeredNames: Set([tool.name])
+                                )
+                                continuation.yield(.toolCallAppendArguments(
+                                    entryID: toolCallsEntryID,
+                                    id: proposal.id,
+                                    name: accepted.name,
+                                    content: accepted.argumentsJSON,
+                                    tokenCount: 1
+                                ))
+                            }
+                            continuation.yield(usage.event)
+                            return
+                        }
+
+                        if case .prose = selection {
+                            continuation.yield(usage.event)
+                            return
+                        }
+                    }
+
+                    if let schemaJSON, let xgTokenizer, let bias {
+                        let constraint: GrammarConstraint
+                        do {
+                            constraint = try await box.constraint(
+                                schemaJSON: schemaJSON,
+                                tokenizer: xgTokenizer,
+                                hostTokenizer: context.tokenizer
+                            )
+                        } catch {
+                            throw ResponseGuidance.unsupported(error)
+                        }
                         let structuralReserve = CompletionReserve.estimate(
                             schemaJSON: schemaJSON,
-                            tokenizer: context.tokenizer)
+                            tokenizer: context.tokenizer
+                        )
                         let completionReserve = Swift.max(structuralReserve * 3, maxTokens / 4)
                         let hardReserve = structuralReserve * 8
                         let generatedTokenCount: Int
@@ -221,97 +384,15 @@ public final class MLXFilling: SlotFilling {
                             throw ResponseGuidance.generationError(error, maxTokens: maxTokens)
                         }
                         try Task.checkCancellation()
-                        continuation.yield(.usage(
-                            inputTokens: input.text.tokens.size,
-                            outputTokens: generatedTokenCount
-                        ))
+                        usage.add(input: input.text.tokens.size, output: generatedTokenCount)
+                        continuation.yield(usage.event)
+                        return
                     }
-                    continuation.yield(.finished(.complete))
-                    continuation.finish()
-                    return
-                }
 
-                // No-schema requests remain on the established sampler and
-                // tool-call detector path. Keep this branch mechanically
-                // unchanged: response guidance must not alter ordinary asks.
-                let events = try await container.perform { context in
-                    let chat: [Chat.Message] = try messages.map { message in
-                        switch message.role {
-                        case .system: return .system(message.text)
-                        case .user: return .user(message.text)
-                        case .tool:
-                            if case .output(let callID) = message.tool {
-                                return .tool(message.text, id: callID)
-                            }
-                            return .tool(message.text)
-                        case .assistant:
-                            if case .calls(let calls) = message.tool {
-                                return .assistant(
-                                    message.text,
-                                    toolCalls: try calls.map(Self.toolCall(from:))
-                                )
-                            }
-                            return .assistant(message.text)
-                        }
-                    }
-                    // Gemma 4's thinking is configurable, and a thought block
-                    // rendered on camera is a killed take. The template kwarg
-                    // is the belt; the rehearsal is what proves the template
-                    // honours it, because nothing here can.
-                    let input = try await context.processor.prepare(
-                        input: UserInput(
-                            chat: chat,
-                            tools: tools,
-                            additionalContext: ["enable_thinking": false]
-                        )
-                    )
-                    var parameters = GenerateParameters(maxTokens: maxTokens)
-                    if let temperature {
-                        parameters.temperature = Float(temperature)
-                    }
-                    // `tools` again, and not redundantly: the first copy is
-                    // rendered into the prompt, this one configures the
-                    // detector that reads the model's answer back.
-                    return try MLXLMCommon.generate(
-                        input: input,
-                        parameters: parameters,
-                        context: context,
-                        tools: tools
-                    )
+                    throw ToolGuidanceError.incompleteOutput(
+                        "tool guidance did not select a call, response, or prose result")
                 }
-
-                for await event in events {
-                    if Task.isCancelled { break }
-                    switch event {
-                    case .chunk(let chunk):
-                        continuation.yield(.responseAppend(entryID: nil, text: chunk, segmentID: nil, tokenCount: 1))
-                    case .info(let info):
-                        continuation.yield(.usage(
-                            inputTokens: info.promptTokenCount,
-                            outputTokens: info.generationTokenCount
-                        ))
-                    case .toolCall(let call):
-                        // The call arrives already parsed: MLX's own
-                        // `ToolCallProcessor`, configured from the model's
-                        // `model_type`, swallows the `<|tool_call>…<tool_call|>`
-                        // span out of the chunk stream and hands it over whole.
-                        // So the arguments cross in one piece — which is also
-                        // what Apple's MLXLanguageModel.Executor does, and what
-                        // the grammar forces: Gemma's syntax has no escape
-                        // mechanism, so a fragment emitted early can turn out
-                        // to be wrong once the closing token lands, and this
-                        // wire has no way to take one back.
-                        guard let arguments = Self.argumentsJSON(of: call) else { break }
-                        continuation.yield(.toolCallAppendArguments(
-                            entryID: toolCallsEntryID,
-                            id: call.id ?? UUID().uuidString,
-                            name: call.function.name,
-                            content: arguments,
-                            tokenCount: 1
-                        ))
-                    }
-                }
-                continuation.yield(.finished(Task.isCancelled ? .cancelled : .complete))
+                continuation.yield(.finished(.complete))
                 continuation.finish()
             } catch is CancellationError {
                 continuation.yield(.finished(.cancelled))
@@ -323,6 +404,92 @@ public final class MLXFilling: SlotFilling {
         }
         continuation.onTermination = { _ in task.cancel() }
         return stream
+    }
+
+    private static func chat(from messages: [TranscriptChat.Message]) throws -> [Chat.Message] {
+        try messages.map { message in
+            switch message.role {
+            case .system:
+                return .system(message.text)
+            case .user:
+                return .user(message.text)
+            case .tool:
+                if case .output(let callID) = message.tool {
+                    return .tool(message.text, id: callID)
+                }
+                return .tool(message.text)
+            case .assistant:
+                if case .calls(let calls) = message.tool {
+                    return .assistant(
+                        message.text,
+                        toolCalls: try calls.map(Self.toolCall(from:))
+                    )
+                }
+                return .assistant(message.text)
+            }
+        }
+    }
+
+    private static func replayInput(
+        proposal: ProposedToolCall,
+        context: ModelContext
+    ) async throws -> LMInput {
+        let prompt = """
+        Correct the proposed tool call while preserving every value its schema permits. Return only the required JSON envelope.
+        Tool name: \(proposal.name)
+        Proposed arguments: \(proposal.argumentsJSON)
+        """
+        return try await context.processor.prepare(
+            input: UserInput(
+                chat: [
+                    .system("You repair proposed JSON tool arguments without inventing a different tool."),
+                    .user(prompt),
+                ],
+                tools: nil,
+                additionalContext: ["enable_thinking": false]
+            )
+        )
+    }
+
+    private static func runToolGuidance(
+        input: LMInput,
+        context: ModelContext,
+        constraint: GrammarConstraint,
+        grammarTokenizer: GrammarTokenizer,
+        bias: GuidanceBias,
+        tools: [GuidedTool],
+        maxTokens: Int,
+        label: String
+    ) throws -> GuidedToolOutput {
+        let structuralReserve = tools.map { tool in
+            CompletionReserve.estimate(
+                schemaJSON: tool.schemaJSON,
+                tokenizer: context.tokenizer
+            ) + context.tokenizer.encode(text: tool.beginLiteral + "}").count
+        }.max() ?? 64
+        let completionReserve = Swift.max(structuralReserve * 3, maxTokens / 4)
+        let hardReserve = structuralReserve * 8
+        var output = ""
+        do {
+            let count = try GuidedGenerationLoop.run(
+                input: input,
+                context: context,
+                constraint: constraint,
+                maxTokens: maxTokens,
+                vocabSize: grammarTokenizer.vocabSize,
+                completionReserve: completionReserve,
+                hardReserve: hardReserve,
+                closingBias: bias.closing,
+                whitespaceBias: bias.whitespace,
+                whitespaceTokenIDs: bias.whitespaceTokenIDs
+            ) { delta in
+                output += delta
+                return !Task.isCancelled
+            }
+            return GuidedToolOutput(text: output, tokenCount: count)
+        } catch {
+            throw ToolGuidance.generationError(error, tool: label, maxTokens: maxTokens)
+        }
     }
 
     /// A call the model already made, on its way back into the prompt for the
@@ -340,13 +507,24 @@ public final class MLXFilling: SlotFilling {
         )
     }
 
-    /// The arguments of a parsed call as JSON, which is what the framework's
-    /// channel accumulates into `Transcript.ToolCall.arguments`. Nil when they
-    /// will not encode, which drops the call rather than sending a fragment no
-    /// `GeneratedContent(json:)` can read.
-    private static func argumentsJSON(of call: MLXLMCommon.ToolCall) -> String? {
-        guard let data = try? JSONEncoder().encode(call.function.arguments) else { return nil }
-        return String(decoding: data, as: UTF8.self)
+}
+
+private struct GuidedToolOutput: Sendable {
+    var text: String
+    var tokenCount: Int
+}
+
+private struct AccumulatedUsage: Sendable {
+    private(set) var inputTokens = 0
+    private(set) var outputTokens = 0
+
+    mutating func add(input: Int, output: Int) {
+        inputTokens += input
+        outputTokens += output
+    }
+
+    var event: WireEvent {
+        .usage(inputTokens: inputTokens, outputTokens: outputTokens)
     }
 }
 
@@ -354,7 +532,7 @@ public final class MLXFilling: SlotFilling {
 actor ContainerBox {
     private var container: ModelContainer?
     private var cachedGrammarTokenizer: GrammarTokenizer?
-    private var constraintTemplates: [String: GrammarConstraint] = [:]
+    private var constraintTemplates: [GuidanceConstraintKey: GrammarConstraint] = [:]
     private var guidanceBias: GuidanceBias?
     private var guidanceStatistics = GuidanceCacheStatistics()
 
@@ -380,7 +558,31 @@ actor ContainerBox {
         tokenizer: GrammarTokenizer,
         hostTokenizer: any MLXLMCommon.Tokenizer
     ) throws -> GrammarConstraint {
-        if let template = constraintTemplates[schemaJSON] {
+        try constraint(
+            key: GuidanceConstraintKey(kind: .responseJSON, source: schemaJSON),
+            tokenizer: tokenizer,
+            hostTokenizer: hostTokenizer
+        )
+    }
+
+    func structuralConstraint(
+        structuralTag: String,
+        tokenizer: GrammarTokenizer,
+        hostTokenizer: any MLXLMCommon.Tokenizer
+    ) throws -> GrammarConstraint {
+        try constraint(
+            key: GuidanceConstraintKey(kind: .toolStructural, source: structuralTag),
+            tokenizer: tokenizer,
+            hostTokenizer: hostTokenizer
+        )
+    }
+
+    private func constraint(
+        key: GuidanceConstraintKey,
+        tokenizer: GrammarTokenizer,
+        hostTokenizer: any MLXLMCommon.Tokenizer
+    ) throws -> GrammarConstraint {
+        if let template = constraintTemplates[key] {
             do {
                 return try template.clone()
             } catch {
@@ -388,20 +590,35 @@ actor ContainerBox {
                 // but can report it unavailable at runtime. A failed clone is
                 // never reused: discard it and compile a fresh matcher.
                 guidanceStatistics.constraintCloneFailures += 1
-                constraintTemplates.removeValue(forKey: schemaJSON)
+                constraintTemplates.removeValue(forKey: key)
             }
         }
 
         guidanceStatistics.constraintCompiles += 1
-        let constraint = try GrammarConstraint(
-            tokenizer: tokenizer,
-            jsonSchema: schemaJSON,
-            fastForward: true,
-            hostTokenizer: hostTokenizer
-        )
+        switch key.kind {
+        case .responseJSON: guidanceStatistics.responseConstraintCompiles += 1
+        case .toolStructural: guidanceStatistics.toolConstraintCompiles += 1
+        }
+        let constraint: GrammarConstraint
+        switch key.kind {
+        case .responseJSON:
+            constraint = try GrammarConstraint(
+                tokenizer: tokenizer,
+                jsonSchema: key.source,
+                fastForward: true,
+                hostTokenizer: hostTokenizer
+            )
+        case .toolStructural:
+            constraint = try GrammarConstraint(
+                tokenizer: tokenizer,
+                structuralTag: key.source,
+                fastForward: true,
+                hostTokenizer: hostTokenizer
+            )
+        }
         do {
             let clone = try constraint.clone()
-            constraintTemplates[schemaJSON] = constraint
+            constraintTemplates[key] = constraint
             return clone
         } catch {
             guidanceStatistics.constraintCloneFailures += 1
@@ -435,9 +652,9 @@ actor ContainerBox {
     private func makeTokenizerBias(tokenizer: any MLXLMCommon.Tokenizer) -> GuidanceBias {
         if let guidanceBias { return guidanceBias }
         guidanceStatistics.biasBuilds += 1
-        let closing = ClosingTokenBias.compute(
+        let closing = CompletionGuidance.closingBias(
             tokenizer: tokenizer,
-            eosTokenId: tokenizer.eosTokenId)
+            eosTokenID: tokenizer.eosTokenId)
         let whitespace = WhitespaceTokenBias.compute(tokenizer: tokenizer)
         let made = GuidanceBias(
             closing: closing,
@@ -453,6 +670,8 @@ struct GuidanceCacheStatistics: Sendable, Equatable {
     var biasBuilds = 0
     var constraintCompiles = 0
     var constraintCloneFailures = 0
+    var responseConstraintCompiles = 0
+    var toolConstraintCompiles = 0
 }
 
 /// Tokenizer-derived arrays are immutable after construction and are only

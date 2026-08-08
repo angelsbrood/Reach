@@ -168,6 +168,22 @@ final class ExampleModel {
             let wantsDiscovered = host == "127.0.0.1"
             if wantsDiscovered { await awaitDiscovery() }
             let service = wantsDiscovered ? clusters.first?.name : nil
+            if ProcessInfo.processInfo.environment["REACH_TOOLARGS_PROBE"] == "1" {
+                let configuration = ReachExecutor.Configuration(
+                    serviceName: service,
+                    host: host,
+                    modelID: modelID,
+                    identityLabel: Self.identityLabel
+                )
+                let model = ReachLanguageModel(configuration: configuration)
+                do {
+                    try await runToolArgumentsAcceptanceProbe(model: model)
+                } catch {
+                    status = "failed: \(error)"
+                    print("[example-toolargs] failed: \(error)")
+                }
+                return
+            }
             if ProcessInfo.processInfo.environment["REACH_GUIDED_PROBE"] == "1" {
                 let configuration = ReachExecutor.Configuration(
                     serviceName: service,
@@ -259,6 +275,53 @@ final class ExampleModel {
         status = "guided probe passed 3/3"
     }
 
+    /// The app-facing Tier 1/2 acceptance. A successful ledger entry means
+    /// FoundationModels decoded the whole constrained argument object into the
+    /// adversarial `@Generable` type and invoked the adopting app's tool.
+    private func runToolArgumentsAcceptanceProbe(model: ReachLanguageModel) async throws {
+        var report: [String] = []
+        let modes: [(label: String, mode: GenerationOptions.ToolCallingMode)] = [
+            ("allowed", .allowed),
+            ("required", .required),
+        ]
+        for (label, mode) in modes {
+            for run in 1 ... 3 {
+                let ledger = ToolArgumentsProbeLedger()
+                let session = LanguageModelSession(
+                    model: model,
+                    tools: [ToolArgumentsProbeTool(ledger: ledger)],
+                    instructions: "Use record_audit. Never answer an audit request in prose."
+                )
+                do {
+                    _ = try await session.respond(
+                        to: "Call record_audit with a valid audit. The count must be 73, codes must match two capital letters, a dash, and four digits, and every checkpoint list has three small integers.",
+                        options: GenerationOptions(
+                            maximumResponseTokens: 512,
+                            toolCallingMode: mode
+                        )
+                    )
+                } catch {
+                    // Both modes stop inside the adopting app immediately
+                    // after the typed call. Any other failure remains a
+                    // failure unless the ledger proves that call occurred.
+                    guard ledger.acceptedCount == 1 else { throw error }
+                }
+                guard ledger.acceptedCount == 1 else {
+                    throw ExampleError.toolArgumentsProbeDidNotCall(
+                        mode: label,
+                        run: run,
+                        calls: ledger.acceptedCount
+                    )
+                }
+                let line = "\(label) run \(run): valid call"
+                report.append(line)
+                print("[example-toolargs] \(line)")
+            }
+        }
+        output = report.joined(separator: "\n")
+        status = "tool argument probe passed 6/6"
+    }
+
     /// The app half of the grant ceremony, run at most once: reload what a
     /// prior enrollment stored, else knock at the discovered cluster's
     /// grant door and wait for the keeper's ruling.
@@ -308,12 +371,15 @@ final class ExampleModel {
     enum ExampleError: LocalizedError {
         case noGrantDoor
         case guidedProbeDidNotStream(run: Int, snapshots: Int)
+        case toolArgumentsProbeDidNotCall(mode: String, run: Int, calls: Int)
         var errorDescription: String? {
             switch self {
             case .noGrantDoor:
                 "No cluster advertising a grant door was found — is reachd serving?"
             case .guidedProbeDidNotStream(let run, let snapshots):
                 "Guided probe run \(run) produced \(snapshots) snapshots; expected a streamed response."
+            case .toolArgumentsProbeDidNotCall(let mode, let run, let calls):
+                "Tool argument probe \(mode) run \(run) made \(calls) valid calls; expected exactly one."
             }
         }
     }

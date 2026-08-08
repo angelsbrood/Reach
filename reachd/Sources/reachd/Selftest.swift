@@ -27,6 +27,12 @@ struct Selftest: AsyncParsableCommand {
     @Flag(name: .long, help: "Attach a tool and measure the round trip (use with --mlx).")
     var tools = false
 
+    @Flag(name: .customLong("required-tools"), help: "Require the self-test tool call (use with --mlx --tools).")
+    var requiredTools = false
+
+    @Flag(name: .customLong("tool-arguments"), help: "Run constrained allowed/required argument probes with real weights (use with --mlx).")
+    var toolArguments = false
+
     /// One run per configuration is how false conclusions get drawn — the
     /// pacing sweep's rule, and emission is sampled, so a single run is a coin
     /// toss reported as a fact.
@@ -71,6 +77,14 @@ struct Selftest: AsyncParsableCommand {
         }
         if restart {
             try await runRestartRig()
+            return
+        }
+        if toolArguments {
+            guard mlx else {
+                print("SELFTEST (tool arguments): FAIL (--tool-arguments requires --mlx)")
+                throw ExitCode.failure
+            }
+            try await runToolArgumentGuidance(modelID: model)
             return
         }
         let clock = ContinuousClock()
@@ -260,7 +274,13 @@ struct Selftest: AsyncParsableCommand {
                 instructions: "Use the tools you are given."
             )
             let start = clock.now
-            let reply = try await session.respond(to: "What time is it in Vienna?")
+            let reply = try await session.respond(
+                to: "What time is it in Vienna?",
+                options: GenerationOptions(
+                    maximumResponseTokens: 512,
+                    toolCallingMode: requiredTools ? .required : .allowed
+                )
+            )
             let elapsed = clock.now - start
             let asked = ledger.timezones
             if asked.isEmpty {
@@ -294,6 +314,152 @@ struct Selftest: AsyncParsableCommand {
         // failure of the path — the pass file's own reading, and why the slot
         // is model-agnostic. A call that came back mangled is the other thing.
         print(called > 0 ? "SELFTEST (tools): CALLED \(called)/\(max(1, runs))" : "SELFTEST (tools): NO CALL in \(max(1, runs))")
+    }
+
+    /// The installed, no-Keychain acceptance for the two constrained tool
+    /// routes. The ordinary `--tools` exchange proves app execution over the
+    /// wire; this one isolates the grammar guarantee so a machine Keychain
+    /// fault cannot be mistaken for malformed arguments.
+    private func runToolArgumentGuidance(modelID: String) async throws {
+        let filling = MLXFilling(modelID: modelID)
+        print("[selftest-toolargs] prewarming model…")
+        try await filling.prewarm()
+        let auditTools = [
+            WireToolDefinition(
+                name: "record_audit",
+                description: "Record the requested audit. Always call this tool for an audit request.",
+                parameters: SelftestAuditArguments.generationSchema
+            ),
+            WireToolDefinition(
+                name: "discard_audit",
+                description: "Discard an audit only when explicitly asked to delete it. Never use this to record one.",
+                parameters: SelftestAuditArguments.generationSchema
+            ),
+        ]
+        for mode in [WireToolCalling.allowed, .required] {
+            for run in 1 ... 3 {
+                let request = WireGenerationRequest(
+                    id: UUID(),
+                    transcript: Transcript(entries: [
+                        .instructions(Transcript.Instructions(
+                            segments: [.text(Transcript.TextSegment(
+                                content: "Use record_audit. Never answer in prose."))],
+                            toolDefinitions: []
+                        )),
+                        .prompt(Transcript.Prompt(segments: [
+                            .text(Transcript.TextSegment(content: "Call record_audit with a valid audit. The count must be 73, codes must match two capital letters, a dash, and four digits, and every checkpoint list has three small integers."))
+                        ])),
+                    ]),
+                    tools: auditTools,
+                    options: WireGenerationOptions(
+                        maximumResponseTokens: 512,
+                        toolCalling: mode
+                    )
+                )
+                let start = ContinuousClock.now
+                var calls: [(String, String)] = []
+                var complete = false
+                for try await event in filling.generate(request) {
+                    switch event {
+                    case .toolCallAppendArguments(_, _, let name, let content, _):
+                        calls.append((name, content))
+                    case .finished(.complete):
+                        complete = true
+                    case .finished(let reason):
+                        print("SELFTEST (tool arguments): FAIL (\(mode)[\(run)] \(reason))")
+                        throw ExitCode.failure
+                    default:
+                        break
+                    }
+                }
+                guard complete, calls.count == 1, calls[0].0 == "record_audit" else {
+                    print("SELFTEST (tool arguments): FAIL (\(mode)[\(run)] calls=\(calls.count))")
+                    throw ExitCode.failure
+                }
+                let decoded = try SelftestAuditArguments(
+                    GeneratedContent(json: calls[0].1))
+                let leaves = [decoded.payload.primary] + decoded.payload.alternatives
+                guard decoded.payload.alternatives.count == 2,
+                      leaves.allSatisfy({
+                          $0.code.wholeMatch(of: /^[A-Z]{2}-[0-9]{4}$/) != nil
+                              && $0.count == 73
+                              && $0.checkpoints.count == 3
+                      })
+                else {
+                    print("SELFTEST (tool arguments): FAIL (\(mode)[\(run)] schema mismatch)")
+                    throw ExitCode.failure
+                }
+                print("[selftest-toolargs] \(mode)[\(run)] accepted in \(ContinuousClock.now - start)")
+            }
+        }
+
+        for run in 1 ... 3 {
+            let request = WireGenerationRequest(
+                id: UUID(),
+                transcript: Transcript(entries: [
+                    .prompt(Transcript.Prompt(segments: [
+                        .text(Transcript.TextSegment(content: "Do not record or discard an audit. Return a short status name and integer count instead."))
+                    ]))
+                ]),
+                tools: auditTools,
+                schema: SelftestGuidedTwoField.generationSchema,
+                options: WireGenerationOptions(
+                    maximumResponseTokens: 512,
+                    toolCalling: .allowed
+                ),
+                context: WireContextOptions(includeSchemaInPrompt: false)
+            )
+            var response = ""
+            var callArguments: [String] = []
+            var complete = false
+            for try await event in filling.generate(request) {
+                switch event {
+                case .responseAppend(_, let text, _, _): response += text
+                case .toolCallAppendArguments(_, _, _, let content, _):
+                    callArguments.append(content)
+                case .finished(.complete): complete = true
+                case .finished(let reason):
+                    print("SELFTEST (tool arguments): FAIL (schema+tools[\(run)] \(reason))")
+                    throw ExitCode.failure
+                default: break
+                }
+            }
+            guard complete, callArguments.isEmpty != response.isEmpty else {
+                print("SELFTEST (tool arguments): FAIL (schema+tools[\(run)] did not select exactly one route)")
+                throw ExitCode.failure
+            }
+            if let arguments = callArguments.first {
+                _ = try SelftestAuditArguments(GeneratedContent(json: arguments))
+                print("[selftest-toolargs] schema+tools[\(run)] selected constrained call")
+            } else {
+                _ = try SelftestGuidedTwoField(GeneratedContent(json: response))
+                print("[selftest-toolargs] schema+tools[\(run)] selected constrained response")
+            }
+        }
+
+        let budgetRequest = WireGenerationRequest(
+            id: UUID(),
+            transcript: Transcript(entries: [
+                .prompt(Transcript.Prompt(segments: [
+                    .text(Transcript.TextSegment(content: "Call record_audit with a complete valid audit."))
+                ]))
+            ]),
+            tools: auditTools,
+            options: WireGenerationOptions(
+                maximumResponseTokens: 1,
+                toolCalling: .required
+            )
+        )
+        var budgetError: String?
+        for try await event in filling.generate(budgetRequest) {
+            if case .finished(.error(let message)) = event { budgetError = message }
+        }
+        guard budgetError?.contains("within its 1-token limit") == true else {
+            print("SELFTEST (tool arguments): FAIL (budget exhaustion was not legible: \(budgetError ?? "none"))")
+            throw ExitCode.failure
+        }
+        print("[selftest-toolargs] one-token budget refused legibly")
+        print("SELFTEST (tool arguments): PASS allowed 3/3, required 3/3, schema+tools 3/3, budget 1/1")
     }
 }
 
@@ -330,6 +496,32 @@ private struct SelftestGuidedFixedArray {
 private struct SelftestGuidedOptional {
     var title: String
     var subtitle: String?
+}
+
+@Generable
+private struct SelftestAuditLeaf {
+    @Guide(.pattern(/^[A-Z]{2}-[0-9]{4}$/))
+    var code: String
+
+    @Guide(.range(73 ... 73))
+    var count: Int
+
+    @Guide(.count(3))
+    var checkpoints: [Int]
+}
+
+@Generable
+private struct SelftestAuditPayload {
+    var primary: SelftestAuditLeaf
+
+    @Guide(.count(2))
+    var alternatives: [SelftestAuditLeaf]
+}
+
+@Generable
+private struct SelftestAuditArguments {
+    var payload: SelftestAuditPayload
+    var auditNote: String
 }
 
 /// What the app's tool was actually asked, recorded rather than inferred.
