@@ -15,6 +15,8 @@ struct ScriptedFilling: SlotFilling {
     let capabilities: [String] = []
     var words: [String] = ["The ", "reach ", "holds ", "between ", "locks ", "and ", "the ", "stream ", "survives."]
     var delayMilliseconds = 40
+    var initialDelayMilliseconds = 0
+    var pauseAfterFirstMilliseconds = 0
 
     func prewarm() async throws {}
 
@@ -22,11 +24,17 @@ struct ScriptedFilling: SlotFilling {
         let (stream, continuation) = AsyncThrowingStream<WireEvent, Error>.makeStream()
         let words = self.words
         let delay = delayMilliseconds
+        let initialDelay = initialDelayMilliseconds
+        let pauseAfterFirst = pauseAfterFirstMilliseconds
         let task = Task {
-            for word in words {
+            if initialDelay > 0 {
+                try? await Task.sleep(for: .milliseconds(initialDelay))
+            }
+            for (index, word) in words.enumerated() {
                 if Task.isCancelled { break }
                 continuation.yield(.responseAppend(entryID: nil, text: word, segmentID: nil, tokenCount: 1))
-                try? await Task.sleep(for: .milliseconds(delay))
+                let pause = index == 0 && pauseAfterFirst > 0 ? pauseAfterFirst : delay
+                try? await Task.sleep(for: .milliseconds(pause))
             }
             continuation.yield(.usage(inputTokens: 3, outputTokens: words.count))
             continuation.yield(.finished(Task.isCancelled ? .cancelled : .complete))

@@ -13,7 +13,7 @@ import Testing
 /// sentence minus the second machine.
 ///
 /// ⚠️ **Ports here are hand-picked literals and nothing checks them.** This
-/// suite owns 47414–47416 and 47418–47424. `.serialized` orders it against
+/// suite owns 47414–47416 and 47418–47426. `.serialized` orders it against
 /// itself only, so every other suite in this target runs concurrently with it
 /// and a clash surfaces as `ReachError.unreachable` — a *product* error about
 /// roads, which reads as a cold-start regression and is not one.
@@ -325,6 +325,31 @@ import Testing
         #expect(await model.usage.latest == secondUsage)
     }
 
+    /// A healthy road can be quiet for longer than the measured watchdog
+    /// interval while the model is queued or preparing its first token. The
+    /// retained session control answers the exact nonce on that same dialer,
+    /// so silence alone never becomes a re-dial or a user-visible failure.
+    @Test(.timeLimit(.minutes(1)))
+    func aSilentModelCompletesWhileItsRoadAnswersPings() async throws {
+        let filling = ScriptedFilling(
+            words: ["still ", "alive"],
+            delayMilliseconds: 20,
+            initialDelayMilliseconds: 3_000
+        )
+        let (daemon, configuration, discard) = try await startDaemon(
+            port: TestPorts.port(47425),
+            filling: filling
+        )
+        defer { discard() }
+        defer { Task { await daemon.stop() } }
+
+        let session = LanguageModelSession(
+            model: ReachLanguageModel(configuration: configuration)
+        )
+        let response = try await session.respond(to: "Wait for it.")
+        #expect(response.content == "still alive")
+    }
+
     @Test func aLegacyDaemonWithoutUsageStillCompletesWithoutPublishing() async throws {
         let (daemon, configuration, discard) = try await startDaemon(
             port: TestPorts.port(47423),
@@ -385,6 +410,43 @@ import Testing
             }
         }
         #expect(final == ScriptedFilling().words.joined())
+    }
+
+    /// A generation can begin under the ten-second cold-open budget and then
+    /// run long enough that the budget expires before its road moves. Once an
+    /// event has arrived, recovery belongs to the resident-generation window.
+    /// Reusing the attempt's original cold deadline made this exact walk fail
+    /// immediately with "generation stream ended before finish" instead of
+    /// re-attaching.
+    @Test(.timeLimit(.minutes(1)))
+    func aPathChangeAfterTheColdOpenBudgetStillReattaches() async throws {
+        let filling = ScriptedFilling(
+            words: ["before ", "after"],
+            delayMilliseconds: 20,
+            pauseAfterFirstMilliseconds: 11_000
+        )
+        let (daemon, configuration, discard) = try await startDaemon(
+            port: TestPorts.port(47426),
+            filling: filling
+        )
+        defer { discard() }
+        defer { Task { await daemon.stop() } }
+
+        let session = LanguageModelSession(
+            model: ReachLanguageModel(configuration: configuration),
+            instructions: "Scripted."
+        )
+        var final = ""
+        var changed = false
+        for try await snapshot in session.streamResponse(to: "Go.") {
+            final = snapshot.content
+            if !changed {
+                changed = true
+                try await Task.sleep(for: .milliseconds(10_500))
+                await ReachConnectionHub.shared.notePathPossiblyChanged()
+            }
+        }
+        #expect(final == filling.words.joined())
     }
 
     @Test func cancellationPropagates() async throws {

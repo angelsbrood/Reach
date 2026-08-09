@@ -103,8 +103,23 @@ public actor ReachConnectionHub {
         public let version: UInt8
     }
 
+    struct GenerationStreamLease: Sendable {
+        let stream: ReachTransport.QUICStream
+        let roadEpoch: UInt64
+        fileprivate let probe: ActiveRoadProbe
+    }
+
+    private struct RoadStream: Sendable {
+        let stream: ReachTransport.QUICStream
+        let roadEpoch: UInt64
+        let probe: ActiveRoadProbe
+    }
+
     private struct Entry {
         var dialer: QUICDialer
+        var roadEpoch: UInt64 = 0
+        var probe: ActiveRoadProbe?
+        var reservedGenerationLeases = 0
         var session: SessionHandle?
         /// Redial candidates the daemon declared in its HelloAck.
         var candidates: [NWEndpoint] = []
@@ -163,7 +178,13 @@ public actor ReachConnectionHub {
     /// networks) can prod the hub instead of waiting for the monitor.
     public func notePathPossiblyChanged() {
         pathEpoch += 1
-        for key in entries.keys { entries[key]?.dirty = true }
+        for key in entries.keys {
+            entries[key]?.dirty = true
+            entries[key]?.reservedGenerationLeases = 0
+            if let probe = entries[key]?.probe {
+                Task { await probe.invalidate() }
+            }
+        }
         let waiters = pathWaiters
         pathWaiters.removeAll()
         for (_, continuation) in waiters { continuation.resume() }
@@ -199,11 +220,24 @@ public actor ReachConnectionHub {
     /// The daemon session for a configuration, opening the tunnel and the
     /// control exchange on first use.
     public func session(for configuration: ReachExecutor.Configuration) async throws -> SessionHandle {
+        try await openSession(for: configuration, retainingProbeForGeneration: false)
+    }
+
+    func generationSession(for configuration: ReachExecutor.Configuration) async throws -> SessionHandle {
+        try await openSession(for: configuration, retainingProbeForGeneration: true)
+    }
+
+    private func openSession(
+        for configuration: ReachExecutor.Configuration,
+        retainingProbeForGeneration: Bool
+    ) async throws -> SessionHandle {
         if let session = entries[configuration]?.session {
             return session
         }
-        let control = try await openStream(for: configuration)
-        defer { control.cancel() }
+        let road = try await openRoadStream(for: configuration)
+        let control = road.stream
+        var retainedControl = false
+        defer { if !retainedControl { control.cancel() } }
         var frames = control.frames.makeAsyncIterator()
         let offeredVersions = Wire.supportedVersions
         try await control.send(Hello(versions: offeredVersions, client: "ReachKit/\(Wire.version)"))
@@ -246,11 +280,81 @@ public actor ReachConnectionHub {
             version: ack.version
         )
         entries[configuration]?.session = handle
+        if retainingProbeForGeneration {
+            await road.probe.adopt(control: control, version: ack.version)
+            if entries[configuration]?.roadEpoch == road.roadEpoch,
+               entries[configuration]?.probe === road.probe {
+                await road.probe.acquireGenerationLease()
+                entries[configuration]?.reservedGenerationLeases += 1
+                retainedControl = true
+            } else {
+                await road.probe.invalidate()
+            }
+        }
         return handle
     }
 
-    public func openGenerationStream(for configuration: ReachExecutor.Configuration) async throws -> ReachTransport.QUICStream {
-        try await openStream(for: configuration)
+    func openGenerationStream(for configuration: ReachExecutor.Configuration) async throws -> GenerationStreamLease {
+        let road = try await openRoadStream(for: configuration)
+        if entries[configuration]?.roadEpoch == road.roadEpoch,
+           entries[configuration]?.probe === road.probe,
+           (entries[configuration]?.reservedGenerationLeases ?? 0) > 0 {
+            entries[configuration]?.reservedGenerationLeases -= 1
+        } else {
+            await road.probe.acquireGenerationLease()
+        }
+        return GenerationStreamLease(
+            stream: road.stream,
+            roadEpoch: road.roadEpoch,
+            probe: road.probe
+        )
+    }
+
+    func releaseGenerationStream(_ lease: GenerationStreamLease) async {
+        await lease.probe.releaseGenerationLease()
+    }
+
+    func activeRoadIsAlive(
+        _ lease: GenerationStreamLease,
+        for configuration: ReachExecutor.Configuration,
+        timeout: Duration
+    ) async -> Bool {
+        let result = await lease.probe.check(timeout: timeout)
+        if result.alive,
+           let ack = result.refreshedHello,
+           Self.isCurrentRoad(
+               leaseEpoch: lease.roadEpoch,
+               activeEpoch: entries[configuration]?.roadEpoch,
+               sameProbe: entries[configuration]?.probe === lease.probe
+           ) {
+            noteCandidates(from: ack, for: configuration)
+        }
+        return result.alive
+    }
+
+    /// Marks only the road that was actually probed. A late failure from a
+    /// lease on an older road can end that generation stream, but it can never
+    /// dirty the newer winner now cached by the hub.
+    func markRoadUnresponsive(
+        _ lease: GenerationStreamLease,
+        for configuration: ReachExecutor.Configuration
+    ) async {
+        guard Self.isCurrentRoad(
+            leaseEpoch: lease.roadEpoch,
+            activeEpoch: entries[configuration]?.roadEpoch,
+            sameProbe: entries[configuration]?.probe === lease.probe
+        ) else { return }
+        entries[configuration]?.dirty = true
+        entries[configuration]?.reservedGenerationLeases = 0
+        await lease.probe.invalidate()
+    }
+
+    nonisolated static func isCurrentRoad(
+        leaseEpoch: UInt64,
+        activeEpoch: UInt64?,
+        sameProbe: Bool
+    ) -> Bool {
+        activeEpoch == leaseEpoch && sameProbe
     }
 
     /// Drops the session (not the material) — the next use opens fresh.
@@ -306,11 +410,19 @@ public actor ReachConnectionHub {
         return candidates
     }
 
-    private func openStream(for configuration: ReachExecutor.Configuration) async throws -> ReachTransport.QUICStream {
+    private func openRoadStream(for configuration: ReachExecutor.Configuration) async throws -> RoadStream {
         let entry = try await ensureEntry(for: configuration)
         if entry.proven && !entry.dirty {
             do {
-                return try await entry.dialer.openStream(timeout: configuration.connectTimeout)
+                let stream = try await entry.dialer.openStream(timeout: configuration.connectTimeout)
+                let probe: ActiveRoadProbe
+                if let existing = entries[configuration]?.probe {
+                    probe = existing
+                } else {
+                    probe = ActiveRoadProbe(dialer: entry.dialer)
+                    entries[configuration]?.probe = probe
+                }
+                return RoadStream(stream: stream, roadEpoch: entry.roadEpoch, probe: probe)
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
@@ -324,7 +436,7 @@ public actor ReachConnectionHub {
     /// opens; its dialer becomes the cached one. Losers are cancelled (the
     /// transport tears a cancelled open down promptly), and a second late
     /// success is surplus — one tunnel is the contract.
-    private func racedStream(for configuration: ReachExecutor.Configuration) async throws -> ReachTransport.QUICStream {
+    private func racedStream(for configuration: ReachExecutor.Configuration) async throws -> RoadStream {
         guard let material = await ReachIdentityRegistry.shared.material(for: configuration.identityLabel) else {
             throw ReachError.identityNotRegistered(configuration.identityLabel)
         }
@@ -371,11 +483,19 @@ public actor ReachConnectionHub {
                 stored: entries[configuration]?.storedRoads ?? .none
             )
         }
+        if let previous = entries[configuration]?.probe {
+            await previous.invalidate()
+        }
+        let epoch = (entries[configuration]?.roadEpoch ?? 0) &+ 1
+        let probe = ActiveRoadProbe(dialer: dialers[index])
         entries[configuration]?.dialer = dialers[index]
+        entries[configuration]?.roadEpoch = epoch
+        entries[configuration]?.probe = probe
+        entries[configuration]?.reservedGenerationLeases = 0
         entries[configuration]?.dirty = false
         // The only place a dial is ever proven: it opened a stream.
         entries[configuration]?.proven = true
-        return stream
+        return RoadStream(stream: stream, roadEpoch: epoch, probe: probe)
     }
 
     private func ensureEntry(for configuration: ReachExecutor.Configuration) async throws -> Entry {

@@ -940,3 +940,107 @@ chains verified empty, UDP 5351 verified absent, and the boot service left
 disabled. The installed package remains inert with the Mac-only ACL. These
 results license implementation of automatic mapping and its failure states;
 they do not license an internet-reachability claim on the current rig.
+
+## S20 — silence can be classified by the active road (2026-08-08)
+
+**Question.** Can baseline-v0 `Ping`/`Pong` distinguish a real-weight model
+that is legitimately silent from a progressively degrading QUIC road quickly
+enough to trigger the existing candidate race, without treating silence itself
+as failure?
+
+**Instrument.** A normally signed Simulator scratch client used unused local
+UDP ports in front of the installed daemon. A seeded Python proxy forwarded
+both directions to `127.0.0.1:47337`. The measured profile was clean for five
+seconds, then added 10 percentage points of loss and 250 ms one-way delay every
+three seconds, capped at 80% and 2.00 s, while still forcing at least one packet
+in each direction every two seconds. The app independently opened authenticated
+control channels and tested 2, 3 and 5 second silence intervals, using that same
+interval as the matching-pong deadline. Each shape ran three times.
+
+**Before-state matrix.**
+
+| Shape | Run 1 | Run 2 | Run 3 | Verdict |
+| --- | --- | --- | --- | --- |
+| queued real-weight silence | first event 6.136 s | 6.013 s | 6.046 s | all 2/3/5 s pings returned in 1–3 ms; 3/3 legitimate silence |
+| progressive degradation | 2 s probe failed at 13.903 s; max event gap 12.130 s | failed at 13.997 s | failed at 14.025 s; max gap 6.781 s | matching pongs stopped in every run, within 9.025 s of degradation beginning |
+| explicit clean path change | completed and reattached | completed and reattached | completed and reattached | existing trigger remained 3/3 |
+
+The degradation runs never produced the kill shape: generation delivery did
+not remain stalled while matching pongs continued to return. The 2-second
+interval was the fastest candidate with 3/3 correct classification in every
+shape, and detected degradation inside the required ten seconds. **Ruling: two
+seconds of event silence, then one two-second matching-pong deadline. One miss
+triggers re-dial only if no generation event won the race.**
+
+**Implemented-path confirmation.** The acceptance proxy used the same seeded,
+progressive shape on a faster schedule so the live generation could not finish
+before degradation: clean for 1 s; every 0.5 s add 10% loss and 0.5 s one-way
+delay; cap at 80% and 4 s; still forward at least one packet each way every
+five seconds. A unique identity label per run forced the first generation
+stream through the proxy while its authenticated hello taught the client the
+healthy direct alternate.
+
+| Run | Visible result | largest event gap | liveness notice | daemon reattach |
+| --- | --- | ---: | ---: | ---: |
+| 1 | complete, 2,080 snapshots | 4.091 s | 4.072 s, road epoch 1 | from seq 101 |
+| 2 | complete, 1,826 snapshots | 4.271 s | 4.252 s, road epoch 1 | from seq 92 |
+| 3 | complete, 2,092 snapshots | 4.048 s | 4.031 s, road epoch 1 | from seq 96 |
+
+The complementary implemented-path control queued the same 25,000-token
+prefill three times. Occupier/queued first-event gaps were 6.380/6.163 s,
+6.609/6.386 s and 6.345/6.130 s. Matching 2/3/5-second pongs returned in every
+run, all six generations completed, and ReachKit emitted no liveness-trigger
+notice. Recovery therefore depends on evidence from the exact active road,
+not on a shorter generation timeout.
+
+**Final signed matrix after the retry-loop corrections.** The normally signed
+Simulator build repeated both implemented paths from a clean install. Queued
+silence completed 3/3 with occupier/queued first-event gaps of 6.832/6.611,
+6.288/6.076 and 6.507/6.289 seconds. There was no liveness notice and no daemon
+reattach in any slow run. Seeded degradation then completed 3/3:
+
+| Run | Proxy | Visible result | largest gap | liveness notice | daemon reattach |
+| --- | --- | --- | ---: | ---: | ---: |
+| 1 | UDP 52161, seed 61 | complete, 1,524 snapshots | 4.239 s | 4.220404 s, epoch 1 | seq 113 |
+| 2 | UDP 52162, seed 62 | complete, 3,390 snapshots | 4.111 s | 4.088257 s, epoch 1 | seq 99 |
+| 3 | UDP 52163, seed 63 | complete, 2,208 snapshots | 4.147 s | 4.129326 s, epoch 1 | seq 72 |
+
+Every proxy drained before teardown, all three ports were free afterward, and
+the Simulator returned to Home. This final 6/6 matrix is the acceptance
+measurement; the earlier matrix above records the first implemented shape that
+found the remaining retry defects.
+
+**What the phone found before it passed.** The first natural walks exposed two
+client retry errors that a local proxy could not hide. A transport-ending frame
+from the path watch initially escaped through the generation-stream error path
+instead of re-entering the road race. After that was corrected, an attempt that
+opened inside the ten-second cold budget kept using that deadline even after it
+had received events; a later hop therefore had no resident-generation retry
+time left. The retry decision now derives its deadline from whether an event
+has actually been received: ten seconds while nothing is resident, 120 seconds
+after the first event. The loopback regression delays the hop beyond the cold
+budget and then proves reattach rather than double execution.
+
+The failed walks also found rig drift rather than licensing product folklore.
+The Slate's static UDP forward and its GL.iNet-specific hidden
+`port_forward` table both still targeted the Mac's abandoned `.104` address;
+the Slate WAN had moved from `192.168.4.94` to `192.168.4.22`; and the installed
+Keeper predated its away-road control. The single UDP/51820 forward was made
+consistent at `192.168.8.210`, the hidden table and stale conntrack entry were
+corrected, the current Keeper was installed and re-paired, and its on-demand
+away road was visibly enabled. A cold building-network preflight then showed
+the phone's outer flow reaching `192.168.4.22:51820`, the reply leaving
+`.210`, an assured conntrack entry, and inner `utun9` traffic.
+
+**Hardware acceptance: PASS.** A normally launched Example began the filmed
+3,000-word generation on the Slate LAN. Session
+`3B135C82-1AE6-48E4-9468-1BED0CAD8E19` opened from `192.168.8.225`; during the
+natural walk to the building network, generation
+`9A731727-446F-4C47-B5A3-BE2172F34B64` reattached over the alternate mesh road
+from `10.86.0.2` at sequences 1016 and 1433. The same response reached its
+final river paragraph and the app visibly reported `done`, with no error and
+no manual Wi-Fi toggle. The terminal screenshot's SHA-256 is
+`60b634a5a78efe857b65a75b68de47de7a87419a4bb88210b2528e06ea063276`;
+the retained daemon slice contains both reattaches and no generation refusal.
+S20 therefore closes on both required halves: silent work stays put when the
+road answers, and a degraded road causes an invisible, completing re-dial.

@@ -103,7 +103,8 @@ authoritative. (What the CA pin is and is not worth is in
 QUIC idles at 30 s for sessions and 180 s for enrollment — the longer window so
 a request parked at the grant desk outlives the 120 s a human has to rule on
 it. Either side may `Ping`; the keeper's console does so every 10 s to hold its
-subscription visibly open.
+subscription visibly open, and ReachKit uses a bounded matching-nonce exchange
+only while an in-flight generation has been silent.
 
 **Verification pins the chain, not the name.** Verify blocks run with
 role-correct SSL policies and a nil host, so no hostname is checked. The
@@ -114,7 +115,11 @@ and nothing above the transport has to know which one it took.
 
 ## The control stream
 
-Client-opened, long-lived, one per connection.
+Client-opened. The session-opening exchange may remain as that road's active
+generation probe channel; when it has closed, ReachKit lazily opens a
+Hello-only authenticated control stream through the exact same dialer. That
+replacement does not send `SessionOpen` and therefore does not create another
+session.
 
 ```
   Hello{versions, client}                client ──► daemon
@@ -211,6 +216,35 @@ silently misparsed rather than refused.
 A `GenerateBegin` carrying a genID the daemon already knows is treated as a
 re-attach from sequence 0 — which makes losing the very first frame
 recoverable instead of fatal.
+
+### Active-road liveness
+
+ReachKit arms a two-second silence watchdog only after `GenerateBegin` or
+`GenerateReattach`, and resets it on every `Ev`, including replay duplicates.
+There is no idle polling. When a generation stays silent for that interval,
+all concurrent generations using the same road coalesce behind one `Ping` on
+that road's authenticated probe channel. The same two seconds bound its
+matching `Pong`.
+
+A pong with the exact nonce proves the daemon is alive on that road, so the
+client keeps waiting however long the model is queued or preparing its first
+token. A stale, wrong, late, closed or errored pong proves nothing. One bounded
+missing pong makes the current road dirty only if no generation event arrived
+during the probe; an event is stronger evidence than a failed control stream.
+The existing road race then reattaches from the last received sequence. Before
+the first event it resends the same idempotent `GenerateBegin` and receives a
+fresh ten-second cold-open budget. Once any `Ev` has arrived, the attempt has a
+resident generation to recover and every later stream ending or path change
+uses the 120-second residency deadline, even when that attempt originally
+opened inside the cold budget. A stale result from an older road epoch cannot
+dirty its replacement, and a probe channel is released when its last generation
+lease ends.
+
+Successful recovery is invisible to the app. Exhausting every candidate keeps
+the existing “no road reached the cluster” refusal. The only new diagnostic is
+a privacy-safe notice containing elapsed silence and the internal road epoch;
+it contains no endpoint, identity, prompt or token data. These rules use the
+baseline-v0 `Ping`/`Pong` vocabulary and change no compatibility boundary.
 
 `GenerateCancel` ends it early; the client's own task cancellation is what
 sends it, and the generation finishes `.cancelled` rather than vanishing.
@@ -341,7 +375,7 @@ dead storage.
 |---|---|
 | `Hello.versions`; `HelloAck.version`, `cluster`, `addrs`, `port`, `roads`; `RoadEndpoint.host`, `port` | **HONORED** — dialect selection, authenticated cluster identity, and endpoint-specific road refresh |
 | `SessionOpened.sessionID`, `token`, `capabilities` | **HONORED** — generation identity/reattach and the `ClusterDial`/`doctor` capability result |
-| `Ping.nonce`; `ErrorFrame.code`, `message` | **HONORED** — the daemon echoes the ping and both sides turn remote refusals into typed failures |
+| `Ping.nonce`; `Pong.nonce`; `ErrorFrame.code`, `message` | **HONORED** — active-road liveness requires an exact, timely nonce match; the daemon echoes it and both sides turn remote refusals into typed failures |
 | `GrantEvent`'s request, provenance, app identity and fingerprint; `GrantRule.requestID`, `allow` | **HONORED** — the sheet renders the request and its ruling resolves that same parked request |
 | `GenerateBegin.sessionID`, `genID`, `request`; `GenerateReattach.sessionID`, `token`, `genID`, `fromSeq`; `GenerateCancel.genID`; `EvAck.seq`; `Ev.seq`, `event` | **HONORED** — authorization, replay position, cancellation, acknowledgement, ordering and payload all affect generation state |
 | Request transcript; tool name, description and parameters; schema; temperature, token limit, sampling and tool mode | **HONORED** — every value that reaches reachd selects prompt, grammar, budget or an actual unconstrained sampler pass |
@@ -351,7 +385,6 @@ dead storage.
 | `Hello.client` | **NAMED** — required v0 peer-label copy; decoded but not used for authorization or behavior |
 | `WireGenerationRequest.id` | **NAMED** — required v0 crossed copy; the envelope's `genID` remains the daemon authority, while ReachKit correlates completed usage with the native local request id |
 | `WireContextOptions.includeSchemaInPrompt`, `reasoning` | **NAMED** — faithfully mirrored public intent that reachd does not currently apply; grammar enforcement is independent of prompt inclusion and reasoning output is disabled |
-| `Pong.nonce` | **NAMED** — echoed but intentionally uncorrelated by the keeper's best-effort keepalive loop |
 | `reasoningAppend` and all of its fields | **NAMED** — reserved receiver vocabulary; reachd emits no reasoning event in v0 |
 | `HelloAck.models`; `ModelDescriptor.id`, `displayName`, `capabilities`; `SessionOpen.modelID` | **GRADUATED** — the catalog is displayed/sent but does not authoritatively select or refuse a model. The catalog's meaning, authoritative side and mismatch copy are one Held model-selection-authority design item |
 

@@ -27,6 +27,16 @@ made is precisely that nothing happens between them.
 | 1:10 | The stream continues over the mesh | The session was never bound to the road it started on |
 | 1:25 | The generation finishes in hand | — |
 
+**Natural-walk acceptance, 8 August 2026.** The Slate-LAN-to-building-network
+walk now runs exactly as the beat sheet says: no manual Wi-Fi toggle and no
+staged hard cut. During the accepted phone run, the generation that began from
+`192.168.8.225` reattached over the phone's mesh road `10.86.0.2` at sequences
+1016 and 1433, then reached its natural final line and visible `done` with no
+error. Active-road `Ping`/`Pong` now turns silent degradation into the same
+candidate race that already handles a clean path change; a matching pong still
+lets a legitimately quiet model keep thinking. The old deterministic
+Wi-Fi-off instruction is superseded.
+
 ## The rig
 
 Three boxes: the host (a Mac serving open weights), the edge it sits behind,

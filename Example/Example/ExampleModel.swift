@@ -160,6 +160,41 @@ final class ExampleModel {
                 print("[example] enrollment failed: \(error)")
                 return
             }
+            if ProcessInfo.processInfo.environment["REACH_LIVENESS_PROBE"] == "1" {
+                let env = ProcessInfo.processInfo.environment
+                let run = env["REACH_LIVENESS_RUN"] ?? "1"
+                let mode = env["REACH_LIVENESS_MODE"] ?? "slow"
+                let probeHost = env["REACH_LIVENESS_HOST"] ?? "127.0.0.1"
+                let probePort = UInt16(env["REACH_LIVENESS_PORT"] ?? "47337") ?? 47337
+                let probeIdentity = "\(Self.identityLabel)-liveness-\(run)"
+                do {
+                    guard let material = await ReachIdentityRegistry.shared.material(
+                        for: Self.identityLabel
+                    ) else {
+                        throw ExampleError.livenessProbeMissingIdentity
+                    }
+                    await ReachIdentityRegistry.shared.register(
+                        label: probeIdentity,
+                        material: material
+                    )
+                    let configuration = ReachExecutor.Configuration(
+                        host: probeHost,
+                        port: probePort,
+                        modelID: modelID,
+                        identityLabel: probeIdentity,
+                        connectTimeout: 10
+                    )
+                    try await runLivenessAcceptanceProbe(
+                        configuration: configuration,
+                        mode: mode,
+                        run: run
+                    )
+                } catch {
+                    status = "liveness failed: \(error)"
+                    print("[example-liveness] failed mode=\(mode) run=\(run): \(error)")
+                }
+                return
+            }
             // Prefer a discovered cluster (dialed as a Bonjour service,
             // resolved by the system) unless the operator typed a host.
             // The wait belongs HERE and not only in the enrollment path: a
@@ -363,6 +398,106 @@ final class ExampleModel {
         status = "tool argument probe passed 6/6"
     }
 
+    /// Launch-environment-only active-road acceptance. A unique registry
+    /// label gives each degradation run an empty calling card: it must begin
+    /// through the scheduled proxy, then can learn the daemon's direct roads
+    /// from its authenticated hello for liveness-triggered reattach. Normal UI
+    /// and the filmed prompt are unchanged when the flag is absent.
+    private func runLivenessAcceptanceProbe(
+        configuration: ReachExecutor.Configuration,
+        mode: String,
+        run: String
+    ) async throws {
+        switch mode {
+        case "slow":
+            let longContext = String(repeating: "river ", count: 25_000)
+            let occupier = Task { try await self.measureLivenessGeneration(
+                configuration: configuration,
+                prompt: longContext + "\nReply with exactly: occupier answered",
+                maximumTokens: 32
+            ) }
+            try await Task.sleep(for: .milliseconds(250))
+            let queued = try await measureLivenessGeneration(
+                configuration: configuration,
+                prompt: "Reply with exactly: queued generation answered",
+                maximumTokens: 32
+            )
+            let occupied = try await occupier.value
+            guard occupied.firstGap >= .seconds(2), queued.firstGap >= .seconds(2) else {
+                throw ExampleError.livenessProbeWasNotSilent(
+                    first: Self.livenessSeconds(occupied.firstGap),
+                    second: Self.livenessSeconds(queued.firstGap)
+                )
+            }
+            output = "occupier first event \(Self.livenessSeconds(occupied.firstGap))s\nqueued first event \(Self.livenessSeconds(queued.firstGap))s"
+            status = "liveness slow passed run \(run)"
+            print("[example-liveness] slow run=\(run) first=\(Self.livenessSeconds(occupied.firstGap)) queued=\(Self.livenessSeconds(queued.firstGap))")
+        case "degradation":
+            let result = try await measureLivenessGeneration(
+                configuration: configuration,
+                prompt: prompt,
+                maximumTokens: 4_096
+            )
+            guard result.snapshots > 1, !result.content.isEmpty else {
+                throw ExampleError.livenessProbeDidNotComplete
+            }
+            output = result.content
+            status = "liveness degradation passed run \(run) (\(result.snapshots) snapshots)"
+            print("[example-liveness] degradation run=\(run) snapshots=\(result.snapshots) maxGap=\(Self.livenessSeconds(result.maxGap))")
+        default:
+            throw ExampleError.livenessProbeUnknownMode(mode)
+        }
+    }
+
+    private struct LivenessGenerationResult {
+        var content: String
+        var snapshots: Int
+        var firstGap: Duration
+        var maxGap: Duration
+    }
+
+    private func measureLivenessGeneration(
+        configuration: ReachExecutor.Configuration,
+        prompt: String,
+        maximumTokens: Int
+    ) async throws -> LivenessGenerationResult {
+        let clock = ContinuousClock()
+        let began = clock.now
+        var previous = began
+        var firstGap: Duration?
+        var maxGap = Duration.zero
+        var snapshots = 0
+        var content = ""
+        let session = LanguageModelSession(
+            model: ReachLanguageModel(configuration: configuration)
+        )
+        let stream = session.streamResponse(
+            to: prompt,
+            options: GenerationOptions(maximumResponseTokens: maximumTokens)
+        )
+        for try await snapshot in stream {
+            let now = clock.now
+            let gap = previous.duration(to: now)
+            firstGap = firstGap ?? gap
+            maxGap = max(maxGap, gap)
+            previous = now
+            snapshots += 1
+            content = snapshot.content
+        }
+        return LivenessGenerationResult(
+            content: content,
+            snapshots: snapshots,
+            firstGap: firstGap ?? began.duration(to: clock.now),
+            maxGap: maxGap
+        )
+    }
+
+    private static func livenessSeconds(_ duration: Duration) -> String {
+        let components = duration.components
+        let seconds = Double(components.seconds) + Double(components.attoseconds) / 1e18
+        return String(format: "%.3f", seconds)
+    }
+
     /// The app half of the grant ceremony, run at most once: reload what a
     /// prior enrollment stored, else knock at the discovered cluster's
     /// grant door and wait for the keeper's ruling.
@@ -414,6 +549,10 @@ final class ExampleModel {
         case guidedProbeDidNotStream(run: Int, snapshots: Int)
         case toolArgumentsProbeDidNotCall(mode: String, run: Int, calls: Int)
         case usageProbeMissingCompletion
+        case livenessProbeMissingIdentity
+        case livenessProbeWasNotSilent(first: String, second: String)
+        case livenessProbeDidNotComplete
+        case livenessProbeUnknownMode(String)
         var errorDescription: String? {
             switch self {
             case .noGrantDoor:
@@ -424,6 +563,14 @@ final class ExampleModel {
                 "Tool argument probe \(mode) run \(run) made \(calls) valid calls; expected exactly one."
             case .usageProbeMissingCompletion:
                 "Usage probe completed without one matching positive update and latest value."
+            case .livenessProbeMissingIdentity:
+                "The liveness probe could not alias the registered identity."
+            case .livenessProbeWasNotSilent(let first, let second):
+                "The measured slow generations were not silent for the watchdog interval (\(first)s, \(second)s)."
+            case .livenessProbeDidNotComplete:
+                "The degraded generation did not produce a complete streamed answer."
+            case .livenessProbeUnknownMode(let mode):
+                "Unknown liveness probe mode \(mode)."
             }
         }
     }

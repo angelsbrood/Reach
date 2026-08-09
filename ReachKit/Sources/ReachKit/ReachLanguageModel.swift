@@ -1,8 +1,11 @@
 import Foundation
 import FoundationModels
 import Network
+import OSLog
 import ReachTransport
 import ReachWire
+
+private let livenessLogger = Logger(subsystem: "systems.reach.ReachKit", category: "liveness")
 
 /// The Reach model: to an adopting app, a session on it reads identically
 /// to one on the system model. `LanguageModelSession(model: reachModel)` is
@@ -115,11 +118,15 @@ public struct ReachExecutor: FoundationModels.LanguageModelExecutor {
         // session; once tokens are flowing, only re-attach is safe.
         var freshStartRetries = 1
 
-        while true {
-            // Which budget applies is decided once per attempt, and then
-            // bounds both halves of it: the opens below, and the pause before
-            // the next iteration. It used to be computed only at the two
-            // `waitBeforeRetry` calls, which is why it bounded only the pauses.
+        retry: while true {
+            // Which budget applies to the *opens* is decided once per attempt,
+            // so both opens below share one bound. The retry decision after
+            // those opens is deliberately made again: an attempt can begin
+            // cold and then receive its first event, at which point there is
+            // a resident generation worth the 120-second recovery window.
+            // Reusing that attempt's original ten-second deadline after the
+            // first event made a later path change terminal as soon as the
+            // generation had been running for ten seconds.
             //
             // The evidence is whether anything is resident to come back to,
             // and the only evidence of that is an event this call has already
@@ -129,7 +136,7 @@ public struct ReachExecutor: FoundationModels.LanguageModelExecutor {
             // "connected". A fresh ask with nothing resident therefore spent
             // the full residency window in silence: measured at 118.6 s
             // against a comment promising it could not happen.
-            let deadline = lastReceived == nil ? coldOpenDeadline : reconnectDeadline
+            let openingDeadline = lastReceived == nil ? coldOpenDeadline : reconnectDeadline
             do {
                 // Epoch read precedes the open: a path change that lands
                 // mid-dial still trips the watcher rather than being missed.
@@ -146,13 +153,17 @@ public struct ReachExecutor: FoundationModels.LanguageModelExecutor {
                 if let session {
                     live = session
                 } else {
-                    live = try await openingBy(deadline) {
-                        try await ReachConnectionHub.shared.session(for: configuration)
+                    live = try await openingBy(openingDeadline) {
+                        try await ReachConnectionHub.shared.generationSession(for: configuration)
                     }
                     session = live
                 }
-                let stream = try await openingBy(deadline) {
+                let lease = try await openingBy(openingDeadline) {
                     try await ReachConnectionHub.shared.openGenerationStream(for: configuration)
+                }
+                let stream = lease.stream
+                defer {
+                    Task { await ReachConnectionHub.shared.releaseGenerationStream(lease) }
                 }
                 defer { stream.cancel() }
                 // A path change (an SSID hop, Wi-Fi loss) cancels the live
@@ -165,28 +176,116 @@ public struct ReachExecutor: FoundationModels.LanguageModelExecutor {
                     stream.cancel()
                 }
                 defer { watcher.cancel() }
-                if let lastReceived {
-                    try await stream.send(GenerateReattach(
-                        sessionID: live.sessionID,
-                        token: live.token,
-                        genID: genID,
-                        fromSeq: lastReceived
-                    ), for: live.version)
-                } else {
-                    try await stream.send(
-                        GenerateBegin(sessionID: live.sessionID, genID: genID, request: wire),
-                        for: live.version
+                do {
+                    if let lastReceived {
+                        try await stream.send(GenerateReattach(
+                            sessionID: live.sessionID,
+                            token: live.token,
+                            genID: genID,
+                            fromSeq: lastReceived
+                        ), for: live.version)
+                    } else {
+                        try await stream.send(
+                            GenerateBegin(sessionID: live.sessionID, genID: genID, request: wire),
+                            for: live.version
+                        )
+                    }
+                } catch {
+                    await ReachConnectionHub.shared.markRoadUnresponsive(
+                        lease,
+                        for: configuration
                     )
+                    throw error
                 }
+                let frames = GenerationFrameSource(stream: stream)
+                var pendingFrame = Task { await frames.next() }
+                var lastGenerationEventAt = ContinuousClock.now
 
-                for try await raw in stream.frames {
+                while true {
+                    var ending: FrameEnding
+                    if let arrived = await GenerationLivenessPolicy.waitForFrame(pendingFrame) {
+                        ending = arrived
+                    } else {
+                        if Task.isCancelled {
+                            try? await stream.send(GenerateCancel(genID: genID), for: live.version)
+                            throw CancellationError()
+                        }
+                        let marker = frames.deliveryCount()
+                        let probe = Task {
+                            await ReachConnectionHub.shared.activeRoadIsAlive(
+                                lease,
+                                for: configuration,
+                                timeout: GenerationLivenessPolicy.interval
+                            )
+                        }
+                        let probeRace = await GenerationLivenessPolicy.race(
+                            frame: pendingFrame,
+                            probe: probe
+                        )
+                        if Task.isCancelled {
+                            try? await stream.send(GenerateCancel(genID: genID), for: live.version)
+                            throw CancellationError()
+                        }
+                        switch probeRace {
+                        case .frame(let arrived):
+                            // Generation delivery outweighs a control-stream
+                            // failure: it is direct evidence that this road is
+                            // carrying the request that matters.
+                            ending = arrived
+                        case .probe(true):
+                            // The model may be thinking or queued. The exact
+                            // road answered its nonce, so keep the same read
+                            // pending and arm another silence interval.
+                            continue
+                        case .probe(false):
+                            // Close the race at the probe result. If the source
+                            // delivered meanwhile, consume it instead of
+                            // dirtying a road that just proved useful.
+                            if frames.deliveryCount() > marker {
+                                ending = await pendingFrame.value
+                            } else {
+                                await ReachConnectionHub.shared.markRoadUnresponsive(
+                                    lease,
+                                    for: configuration
+                                )
+                                let elapsed = lastGenerationEventAt.duration(to: .now)
+                                livenessLogger.notice(
+                                    "active-road liveness triggered re-dial elapsed=\(Self.seconds(elapsed), privacy: .public)s roadEpoch=\(lease.roadEpoch, privacy: .public)"
+                                )
+                                stream.cancel()
+                                if lastReceived == nil {
+                                    // Duplicate GenerateBegin is idempotent in
+                                    // the daemon registry. Give the newly raced
+                                    // road the full cold-open budget rather
+                                    // than inheriting time spent proving the
+                                    // old road dead.
+                                    coldOpenDeadline = ContinuousClock.now + .seconds(10)
+                                }
+                                backoff = .milliseconds(250)
+                                continue retry
+                            }
+                        }
+                    }
+
+                    guard case .frame(let raw) = ending else {
+                        await ReachConnectionHub.shared.markRoadUnresponsive(
+                            lease,
+                            for: configuration
+                        )
+                        throw ReachError.transport(ending.detailing("generation stream ended before finish"))
+                    }
+                    pendingFrame = Task { await frames.next() }
                     try raw.requireSupported(by: live.version)
                     if Task.isCancelled {
                         try? await stream.send(GenerateCancel(genID: genID), for: live.version)
+                        throw CancellationError()
                     }
                     switch raw.type {
                     case .ev:
                         let ev = try raw.decode(Ev.self)
+                        // Every generation event is a sign of life, including
+                        // a replay duplicate after re-attach.
+                        lastGenerationEventAt = .now
                         if let lastReceived, ev.seq <= lastReceived { continue }   // replay dupes
                         lastReceived = ev.seq
                         reconnectDeadline = ContinuousClock.now + .seconds(120)
@@ -212,7 +311,6 @@ public struct ReachExecutor: FoundationModels.LanguageModelExecutor {
                         continue
                     }
                 }
-                throw ReachError.transport("stream ended before finish")
             } catch let error as ReachError {
                 // A session the daemon no longer knows (it restarted, or the
                 // token expired) is recoverable if nothing has streamed yet:
@@ -254,13 +352,37 @@ public struct ReachExecutor: FoundationModels.LanguageModelExecutor {
                     throw ReachError.generationLost(message)
                 }
                 if case .remote = error { throw error }
-                try await waitBeforeRetry(&backoff, deadline: deadline, cause: error)
+                try await waitBeforeRetry(
+                    &backoff,
+                    deadline: Self.retryDeadline(
+                        lastReceived: lastReceived,
+                        coldOpen: coldOpenDeadline,
+                        resident: reconnectDeadline
+                    ),
+                    cause: error
+                )
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
-                try await waitBeforeRetry(&backoff, deadline: deadline, cause: error)
+                try await waitBeforeRetry(
+                    &backoff,
+                    deadline: Self.retryDeadline(
+                        lastReceived: lastReceived,
+                        coldOpen: coldOpenDeadline,
+                        resident: reconnectDeadline
+                    ),
+                    cause: error
+                )
             }
         }
+    }
+
+    nonisolated static func retryDeadline(
+        lastReceived: UInt64?,
+        coldOpen: ContinuousClock.Instant,
+        resident: ContinuousClock.Instant
+    ) -> ContinuousClock.Instant {
+        lastReceived == nil ? coldOpen : resident
     }
 
     /// Returns true when the generation finished.
@@ -326,6 +448,11 @@ public struct ReachExecutor: FoundationModels.LanguageModelExecutor {
         }
         try? await Task.sleep(for: backoff)
         backoff = min(backoff * 2, .seconds(2))
+    }
+
+    private static func seconds(_ duration: Duration) -> Double {
+        let components = duration.components
+        return Double(components.seconds) + Double(components.attoseconds) / 1e18
     }
 
     /// Runs `open` and gives up at `deadline`, so the budget bounds the

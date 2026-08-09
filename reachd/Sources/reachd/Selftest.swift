@@ -652,6 +652,7 @@ private struct SelftestFilling: SlotFilling {
                 continuation.yield(.responseAppend(entryID: nil, text: word, segmentID: nil, tokenCount: 1))
                 try? await Task.sleep(for: .milliseconds(30))
             }
+            continuation.yield(.usage(inputTokens: 1, outputTokens: 3))
             continuation.yield(.finished(.complete))
             continuation.finish()
         }
