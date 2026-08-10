@@ -3,7 +3,6 @@ import Foundation
 import ReachDaemon
 import ReachIdentity
 
-@main
 struct Reachd: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "reachd",

@@ -23,6 +23,9 @@ the decision. Kill criteria come from the pre-filing plan.
 | S17 | Does S16's hybrid survive product acceptance beyond its four retained shapes? | **STOP / DECODE FAILED** (2026-08-08) — the installed schema-plus-tools path produced grammar-accepted JSON that FoundationModels could not decode; a deterministic `topP(1, seed: 29)` response reproduced an unbounded integer outside Swift `Int`, firing the locked decode kill and rolling back the fork and product changes |
 | S18 | Do decoder-compatible numeric grammars make S16's hybrid safe to ship? | **STOP / BUDGET FAILED** (2026-08-08) — exact signed-64-bit and finite-Double grammars passed in isolation and seed 29 decoded, but the unchanged adversarial schema exhausted 512 tokens at temperature 1.0 after 28/36 accepted matrix cases; no sampler or numeric fork ships |
 | S19 | Can the installed greedy path reach a grammar-accepted numeric value that fails typed decoding? | **STOP / NOT REPRODUCED** (2026-08-08) — five hostile unbounded numeric asks completed and decoded 3/3 each, 15/15 total; neither the `Int` nor `Double` mismatch was reachable, so no Reach normalization, dependency pin or installation change ships |
+| S20 | Can baseline-v0 `Ping`/`Pong` distinguish legitimate model silence from a progressively degrading active road quickly enough to enter the existing candidate race? | **PASS** (2026-08-08) — signed Simulator acceptance kept queued real-weight silence in place 3/3 and recovered seeded degradation 3/3; the natural phone walk reattached the same generation over `10.86.0.2` at sequences 1016 and 1433 and visibly completed |
+| S21 | Does the installed cluster survive short, residency-scale and overnight system sleep without product wake machinery? | **PASS / DOCUMENTATION ONLY** (2026-08-10) — 2× short, 2× ten-minute and 2× eight-hour-plus trials preserved the daemon, listeners, model and mesh; the system broker recreated expired mappings four seconds after wake, so no Reach sleep code was licensed |
+| S22 | Why does one installed `reachd` find MLX resources by its canonical path but not through a symlink or bare `PATH` command? | **PASS / CANONICAL RE-EXEC** (2026-08-10) — the loaded image and `dladdr` already resolve to the canonical binary, while `Bundle.main` remains beside the launch alias; one early `execv` of the resolved executable makes every invocation use the canonical adjacent bundle set |
 
 ## S19 — the typed mismatch is architectural under the shipped greedy path (2026-08-08)
 
@@ -1044,3 +1047,195 @@ no manual Wi-Fi toggle. The terminal screenshot's SHA-256 is
 the retained daemon slice contains both reattaches and no generation refusal.
 S20 therefore closes on both required halves: silent work stays put when the
 road answers, and a degraded road causes an invisible, completing re-dial.
+
+## S21 — the lid closed and the cluster woke intact (2026-08-09–10)
+
+**Question.** What actually happens to the installed cluster across a short
+lid close, a sleep beyond the generation-residency window, and an idle night?
+Does launchd hide a death, do listeners or weights disappear, and do suspended
+mapping timers leave stale roads after wake?
+
+**Instrument.** The installed release ran on one MacBook Pro (`Mac17,9`, Apple
+M5 Pro, 64 GB) under macOS 27.0 build `26A5388g`. A disposable,
+LaunchAgent-shaped AppKit observer in `/private/tmp` listened only to
+`NSWorkspace` system-sleep and system-wake notifications, recorded monotonic
+elapsed time, and held no power assertion. Every notification was corroborated
+against `pmset`; display-only events were excluded. `ProcessType: Interactive`
+was retained unchanged: it selects launchd's resource class, not a request to
+prevent sleep.
+
+Mapping suspension was exercised independently of the live ports through the
+real `ReachabilityCoordinator` on UDP `55121` and `55122`. A one-off Slate
+broker listened on `br-lan`, attached rules to `sta1`, allowed only
+`192.168.8.210/32` and external/internal ports `55120...55199`, and left the
+persistent service disabled. Because miniupnpd correctly refuses an RFC1918
+`ext_ip`, the measurement used the same public-form address instrument as S9
+while the actual outer interface remained the Slate's private building lease.
+It therefore proves suspension, expiry, recreation and cleanup, not public
+internet reachability or a private-double-NAT callback.
+
+**Matrix.** Two trials of every required duration completed. One additional
+10-minute rehearsal is retained but excluded because the phone locked during
+it.
+
+| Duration | Trial | Confirmed system-sleep interval | Generation result | daemon / model | mapping result |
+| --- | ---: | ---: | --- | --- | --- |
+| short | 1 | 78.544 s | same generation reattached at seq 469 and finished, 14,276 characters | PID 38397, launchd run 1 survived | coordinator and leases survived |
+| short | 2 | 72.882 s | output paused while the host slept, then the same generation reattached at seq 218 and 1154 and visibly reached `done` | same PID/run survived | coordinator and leases survived |
+| 10 min | 1 | 597.806 s | remained foreground and streamed 18,559 characters to `done` while the lid was closed | no restart or model reload | live requests remained valid |
+| 10 min | 2 | 599.855 s | remained foreground and streamed 15,706 characters to `done` while the lid was closed | no restart or model reload | live requests remained valid |
+| overnight | 1 | 29,929.759 s (8 h 18 m 49.759 s) | cold post-wake signed usage probe passed, input 21 / output 20 | PID 38397 and 4.4 GiB model survived; launchd run 1 | two 7,200-second leases renewed |
+| overnight | 2 | 28,823.484 s (8 h 00 m 23.484 s) | fresh phone session streamed exactly `awake` and visibly reached `done` | PID 12268, launchd run 2 and 4.27 GiB model survived | expired leases were recreated four seconds after wake |
+
+The excluded rehearsal slept for 605.924 seconds and also streamed to `done`,
+but the phone was locked for part of it; it is evidence about the host, not a
+controlled client trial.
+
+**The ten-minute expectation was wrong in a useful way.** The 120-second
+generation residency limit never became the ending because the host did not
+remain inert while work was arriving. In trial 1, inbound QUIC activity drove
+roughly 55 seconds of network dark wake while the response completed, followed
+by about 543 seconds of deep sleep. Trial 2 did the same for roughly 65 seconds,
+then slept deeply for about 526 seconds. Both post-wake signed probes passed
+(21/20 and 21/18 input/output tokens). Residency still bounds an unavailable
+generation; it is not a timer that fires merely because the lid is shut while
+macOS continues servicing the active flow.
+
+**Overnight process and power evidence.** In trial 2 the observer recorded
+`system-will-sleep` at `2026-08-10T10:02:57.593Z` and `system-did-wake` at
+`18:03:21.077Z`. `pmset` independently recorded clamshell sleep at 03:03:02
+PDT, maintenance and SleepService dark wakes throughout the night, and a lid
+wake at 11:03:21 PDT. The battery charged from 21% to 100%. The daemon,
+observer, and mapping coordinator retained PIDs `12268`, `12056`, and `12086`
+and launchd run counts 2, 1, and 2. Both UDP listeners remained owned by the
+same daemon; `10.86.0.1` remained up; `reachd.log` did not change between the
+pre-sleep baseline and the post-wake client; and the model RSS remained
+4,474,448 KiB. There was no hidden supervisor restart or model reload.
+
+The second trial's scratch leases initially expired at 04:55:56 PDT while the
+host was asleep. The system broker recreated both at 11:03:25—four seconds
+after wake—with new expirations at 13:03:25. `reachability.json` did not change
+because address, port and TTL were identical, which is correct: it records
+endpoint evidence, not every renewal transaction. The edge lease and nft rules
+proved the refresh. A product wake observer would duplicate behavior the
+system broker already provides.
+
+**Installed acceptance.** Trial 1's cold `doctor --dial` opened a session in
+37 ms with 13 pass / 3 warning / 0 failure. Trial 2's doctor was 11 pass / 4
+warning / 0 failure and hit only the established diagnostic-identity
+`SecPKCS12Import` `-25291` fault; a normally signed phone then opened session
+`17C9E6C2-6934-42E8-B68E-BE79EBEEB8B4` from `192.168.8.225:51263`, streamed
+exactly `awake`, and visibly reported `done`. Across both overnights all four
+CA/server SHA-256 values were unchanged and `cluster CA created` remained zero.
+At closeout, the same installed binary passed the scripted spine, the MLX
+spine, unconstrained sampling 3/3 and guided schemas 15/15. A normal-keychain
+`doctor --dial` then cleared the diagnostic warning and opened an authenticated
+session in 33 ms: 13 pass / 3 expected mapping and pinned-endpoint warnings /
+0 waiting / 0 failure. The complete ReachKit suite passed 79/79 in 8/8 runs,
+the complete reachd suite passed 171/171 in 8/8 runs, and normally signed
+generic-Simulator Example and generic-iOS Keeper builds both succeeded. No
+source or installed binary changed during this documentation-only pass.
+
+**A reboot between the overnights exposed a different boundary.** `/private/tmp`
+was correctly cleared; the Reach LaunchAgent returned after login, but
+WireGuard did not rise with it. `sudo wg-quick up reach0` and one supervised
+daemon restart were required before the second baseline advertised the mesh
+road. That is broader host lifecycle—boot/login, logout, updates and key
+availability—not a sleep failure, and remains a separate follow-on rather than
+being smuggled into this pass.
+
+**Verdict: PASS, documentation-only branch.** Healthy sleeps need no Reach
+sleep assertion, wake subscription, listener reconstruction, persisted
+generation, `ProcessType` change, or client path prod. The temporary agents
+were unloaded; the coordinator deallocated both mappings; the one-off Slate
+broker and its files were removed; UDP 5351/1900/5000 were absent; all three
+UPnP chains were empty; and persistent UPnP remained disabled. This result is
+measured on one Mac across six controlled trials, not a claim about every
+laptop or macOS release.
+
+## S22 — one executable image, two bundle identities (2026-08-10)
+
+**Question.** The accepted installed binary and its seven SwiftPM resource
+bundles are one layout under `~/.local/libexec/reach`. Why does
+`selftest --mlx` pass when that binary is named directly but fail with
+`Failed to load the default metallib` when the same inode is reached through
+`~/.local/bin/reachd`?
+
+**Instrument.** A disposable Swift executable and staged install tree under a
+`/private/tmp` directory containing spaces printed the process identity under
+four launches: canonical absolute path, absolute symlink, relative nested
+symlink, and bare `reachd` found through a temporary `PATH`. It retained
+`CommandLine.arguments[0]`, `ProcessInfo.arguments[0]`, `_NSGetExecutablePath`
+before and after `realpath`, dyld image zero, `dladdr` for a symbol in the
+executable, and `Bundle.main`'s bundle, executable and resource URLs. The
+pinned MLX sources were then traced at the exact checked-out revision.
+
+| launch | `argv[0]` | `_NSGetExecutablePath` | `realpath` / `dladdr` | `Bundle.main` |
+| --- | --- | --- | --- | --- |
+| canonical | canonical absolute path | canonical | canonical | canonical resource directory |
+| absolute symlink | absolute alias | absolute alias | canonical | alias directory |
+| nested symlink | nested alias | nested alias | canonical | nested alias directory |
+| bare `PATH` | `reachd` | absolute alias selected by `PATH` | canonical | alias directory |
+
+The split is exact. MLX's `current_binary_dir()` uses `dladdr`, so its first
+colocated search is already canonical; Reach deliberately ships no colocated
+`mlx.metallib`. The SwiftPM fallback that can find
+`mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib` starts at
+`NS::Bundle::mainBundle()->bundleURL()`, which is the alias directory in the
+three failing shapes. The remaining loaded-bundle search has no second main
+bundle rooted beside the canonical executable. The installed hash remained
+`bdaf33611eda8e5eadab1e56f788b7af09eb7a2cc3849990b0a69b87b2f61108`,
+so the 8 August canonical-pass/symlink-fail A/B still describes these bytes.
+
+**Prototype.** The same disposable executable performed one idempotent
+`execv` of `_NSGetExecutablePath` after `realpath`. On the replacement image,
+all four launches reported the canonical executable and canonical
+`Bundle.main`; the direct launch did not replace itself. A value containing
+spaces in the environment, the working directory, an argument containing
+spaces and an empty argument all survived. Replacing `argv[0]` with the
+canonical target also gives child-process code one spelling rather than
+requiring each child to rediscover the alias.
+
+**Verdict: PASS / EARLY CANONICAL RE-EXEC.** The fault is process bundle
+identity at Reach's executable boundary, not a missing resource, service
+installer defect or MLX model behavior. Normalize once before ArgumentParser
+or MLX access. Do not add a launcher shell, copy resources beside aliases,
+change the working directory, export a private resource path, or fork the
+dependency.
+
+**Implementation and acceptance.** A package-internal resolver now reads
+`_NSGetExecutablePath`, applies `realpath`, and returns either continue or one
+canonical replacement. The new executable bootstrap runs before
+ArgumentParser and MLX. It passes the canonical target directly to `execv`,
+sets `argv[0]` to that target, retains the kernel's raw `argv[1...]` pointers,
+and logs then continues if replacement fails. Seven focused tests hold direct,
+absolute, nested, `PATH`, spaced, missing and failure shapes, including a
+spaced argument, an empty argument, the null terminator and injected
+`EACCES`.
+
+One fresh warnings-as-errors release, SHA-256
+`c0c4e08072d1e6fa0db1aaca702912c66b42d431eb7e72195f7351d0348d46af`,
+passed the scripted spine 4/4 and the real-weight MLX spine 4/4 through the
+canonical path, installed-style symlink, nested symlink and bare `PATH`.
+Every MLX run also passed explicit unconstrained sampling 3/3 and guided
+schemas 15/15. Direct and nested-alias subprocesses produced byte-identical
+`status`; empty and spaced extra arguments produced identical exit 64;
+`REACH_STATE_DIR` containing spaces resolved from the unchanged working
+directory; `ps` observed canonical `argv[0]`; and SIGTERM remained status 143.
+The nested alias's restart rig killed its child after two snapshots, received
+the existing legible restart ending in 4.10 seconds, relaunched after one
+second, and completed a fresh ask. ReachKit passed 79/79 in 8/8 complete runs;
+reachd passed 178/178 in 8/8; the normally signed generic-Simulator Example
+linkage build succeeded.
+
+**Installed guard.** The prior accepted binary plus seven bundles were saved
+as one eight-item unit before replacement. The first final-binary copy exposed
+a deployment detail: overwriting the existing executable inode made launchd
+report `OS_REASON_CODESIGNING` even though the embedded linker signature
+verified. Copying to a fresh sibling inode, verifying it, and atomically
+renaming it into place cleared the rejection. The accepted agent runs the hash
+above from the canonical plist path with exactly seven adjacent bundles and no
+alias bundles. Both listeners are held, the model prewarmed, all four CA/server
+fingerprints are unchanged, CA creation remains zero, authenticated
+`doctor --dial` is 13 pass / 3 expected warnings / 0 waiting / 0 fail, and
+installed canonical, symlink and bare-`PATH` MLX selftests all pass.

@@ -108,20 +108,22 @@ needs no `sudo`; either works. `service install` refuses a binary with no
 without asking — so an agent pointed there works until the day it silently
 does not.
 
-⚠️ **MLX commands currently need the canonical installed path.** Measured on
-8 August 2026, invoking `selftest --mlx` through the `~/.local/bin/reachd`
-symlink made the pinned MLX runtime search beside `~/.local/bin` and refuse
-with `Failed to load the default metallib`; invoking the same installed binary
-beside its seven bundles passed. Until launch-path normalization lands, run
-GPU-bearing diagnostics (and a manual `serve`) as:
+The installed command normalizes its executable identity before argument
+parsing or MLX access. These all reach the same binary and the same seven
+adjacent bundles:
 
 ```
 ~/.local/libexec/reach/reachd selftest --mlx
+~/.local/bin/reachd selftest --mlx
+reachd selftest --mlx
 ```
 
-`service install` is safe through the symlink: it resolves symlinks before
-writing the plist, so the supervised agent records
-`~/.local/libexec/reach/reachd` and uses the adjacent bundles.
+Absolute, nested and `PATH` symlinks are resolved once with no wrapper shell
+and no resource copies beside the alias. User arguments, the environment and
+the working directory survive the process replacement. `service install`
+retains its independent guard: it resolves symlinks before writing the plist,
+so the supervised agent records `~/.local/libexec/reach/reachd`, verifies the
+adjacent MLX bundle, and starts directly in the canonical layout.
 
 ### ⚠️ Reinstalling can quietly destroy the cluster
 
@@ -137,7 +139,13 @@ just done:
    Never copy over a running binary. (`reachd service install` does its own
    bootout and bootstrap and is the supported path; by hand is for watching
    each step.)
-4. Copy the binary **and the bundles**. Count what lands: eight items.
+4. Copy the binary **and the bundles**. Count what lands: eight items. On a
+   reinstall, copy the executable to a fresh sibling such as `reachd.next`,
+   run `codesign --verify --verbose=4` on it, and then
+   `mv -f reachd.next reachd` while the agent is stopped. Do not use `cp` to
+   overwrite the existing executable inode in place: launchd can retain that
+   vnode's old code-signing state and kill the otherwise-valid replacement with
+   `OS_REASON_CODESIGNING`.
 5. `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/systems.reach.reachd.plist`
 6. Then seven checks, and it is not installed until all seven pass:
    `grep -c "cluster CA created" ~/Library/Logs/reachd.log` is **0**; the four
@@ -173,6 +181,45 @@ you actually want from a cluster. It cannot, for two reasons:
 So a Mac that has rebooted serves once somebody has logged in. Moving key
 material off the login keychain is what would change that, and it has not
 been done.
+
+### What closing the lid does
+
+Sleep is measured separately from reboot. On one MacBook Pro (`Mac17,9`) under
+macOS 27.0, the installed cluster survived two roughly one-minute sleeps, two
+roughly ten-minute sleeps, and two sleeps longer than eight hours without a
+daemon restart, listener loss, WireGuard loss, CA change, or model reload.
+`ProcessType: Interactive` was left alone: it controls launchd's resource
+classification and does not prevent system sleep.
+
+An in-flight response may appear to pause while the machine is fully asleep.
+In both short trials the same generation resumed and completed after wake.
+During both ten-minute trials, active QUIC traffic instead caused network dark
+wakes long enough for the real-weight response to finish while the lid was
+closed; macOS then returned to deep sleep. The 120-second residency window
+still bounds an unavailable generation, but closing the lid does not by itself
+start a countdown while the OS continues servicing that flow.
+
+The idle overnight result is colder: the same launchd PID and run count,
+listeners, roughly 4.3 GiB resident model, and `10.86.0.1` interface survived
+8 h 18 m and 8 h 00 m sleeps. A fresh authenticated generation succeeded after
+each wake. The temporary mapping trial found that a 7,200-second router lease
+can expire while the host is deeply asleep; the unchanged macOS broker rebuilt
+both mappings four seconds after wake. Because it already performs that wake
+refresh, reachd has no custom sleep observer or wake handler.
+
+This is evidence from one host and OS build, not a promise that macOS will keep
+every process resident indefinitely. Unconditional launchd supervision still
+covers a process death. If the listener is absent after wake, inspect
+`~/Library/Logs/reachd.log`, the launchd run count, `lsof -nP -iUDP:47337`, and
+`reachd doctor --dial` rather than assuming sleep was healthy because the PID
+now exists.
+
+Sleep also does not erase the login boundary above. A reboot observed during
+the same measurement returned the LaunchAgent after login, but did not raise
+`reach0`; the mesh required `sudo wg-quick up reach0` and a daemon restart so
+the new serving artifact advertised `10.86.0.1`. Automatic mesh bootstrap,
+logout, fast user switching, OS updates and keychain migration remain broader
+host-lifecycle work, not sleep behavior.
 
 ### What it restarts
 
