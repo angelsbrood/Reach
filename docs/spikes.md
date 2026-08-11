@@ -1635,3 +1635,125 @@ restoration for the exact accepted helper; and both building-network cold
 opens prove its corrected data plane. Developer ID signing, notarization,
 trusted distribution/update and broader VPN interoperability remain future
 work.
+
+### Post-S24 rollback/status audit — 11 August 2026
+
+A bounded review of accepted commit `f92159d` found that one internal helper
+transition represented both “the road is unavailable” and “the update failed
+but the old road survived.” That made a rejected generation, malformed pending
+file, or restored candidate failure clear readiness in the public status even
+when the active backend remained live. The durable-promotion branch also
+ignored whether reapplying the active backend succeeded, and an immediate
+control request could race the startup status read. The Swift diagnosis could
+then omit the bounded update outcome. These were status and transaction defects
+inside the accepted ownership boundary; the installed helper remained ready
+and the S24 lifecycle and data-plane evidence above remained valid.
+
+The correction separates ready, last-outcome and unavailable transitions. A
+pre-mutation refusal leaves the ready active generation untouched and adds a
+bounded outcome. Candidate or rename failure reapplies the active
+specification exactly once, reports `rollback restored` only after that apply
+succeeds, and otherwise reports non-ready `interface unavailable` while
+retaining recovery evidence. A non-durable candidate is never published as
+active. Startup prints the manager status before the control server begins
+accepting, and the Swift verdict now evaluates artifact/PID authority,
+configured non-readiness, generation/digest authority and bounded outcome in
+that order. The superseded permissive `WireGuardConf` diagnostic parser and
+its unreachable checks were deleted; strict legacy import remains the only
+reader of the preserved rollback file.
+
+Rootless deterministic verification passed the focused manager matrix, the
+complete Go race suite three times in 2.517 seconds, and `go vet`. The focused
+Swift status/intent/doctor matrix passed 51 tests across five suites three
+times. ReachKit passed all 79 tests in 8/8 fresh runs. A warnings-as-errors
+release hashes to `6d6ce6add00ee395ea927fdb434b4594ef11c5257156c0f2723163ecc751c1dd`
+with CDHash `24d8462e518997aeba184c1e09b47c6443f9c0b1` and exactly seven adjacent
+resource bundles. The normally signed universal Simulator Example and signed
+generic-iOS Keeper linkage builds succeeded without a Keeper source change.
+
+The staged scriptless package still has exactly the helper and LaunchDaemon
+plist and no scripts. The helper hashes to
+`8ac3705b3eeac878693eb921c946b24c9ce6a6a97b90371debef2519611420d3`
+(CDHash `ecb4fb7e62adef0f9dc3653d2741c17064280b2e`), the source plist to
+`6a8ee41852db26e7b41c3f2d976fdabba06cd6e6a3e77d8838470f07a38761df`,
+and the package to
+`8f0a77a6181cdee4dbad7df6d1421da5650086e25567be5350cf352e3f4ffc77`.
+The one-byte plist difference from the installed hash is only the installed
+copy's extra trailing blank line; parsed policy, payload ownership and modes
+are unchanged. Helper/config/status versions and JSON field sets are unchanged.
+No installed binary, process, route, root state or login service was changed by
+this rootless checkpoint.
+
+The accepted reachd matrix passed 198 tests in 29 suites in 8/8 fresh scratch
+runs. One additional attempt while the macOS console was locked failed before
+the assertions because complete file protection denied two temporary-state
+writes; after unlock, those exact two guards passed together 3/3 and the
+replacement full run passed 198/198. The staged release then passed the real-
+weight MLX spine both at its canonical path and through an installed-style
+symlink with no resources beside the alias. Each invocation passed
+unconstrained sampling 3/3 and guided schemas 15/15 and reported positive
+usage. Metal compiler `32023.921` remained available, `git diff --check` was
+clean, and no superseded `WireGuardConf` or unreachable diagnostic symbol
+remained. These results complete rootless acceptance; installed replacement,
+restart, apply, identity and diagnosis checks remain separately authorized.
+
+Founder-authorized installation then replaced the two accepted units under one
+complete rollback guard at
+`/private/tmp/reach-mesh-fixes-installed-backup-20260811`. The installed helper
+hashes to
+`8ac3705b3eeac878693eb921c946b24c9ce6a6a97b90371debef2519611420d3`
+and the canonical daemon to
+`6d6ce6add00ee395ea927fdb434b4594ef11c5257156c0f2723163ecc751c1dd`.
+The scriptless package retained its two payload files and no scripts. An
+idempotent generation-3 apply preserved public digest `540d0724…f03`, and one
+controlled helper termination changed its PID to 88852 while restoring one
+peer, `utun0`, `10.86.0.1/24`, the connected `/24` route, MTU 1280 and UDP
+51820. The login daemon independently restarted as PID 89336 and retained UDP
+47337. The superseded mode-0600 staging specification was removed after apply;
+durable intent and active state were unchanged.
+
+Installed `service status` and doctor agreed on mesh-owner PASS. Authenticated
+`doctor --dial` opened a session over loopback in 53 ms with 15 pass, three
+expected mapping/pin warnings, zero waiting and zero fail; the earlier
+`SecPKCS12Import -25291` fault did not recur. Canonical and `~/.local/bin`
+alias invocations each passed the MLX spine, sampling 3/3 and guided schemas
+15/15 with positive usage. The four CA/server files, device registry, host
+WireGuard keypair and mesh intent remained byte-identical, the CA-creation
+count remained zero, and no re-pair occurred. No logout, reboot or phone matrix
+was repeated because this correction changed no launch policy, route/backend,
+wire or Keeper behavior. **Verdict for those bytes: PASS.** That predecessor
+rollback/status contract remains the usable installed baseline.
+
+A post-install review then found three bounded gaps in that candidate: rollback
+could still swallow pending-removal or status-publication failure, four strict
+diagnostic mismatch returns omitted the retained update outcome, and the direct
+orphan-peer warning lacked its own test. The current source delta closes all
+three. Go race passes 3/3 plus vet; the focused Swift matrix passes 52/52 once
+and full reachd passes 199/199 once.
+
+Founder-authorized exact-byte replacement then installed the reviewed delta
+under the complete rollback unit at
+`/private/tmp/reach-mesh-review-installed-backup.3jWDXJ`. The installed helper
+hashes to
+`61d04eebb17b063ac77f0beab7beecc1417af8cc2ca495284e98e49aaf094542`
+and the canonical daemon to
+`4d2a6f693c74f13904599a02166c10cac9d956b7c8cd520336d84f10fe319ad2`.
+The scriptless two-item package hashes to
+`589cd9b5f14f142d5e2412bceac4513fcd3d464672e4e87ce2e34b795ecb2625`.
+Launchd runs the helper as PID 4622 and the login daemon as PID 4725; generation
+3, digest `540d0724…f03`, one peer, ready `utun0`, the connected `10.86.0.0/24`
+route and UDP 47337 all survived replacement. Service status reports the mesh
+owner PASS.
+
+Three sandboxed doctor attempts reproduced the attributed
+`SecPKCS12Import -25291` diagnostic-mint fault; the required unsandboxed
+authenticated `doctor --dial` then opened over loopback in 43 ms with 15 pass,
+three expected pin/mapping warnings, zero waiting and zero fail. Installed
+canonical and `~/.local/bin` alias launches each passed the MLX spine,
+unconstrained sampling 3/3 and guided schemas 15/15 with positive usage. The
+four CA/server files, device registry, host WireGuard keypair and mesh intent
+remained byte-identical, `cluster CA created` remained zero, seven resource
+bundles remained adjacent only to the canonical binary, and no re-pair
+occurred. No logout, reboot or phone matrix was repeated because this review
+delta changes no launch policy, backend/route behavior, wire or Keeper
+behavior. **Verdict for the reviewed bytes: PASS.**

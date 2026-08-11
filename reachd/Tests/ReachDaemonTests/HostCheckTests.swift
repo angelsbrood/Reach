@@ -25,7 +25,14 @@ import Testing
         _ directory: URL,
         conf: String? = nil,
         addresses: [[UInt8]] = [[192, 168, 8, 104], [10, 86, 0, 1]],
-        portsHeld: Bool = false
+        portsHeld: Bool = false,
+        meshOwnerEvidence: MeshOwner.Evidence = .init(
+            helper: .absent,
+            plist: .absent,
+            statusFile: .absent,
+            status: nil,
+            launchdPID: nil
+        )
     ) async -> HostCheck.Report {
         await HostCheck.examine(
             stateDirectory: directory,
@@ -34,6 +41,7 @@ import Testing
             supervision: .ordinary,
             supervisionHome: directory,
             canonicalState: directory.appendingPathComponent("Library/Application Support/Reach"),
+            meshOwnerEvidence: meshOwnerEvidence,
             portIsHeld: { _ in portsHeld }
         )
     }
@@ -224,69 +232,7 @@ import Testing
         #expect(try finding(broken, "ports").detail.contains("not checked"))
     }
 
-    // MARK: - The conf and the state directory must agree
-
-    /// Every row here is a conf wg-quick accepts. A parser stricter than the
-    /// thing that actually consumes the file would report a fault in a working
-    /// rig, and a false FAIL that stops a venue is worse than the blindness it
-    /// replaced. The live conf exercises none of these, which is exactly why
-    /// they are tested rather than eyeballed.
-    @Test(arguments: [
-        ("canonical", "[Interface]\nPrivateKey = KEY\nListenPort = 51820\n"),
-        ("lowercased key", "[Interface]\nprivatekey = KEY\n"),
-        ("lowercased section", "[interface]\nPrivateKey = KEY\n"),
-        ("trailing comment", "[Interface]\nPrivateKey = KEY # the host key\n"),
-        ("comment naming a section", "# see [Interface] below\n[Interface]\nPrivateKey = KEY\n"),
-        ("no trailing newline", "[Interface]\nPrivateKey = KEY"),
-        ("CRLF", "[Interface]\r\nPrivateKey = KEY\r\n"),
-        ("wg-quick-only keys", "[Interface]\nPrivateKey = KEY\nPostUp = /bin/true\nTable = off\n"),
-        ("no spaces around =", "[Interface]\nPrivateKey=KEY\n"),
-    ])
-    func theConfParserAcceptsEveryConfWgQuickAccepts(name: String, template: String) throws {
-        // A real 32-byte key: 44 base64 characters ending in one "=" of
-        // padding. A parser that splits on the LAST separator reads this as
-        // empty, which is every conf this rig has ever written.
-        let key = Data(repeating: 7, count: 32).base64EncodedString()
-        #expect(key.hasSuffix("="), "the regression this row exists for needs the padding")
-
-        let parsed = try WireGuardConf.parse(template.replacingOccurrences(of: "KEY", with: key))
-        #expect(parsed.hasInterfaceSection, "\(name): lost the [Interface] section")
-        #expect(parsed.privateKey == key, "\(name): read the key as \(parsed.privateKey ?? "nil")")
-    }
-
-    @Test func aPrivateKeyUnderPeerIsNotTheHostKey() throws {
-        // Section-scoped: any [-headed line closes the section, so a key in a
-        // peer block belongs to the peer and this host has no identity.
-        let key = Data(repeating: 9, count: 32).base64EncodedString()
-        let parsed = try WireGuardConf.parse("[Peer]\nPrivateKey = \(key)\nAllowedIPs = 10.86.0.2/32\n")
-        #expect(!parsed.hasInterfaceSection)
-        #expect(parsed.privateKey == nil)
-        #expect(parsed.peerCount == 1)
-    }
-
-    @Test func aCommentedOutPeerIsNotAPeer() throws {
-        // The old count was a substring split on "[Peer]", so a commented
-        // block counted as an admitted device.
-        let parsed = try WireGuardConf.parse("""
-            [Interface]
-            PrivateKey = \(Data(repeating: 1, count: 32).base64EncodedString())
-
-            # [Peer]
-            # PublicKey = something
-
-            [Peer]
-            PublicKey = \(Data(repeating: 2, count: 32).base64EncodedString())
-            AllowedIPs = 10.86.0.2/32
-            """)
-        #expect(parsed.peerCount == 1)
-    }
-
-    @Test func twoInterfaceSectionsAreRefusedRatherThanGuessedAt() throws {
-        let key = Data(repeating: 3, count: 32).base64EncodedString()
-        #expect(throws: WireGuardConf.Trouble.self) {
-            try WireGuardConf.parse("[Interface]\nPrivateKey = \(key)\n[Interface]\nPrivateKey = \(key)\n")
-        }
-    }
+    // MARK: - Mesh intent and the state directory must agree
 
     @Test func theWireGuardPrivateAndPublicKeysMustAgree() async throws {
         let directory = try fixture()
@@ -312,17 +258,6 @@ import Testing
         let identity = try finding(diverged, "wg host key")
         #expect(identity.level == .fail)
         #expect(!diverged.isSound)
-    }
-
-    @Test func legacyEvidenceWithNoInterfaceIsStillRecognizedAsInvalid() throws {
-        let parsed = try WireGuardConf.parse("""
-            [Peer]
-            PublicKey = \(Data(repeating: 4, count: 32).base64EncodedString())
-            AllowedIPs = 10.86.0.2/32
-            """)
-        let identity = HostCheck.checkWireGuardIdentity(parsed, hostKey: nil, conf: "rollback.conf")
-        #expect(identity.level == .fail)
-        #expect(identity.detail.contains("no [Interface]"))
     }
 
     @Test func noFindingEverRendersThePrivateKey() async throws {
@@ -412,6 +347,32 @@ import Testing
 
         let devices = try await finding(report(directory, conf: conf), "enrolled devices")
         #expect(devices.level == .pass)
+    }
+
+    @Test func anIntentPeerWithoutAnActiveDeviceIsWarnedDirectly() async throws {
+        let directory = try fixture()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let conf = directory.appendingPathComponent("reach0.conf").path
+        let host = try WireGuardHost(
+            keysDirectory: directory.appendingPathComponent("wg", isDirectory: true),
+            confPath: conf,
+            endpoint: "192.0.2.1:51820"
+        )
+        let registry = DeviceRegistry(directory: directory)
+        let record = try await registry.reserve(
+            name: "phone",
+            devicePubX963: P256.Signing.PrivateKey().publicKey.x963Representation
+        )
+        let activeKey = Data(repeating: 9, count: 32)
+        await registry.admit(record.id, wgPub: activeKey)
+        try await host.addPeer(publicKey: activeKey, allowedIP: record.assignedIP)
+        try await host.addPeer(publicKey: Data(repeating: 10, count: 32), allowedIP: "10.86.0.3")
+
+        let devices = try await finding(report(directory, conf: conf), "enrolled devices")
+        #expect(devices.level == .warn)
+        #expect(devices.detail.contains("1 active"))
+        #expect(devices.detail.contains("10.86.0.3/32"))
+        #expect(devices.action?.contains("peer outlives the device") == true)
     }
 
     /// The case that actually bit, and the one counting could never see. A torn

@@ -28,10 +28,30 @@ func NewStatus() Status {
 	}
 }
 
-func (status Status) WithError(reason string) Status {
-	status.Ready = false
+func ReadyStatus(spec Specification, interfaceName string) Status {
+	status := NewStatus()
+	status.Generation = spec.Generation
+	status.PublicDigest = spec.PublicDigest()
+	status.InterfaceName = interfaceName
+	status.Ready = true
+	status.PeerCount = len(spec.Peers)
+	return status
+}
+
+func (status Status) WithLastError(reason string) Status {
 	status.Error = boundedReason(reason)
 	status.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	return status
+}
+
+func UnavailableStatus(active *Specification, reason string) Status {
+	status := NewStatus()
+	if active != nil {
+		status.Generation = active.Generation
+		status.PublicDigest = active.PublicDigest()
+		status.PeerCount = len(active.Peers)
+	}
+	status.Error = boundedReason(reason)
 	return status
 }
 

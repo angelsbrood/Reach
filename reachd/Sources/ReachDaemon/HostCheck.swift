@@ -138,6 +138,7 @@ public enum HostCheck {
         supervision: SupervisionContext,
         supervisionHome: URL? = nil,
         canonicalState: URL = DaemonInfo.canonicalLoginStateDirectory,
+        meshOwnerEvidence: MeshOwner.Evidence? = nil,
         portIsHeld: @Sendable (UInt16) -> Bool = HostCheck.probePort,
         dial: Dial? = nil
     ) async -> Report {
@@ -183,7 +184,11 @@ public enum HostCheck {
         findings.append(contentsOf: wireGuard.findings)
         findings.append(checkLegacyWireGuard(in: stateDirectory, conf: wireGuardConf))
         findings.append(await checkDevices(in: stateDirectory, peers: wireGuard.peers))
-        findings.append(MeshOwner.finding(stateDirectory: stateDirectory, addresses: addresses))
+        findings.append(MeshOwner.finding(
+            stateDirectory: stateDirectory,
+            addresses: addresses,
+            evidence: meshOwnerEvidence
+        ))
         findings.append(contentsOf: portFindings)
         findings.append(contentsOf: checkReachability(in: stateDirectory, daemonUp: daemonUp))
         findings.append(checkSupervision(
@@ -792,125 +797,10 @@ public enum HostCheck {
         String(key.base64EncodedString().prefix(12)) + "…"
     }
 
-    static func checkWireGuard(in directory: URL, conf path: String) -> (findings: [Finding], peers: [[String: String]]?) {
-        var findings: [Finding] = []
-        let keys = directory.appendingPathComponent("wg", isDirectory: true).appendingPathComponent("server.pub")
-        let hostKeyExists = FileManager.default.fileExists(atPath: keys.path)
-        // Read as WireGuardHost writes it: base64 of the 32 raw bytes, with
-        // whatever trailing newline the editor left behind.
-        let hostKey: Data? = (try? String(contentsOf: keys, encoding: .utf8))
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .flatMap { Data(base64Encoded: $0) }
-            .flatMap { $0.count == 32 ? $0 : nil }
-        if hostKeyExists {
-            findings.append(
-                hostKey == nil
-                    ? Finding(
-                        level: .fail,
-                        title: "wg host key",
-                        detail: "\(keys.path) is present but is not a 32-byte base64 key",
-                        action: "The daemon refuses to start on this. Restore it, or delete the wg/ directory to re-mint — every enrolled device then has to re-pair."
-                    )
-                    : Finding(level: .pass, title: "wg host key", detail: "present")
-            )
-        } else {
-            findings.append(Finding(
-                level: .wait,
-                title: "wg host key",
-                detail: "absent",
-                action: "Minted on first serve. A new key means every enrolled device must re-pair."
-            ))
-        }
-
-        // The second half of the same collapse: absent and unreadable were one
-        // `try?`, and the absent branch was described as "not readable".
-        //
-        // Absent is only a first run while the host key is absent too. Once
-        // server.pub exists, `serve` will NOT recreate a missing conf —
-        // WireGuardHost writes the skeleton inside the branch that mints the
-        // keypair, so a host that has ever served skips it — and `addPeer`
-        // then reads the missing file as "" and writes out a bare [Peer] with
-        // no [Interface], which wg-quick rejects outright. Calling that "not
-        // started yet" would be the exact error this level exists to remove.
-        guard FileManager.default.fileExists(atPath: path) else {
-            findings.append(
-                hostKeyExists
-                    ? Finding(
-                        level: .fail,
-                        title: "wg config",
-                        detail: "\(path) is missing, but this host already has a wg key",
-                        action: "serve will not recreate it — the skeleton is only written alongside a fresh keypair. Restore the conf, or delete \(directory.appendingPathComponent("wg").path) to re-mint (every enrolled device then has to re-pair)."
-                    )
-                    : Finding(
-                        level: .wait,
-                        title: "wg config",
-                        detail: "\(path) absent",
-                        action: "Written on first serve, alongside the host key."
-                    )
-            )
-            return (findings, nil)
-        }
-        guard let conf = try? String(contentsOfFile: path, encoding: .utf8) else {
-            findings.append(Finding(
-                level: .fail,
-                title: "wg config",
-                detail: "\(path) exists but will not read",
-                action: "wg-quick reads it as root; doctor reads it as you. Check the owner and mode — editing it under sudo is how it stops being yours."
-            ))
-            return (findings, nil)
-        }
-        let parsed: WireGuardConf
-        do {
-            parsed = try WireGuardConf.parse(conf)
-        } catch {
-            findings.append(Finding(
-                level: .fail,
-                title: "wg config",
-                detail: "\(path): \(error)",
-                action: "wg-quick will refuse this file, so the mesh will not come up at all."
-            ))
-            return (findings, nil)
-        }
-
-        let peers = parsed.peerCount
-        findings.append(Finding(
-            level: peers > 0 ? .pass : .wait,
-            title: "wg config",
-            detail: "\(peers) peer\(peers == 1 ? "" : "s") in \(path) — the file, not the interface",
-            // `sudo wg show reach0` — the obvious form — fails on this rig with
-            // "Unable to access interface" while the interface is demonstrably
-            // up. Bare `sudo wg show` prints every interface and works. Naming
-            // the form that fails is worse than naming none, because it fails
-            // at the exact moment the operator is confirming the one thing
-            // doctor cannot see.
-            action: peers > 0
-                ? "This legacy parser describes rollback evidence only. Mesh intent, helper status and the live exact address are the managed authority."
-                : "No device has been admitted. Pair one, then run `reachd mesh apply`."
-        ))
-        findings.append(checkWireGuardIdentity(parsed, hostKey: hostKey, conf: path))
-        // The invariant `addPeer` is built around, asserted against the file
-        // rather than trusted to the code that writes it. Two peers claiming one
-        // /32 is a conf wg will load and a mesh that routes that address to
-        // whichever block it happened to read — and nothing else here would see
-        // it, because a hand-edit and a future removal-plus-reallocation both
-        // produce it without going through `addPeer` at all.
-        let claims = parsed.peers.flatMap(WireGuardConf.allowedIPs(of:))
-        let contested = Set(claims.filter { address in claims.filter { $0 == address }.count > 1 })
-        if !contested.isEmpty {
-            findings.append(Finding(
-                level: .fail,
-                title: "wg peers",
-                detail: "\(path) has more than one peer claiming \(contested.sorted().joined(separator: ", "))",
-                action: "wg will load this and route the address to whichever block it read — so one device silently takes another's mesh. Remove the stale block; the device it belonged to keeps its identity and gets a new one by re-pairing."
-            ))
-        }
-        return (findings, parsed.peers)
-    }
-
     /// The live mesh authority is login-owned intent, not the hook-capable
     /// rollback file. Keys, intent and registry meet here before the helper is
     /// ever invited to consume a specification.
-    static func checkMeshIntent(in directory: URL) -> (findings: [Finding], peers: [[String: String]]?) {
+    static func checkMeshIntent(in directory: URL) -> (findings: [Finding], peers: [MeshIntent.Peer]?) {
         var findings: [Finding] = []
         let keyDirectory = directory.appendingPathComponent("wg", isDirectory: true)
         let privateURL = keyDirectory.appendingPathComponent("server.key")
@@ -984,10 +874,7 @@ public enum HostCheck {
             title: "wg identity",
             detail: "wg/server.key, wg/server.pub and mesh-intent.json agree"
         ))
-        return (
-            findings,
-            intent.peers.map { ["publickey": $0.publicKey, "allowedips": $0.allowedIP] }
-        )
+        return (findings, intent.peers)
     }
 
     /// The old file remains byte-for-byte rollback evidence, never live
@@ -1032,70 +919,6 @@ public enum HostCheck {
         }
     }
 
-    /// Whether the conf and the state directory agree about who this host is.
-    ///
-    /// They can diverge silently. `WireGuardHost` mints the keypair and writes
-    /// the conf skeleton in the same branch, guarded on `server.pub` being
-    /// absent — so removing the state directory's `wg/` while the conf survives
-    /// gives this host a NEW key while the file still names the old one. wg
-    /// comes up, the daemon serves, every previously enrolled device is
-    /// talking to a key that no longer exists, and nothing else on this list
-    /// looks at both halves.
-    ///
-    /// Nothing here renders the private key. Doctor's output is shot as the
-    /// evidence tail after a take, so the two public keys are the most that
-    /// may appear, truncated.
-    static func checkWireGuardIdentity(_ conf: WireGuardConf, hostKey: Data?, conf path: String) -> Finding {
-        guard conf.hasInterfaceSection else {
-            return Finding(
-                level: .fail,
-                title: "wg identity",
-                detail: "\(path) has no [Interface] section",
-                action: "wg-quick cannot bring up an interface with no key. This is what a conf looks like after a peer was appended to a file that could not be read — restore it, or delete the state directory's wg/ to re-mint (every device re-pairs)."
-            )
-        }
-        guard let privateKey = conf.privateKey, !privateKey.isEmpty else {
-            return Finding(
-                level: .fail,
-                title: "wg identity",
-                detail: "\(path) has an [Interface] with no PrivateKey",
-                action: "The host has no mesh identity to present. Restore the conf, or delete the state directory's wg/ to re-mint."
-            )
-        }
-        guard let raw = Data(base64Encoded: privateKey), raw.count == 32,
-              let derived = try? Curve25519.KeyAgreement.PrivateKey(rawRepresentation: raw).publicKey.rawRepresentation
-        else {
-            return Finding(
-                level: .fail,
-                title: "wg identity",
-                detail: "\(path)'s PrivateKey is not a 32-byte base64 key",
-                action: "wg-quick will refuse it. Restore the conf, or delete the state directory's wg/ to re-mint."
-            )
-        }
-        guard let hostKey else {
-            return Finding(
-                level: .wait,
-                title: "wg identity",
-                detail: "conf carries a key; nothing in the state directory to check it against yet",
-                action: "server.pub is written on first serve."
-            )
-        }
-        let shown = shortKey
-        guard derived == hostKey else {
-            return Finding(
-                level: .fail,
-                title: "wg identity",
-                detail: "\(path) is a different host than the state directory — conf is \(shown(derived)), server.pub is \(shown(hostKey))",
-                action: "Every enrolled device was given the state directory's key as the one to talk to, so none of them can reach the interface this conf brings up. Whichever is the real host, make the other match it before pairing anything."
-            )
-        }
-        return Finding(
-            level: .pass,
-            title: "wg identity",
-            detail: "conf PrivateKey matches wg/server.pub (\(shown(hostKey)))"
-        )
-    }
-
     /// `peers` is what the strict mesh intent carries, or nil when there was no
     /// intent to read. It is passed in so this check can ask the one
     /// question neither half could answer alone: does every device that believes
@@ -1117,13 +940,13 @@ public enum HostCheck {
     /// which is the shape it was written for and missed. A stranded device
     /// offsetting an orphaned block did the same. Neither survives a comparison
     /// of *which key holds which address*.
-    static func checkDevices(in directory: URL, peers: [[String: String]]?) async -> Finding {
+    static func checkDevices(in directory: URL, peers: [MeshIntent.Peer]?) async -> Finding {
         let devices = await DeviceRegistry(directory: directory).all
         if let peers {
             let active = devices.filter(\.active)
-            let holds = { (peer: [String: String], device: DeviceRegistry.Device) in
-                WireGuardConf.publicKey(of: peer) == device.wgPub
-                    && WireGuardConf.allowedIPs(of: peer).contains("\(device.assignedIP)/32")
+            let holds = { (peer: MeshIntent.Peer, device: DeviceRegistry.Device) in
+                peer.publicKey == device.wgPub.base64EncodedString()
+                    && peer.allowedIP == "\(device.assignedIP)/32"
             }
             let stranded = active.filter { device in !peers.contains { holds($0, device) } }
             if !stranded.isEmpty {
@@ -1141,9 +964,8 @@ public enum HostCheck {
             if !orphans.isEmpty {
                 let named = orphans
                     .map { peer in
-                        let key = WireGuardConf.publicKey(of: peer).map(shortKey) ?? "no key"
-                        let where_ = WireGuardConf.allowedIPs(of: peer).joined(separator: ", ")
-                        return "\(key) at \(where_.isEmpty ? "no address" : where_)"
+                        let key = Data(base64Encoded: peer.publicKey).map(shortKey) ?? "no key"
+                        return "\(key) at \(peer.allowedIP)"
                     }
                     .joined(separator: ", ")
                 return Finding(

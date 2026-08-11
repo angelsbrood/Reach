@@ -306,7 +306,16 @@ and bounded keepalives. Unknown or duplicate JSON keys, hooks, commands,
 paths, malformed routes, unsafe files, reused generations and rollbacks are
 refused. The root service retains the last-known-good generation and exposes
 only a public status containing its version, PID, generation, public digest,
-interface name, peer count, timestamp and bounded error.
+interface name, readiness, peer count, timestamp and bounded error. Readiness
+and the bounded error are separate facts. `ready: true` says the named
+generation and interface are live; an accompanying `configuration rejected`,
+`update refused`, or `rollback restored` records the most recent nonfatal
+update outcome without claiming that the active road went down. `ready: false`
+always has an empty interface name and a current blocker such as
+`unconfigured` or `interface unavailable`; generation, digest and peer count
+may remain only as recovery context for the durable active specification.
+`rollback restored` is never a non-ready state. A normal successful start,
+apply, or idempotent reapply clears the old bounded outcome.
 
 The user-owned `mesh-intent.json` is the persistent enrollment intent and
 contains no host private key. On the first upgraded serve, Reach strictly
@@ -331,11 +340,15 @@ crash check and rollback can be grouped behind one native administrator
 authorization instead of prompting for each operation.
 
 `reachd service status` and `reachd doctor` report the login daemon and mesh
-owner separately. An absent or not-yet-configured helper is `WAIT`; a legacy
-manually raised interface is usable but unmanaged. Unsafe ownership,
-malformed state, PID or interface disagreement, a generation rollback, or a
-ready claim without exact `10.86.0.1` is `FAIL`. Only a matching helper PID,
-public digest, desired generation and live interface is `PASS`.
+owner separately, using the same mesh-owner verdict. An absent or
+not-yet-configured helper is `WAIT`; a legacy manually raised interface is
+usable but unmanaged. Unsafe ownership, malformed state, PID or interface
+disagreement, a generation rollback, a configured non-ready road, or a ready
+claim without exact `10.86.0.1` is `FAIL`. Exact desired/live authority with
+no bounded outcome is `PASS`; the same ready authority with a nonfatal outcome
+is `WARN`; and a ready generation behind login-owned intent is `WAIT`, includes
+the outcome, and names `reachd mesh apply`. Thus “the last update failed but
+the old road is healthy” cannot be mistaken for “there is currently no road.”
 
 The helper may already have prepared the mesh at the login screen after a
 reboot. That does not broaden Reach's serving boundary: no `reachd`, model or

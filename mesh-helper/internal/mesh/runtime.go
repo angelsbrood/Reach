@@ -27,15 +27,15 @@ func ServeSystem() error {
 		_ = manager.Close()
 		return err
 	}
-	errorsFromControl := make(chan error, 1)
-	go func() { errorsFromControl <- control.Serve() }()
-
 	status := manager.status
 	if status.Ready {
 		fmt.Println("reach-meshd: ready")
 	} else {
 		fmt.Println("reach-meshd: waiting for configuration")
 	}
+
+	errorsFromControl := make(chan error, 1)
+	go func() { errorsFromControl <- control.Serve() }()
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGTERM, syscall.SIGINT)

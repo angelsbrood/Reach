@@ -232,17 +232,22 @@ import Testing
         )
     }
 
-    private func status(for intent: MeshIntent, pid: Int32 = 41, ready: Bool = true) -> MeshOwner.Status {
+    private func status(
+        for intent: MeshIntent,
+        pid: Int32 = 41,
+        ready: Bool = true,
+        error: String? = nil
+    ) -> MeshOwner.Status {
         MeshOwner.Status(
             helperVersion: MeshOwner.helperVersion,
             pid: pid,
             generation: intent.generation,
             publicDigest: intent.publicDigest,
-            interfaceName: "utun7",
+            interfaceName: ready ? "utun7" : "",
             ready: ready,
             peerCount: intent.peers.count,
             updatedAt: Date(timeIntervalSince1970: 1_700_000_000),
-            error: nil
+            error: error
         )
     }
 
@@ -275,6 +280,54 @@ import Testing
         let contradictory = String(decoding: json, as: UTF8.self)
             .replacingOccurrences(of: "\"ready\":true", with: "\"ready\":false")
         #expect(throws: (any Error).self) { try MeshOwner.Status.decode(Data(contradictory.utf8)) }
+    }
+
+    @Test func statusStrictlySeparatesReadinessFromBoundedUpdateOutcomes() throws {
+        let value = try intent()
+        func encoded(ready: Bool, interfaceName: String, error: String?) -> Data {
+            let errorField = error.map { ",\"error\":\"\($0)\"" } ?? ""
+            return Data("""
+                {
+                  "helperVersion":"1","pid":41,"generation":4,
+                  "publicDigest":"\(value.publicDigest)","interfaceName":"\(interfaceName)",
+                  "ready":\(ready),"peerCount":1,"updatedAt":"2023-11-14T22:13:20Z"\(errorField)
+                }
+                """.utf8)
+        }
+
+        for error in ["configuration rejected", "update refused", "rollback restored"] {
+            let decoded = try MeshOwner.Status.decode(encoded(ready: true, interfaceName: "utun7", error: error))
+            #expect(decoded.ready)
+            #expect(decoded.error == error)
+        }
+        for error in ["unconfigured", "interface unavailable", "stopped", "mesh owner unavailable"] {
+            #expect(throws: (any Error).self) {
+                try MeshOwner.Status.decode(encoded(ready: true, interfaceName: "utun7", error: error))
+            }
+        }
+        #expect(throws: (any Error).self) {
+            try MeshOwner.Status.decode(encoded(ready: false, interfaceName: "", error: "rollback restored"))
+        }
+        #expect(throws: (any Error).self) {
+            try MeshOwner.Status.decode(encoded(ready: false, interfaceName: "utun7", error: "interface unavailable"))
+        }
+        let missingError = String(
+            decoding: encoded(ready: false, interfaceName: "", error: "interface unavailable"),
+            as: UTF8.self
+        ).replacingOccurrences(of: ",\"error\":\"interface unavailable\"", with: "")
+        #expect(throws: (any Error).self) {
+            try MeshOwner.Status.decode(Data(missingError.utf8))
+        }
+        let partialRecovery = String(
+            decoding: encoded(ready: false, interfaceName: "", error: "interface unavailable"),
+            as: UTF8.self
+        ).replacingOccurrences(of: value.publicDigest, with: "")
+        #expect(throws: (any Error).self) {
+            try MeshOwner.Status.decode(Data(partialRecovery.utf8))
+        }
+        #expect(try !MeshOwner.Status.decode(
+            encoded(ready: false, interfaceName: "", error: "interface unavailable")
+        ).ready)
     }
 
     @Test func absentOwnerIsWaitingEvenWhenALegacyInterfaceIsUsable() throws {
@@ -338,6 +391,144 @@ import Testing
             evidence: evidence(status(for: desired), pid: 99)
         )
         #expect(wrongPID.level == .fail)
+    }
+
+    @Test func boundedErrorsRemainVisibleAtEveryDiagnosticPrecedence() throws {
+        let desired = try intent(generation: 5)
+        let active = try intent(generation: 4)
+
+        let exactRecovered = MeshOwner.verdict(
+            intent: .success(desired),
+            addresses: [[10, 86, 0, 1]],
+            evidence: evidence(status(for: desired, error: "rollback restored"))
+        )
+        #expect(exactRecovered.level == .warn)
+        #expect(exactRecovered.detail.contains("rollback restored"))
+
+        let pending = MeshOwner.verdict(
+            intent: .success(desired),
+            addresses: [[10, 86, 0, 1]],
+            evidence: evidence(status(for: active, error: "update refused"))
+        )
+        #expect(pending.level == .wait)
+        #expect(pending.detail.contains("update refused"))
+        #expect(pending.action?.contains("reachd mesh apply") == true)
+
+        let unavailable = MeshOwner.verdict(
+            intent: .success(desired),
+            addresses: [[10, 86, 0, 1]],
+            evidence: evidence(status(for: active, ready: false, error: "interface unavailable"))
+        )
+        #expect(unavailable.level == .fail)
+        #expect(unavailable.detail.contains("interface unavailable"))
+
+        let ahead = try intent(generation: 6)
+        let helperAhead = MeshOwner.verdict(
+            intent: .success(desired),
+            addresses: [[10, 86, 0, 1]],
+            evidence: evidence(status(for: ahead, error: "rollback restored"))
+        )
+        #expect(helperAhead.level == .fail)
+        #expect(helperAhead.detail.contains("rollback restored"))
+
+        let different = try MeshIntent(
+            generation: desired.generation,
+            publicKey: desired.publicKey,
+            peers: [.init(publicKey: key(3), allowedIP: "10.86.0.2/32")]
+        )
+        let digestMismatch = MeshOwner.verdict(
+            intent: .success(desired),
+            addresses: [[10, 86, 0, 1]],
+            evidence: evidence(status(for: different, error: "update refused"))
+        )
+        #expect(digestMismatch.level == .fail)
+        #expect(digestMismatch.detail.contains("update refused"))
+
+        let missingInterface = MeshOwner.verdict(
+            intent: .success(desired),
+            addresses: [],
+            evidence: evidence(status(for: desired, error: "configuration rejected"))
+        )
+        #expect(missingInterface.level == .fail)
+        #expect(missingInterface.detail.contains("configuration rejected"))
+
+        let wrongPeerCount = MeshOwner.Status(
+            helperVersion: MeshOwner.helperVersion,
+            pid: 41,
+            generation: desired.generation,
+            publicDigest: desired.publicDigest,
+            interfaceName: "utun7",
+            ready: true,
+            peerCount: desired.peers.count + 1,
+            updatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            error: "rollback restored"
+        )
+        let peerMismatch = MeshOwner.verdict(
+            intent: .success(desired),
+            addresses: [[10, 86, 0, 1]],
+            evidence: evidence(wrongPeerCount)
+        )
+        #expect(peerMismatch.level == .fail)
+        #expect(peerMismatch.detail.contains("rollback restored"))
+
+        let unconfigured = MeshOwner.Status(
+            helperVersion: MeshOwner.helperVersion,
+            pid: 41,
+            generation: 0,
+            publicDigest: "",
+            interfaceName: "",
+            ready: false,
+            peerCount: 0,
+            updatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            error: "unconfigured"
+        )
+        #expect(MeshOwner.verdict(
+            intent: .success(desired),
+            addresses: [],
+            evidence: evidence(unconfigured)
+        ).level == .wait)
+    }
+
+    @Test func diagnosticAuthorityPrecedesInvalidIntentConvenience() throws {
+        let desired = try intent()
+        let invalidArtifact = MeshOwner.verdict(
+            intent: .failure(MeshIntentError.refused("injected intent failure")),
+            addresses: [[10, 86, 0, 1]],
+            evidence: .init(
+                helper: .invalid("user writable"),
+                plist: .valid,
+                statusFile: .valid,
+                status: status(for: desired),
+                launchdPID: 41
+            )
+        )
+        #expect(invalidArtifact.level == .fail)
+        #expect(invalidArtifact.detail.contains("invalid helper"))
+
+        let invalidIntent = MeshOwner.verdict(
+            intent: .failure(MeshIntentError.refused("injected intent failure")),
+            addresses: [[10, 86, 0, 1]],
+            evidence: evidence(status(for: desired))
+        )
+        #expect(invalidIntent.level == .fail)
+        #expect(invalidIntent.detail.contains("mesh-intent.json"))
+
+        let unconfigured = MeshOwner.Status(
+            helperVersion: MeshOwner.helperVersion,
+            pid: 41,
+            generation: 0,
+            publicDigest: "",
+            interfaceName: "",
+            ready: false,
+            peerCount: 0,
+            updatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            error: "unconfigured"
+        )
+        #expect(MeshOwner.verdict(
+            intent: .failure(MeshIntentError.refused("injected intent failure")),
+            addresses: [],
+            evidence: evidence(unconfigured)
+        ).level == .wait)
     }
 
     @Test func applyNamesOnlySystemSudoAndTheInstalledRootOwnedHelper() {

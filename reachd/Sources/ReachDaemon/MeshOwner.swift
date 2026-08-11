@@ -108,9 +108,23 @@ package enum MeshOwner {
             }
             guard ready
                 ? generation > 0 && !publicDigest.isEmpty && !interfaceName.isEmpty && peerCount > 0
-                : error != nil
+                : interfaceName.isEmpty && error != nil
             else {
                 throw MeshIntentError.refused("mesh owner status readiness fields disagree")
+            }
+            if ready {
+                let allowedReadyErrors = Set(["configuration rejected", "update refused", "rollback restored"])
+                guard error.map(allowedReadyErrors.contains) ?? true else {
+                    throw MeshIntentError.refused("mesh owner status ready/error fields disagree")
+                }
+            } else {
+                guard error != "rollback restored" else {
+                    throw MeshIntentError.refused("mesh owner status ready/error fields disagree")
+                }
+                let hasRecoveryContext = generation > 0 || !publicDigest.isEmpty || peerCount > 0
+                guard !hasRecoveryContext || (generation > 0 && !publicDigest.isEmpty && peerCount > 0) else {
+                    throw MeshIntentError.refused("mesh owner status recovery fields disagree")
+                }
             }
             return Status(
                 helperVersion: helperVersion,
@@ -173,13 +187,11 @@ package enum MeshOwner {
     ) -> HostCheck.Finding {
         let exactInterface = addresses.contains([10, 86, 0, 1])
         let anyArtifacts = evidence.helper != .absent || evidence.plist != .absent || evidence.statusFile != .absent
-        guard case .success(let desired) = intent else {
-            return .init(
-                level: .fail,
-                title: "mesh owner",
-                detail: "mesh-intent.json is present but invalid",
-                action: "Fix the login-owned intent before asking a privileged process to consume it."
-            )
+        let desiredForAction: MeshIntent?
+        if case .success(let desired) = intent {
+            desiredForAction = desired
+        } else {
+            desiredForAction = nil
         }
 
         for (name, artifact) in [("helper", evidence.helper), ("LaunchDaemon plist", evidence.plist), ("status", evidence.statusFile)] {
@@ -218,9 +230,10 @@ package enum MeshOwner {
                 level: .wait,
                 title: "mesh owner",
                 detail: "installed; waiting for its first configuration",
-                action: desired?.peers.isEmpty == false ? "Run `reachd mesh apply`." : "Enroll a device, then run `reachd mesh apply`."
+                action: desiredForAction?.peers.isEmpty == false ? "Run `reachd mesh apply`." : "Enroll a device, then run `reachd mesh apply`."
             )
         }
+        let updateOutcome = status.error.map { "; last update outcome: \($0)" } ?? ""
         guard status.helperVersion == helperVersion else {
             return .init(level: .fail, title: "mesh owner", detail: "status names unsupported helper version \(status.helperVersion)")
         }
@@ -232,24 +245,15 @@ package enum MeshOwner {
                 level: .wait,
                 title: "mesh owner",
                 detail: "running but unconfigured",
-                action: desired?.peers.isEmpty == false ? "Run `reachd mesh apply`." : "Enroll a device, then run `reachd mesh apply`."
+                action: desiredForAction?.peers.isEmpty == false ? "Run `reachd mesh apply`." : "Enroll a device, then run `reachd mesh apply`."
             )
         }
-        guard let desired else {
-            return .init(level: .fail, title: "mesh owner", detail: "helper has configuration but login-owned mesh intent is absent")
-        }
-        if status.generation > desired.generation {
-            return .init(level: .fail, title: "mesh owner", detail: "helper generation \(status.generation) is ahead of intent generation \(desired.generation) — rollback detected")
-        }
-        if status.generation == desired.generation, status.publicDigest != desired.publicDigest {
-            return .init(level: .fail, title: "mesh owner", detail: "generation \(status.generation) names a different public configuration digest")
-        }
-        if status.generation < desired.generation || status.publicDigest != desired.publicDigest {
+        guard case .success(let desired) = intent else {
             return .init(
-                level: .wait,
+                level: .fail,
                 title: "mesh owner",
-                detail: "running generation \(status.generation); intent generation \(desired.generation) is pending",
-                action: "Run `reachd mesh apply`; this is the visible administrator action for the changed peer set."
+                detail: "mesh-intent.json is present but invalid",
+                action: "Fix the login-owned intent before asking a privileged process to consume it."
             )
         }
         guard status.ready else {
@@ -259,16 +263,52 @@ package enum MeshOwner {
                 detail: "generation \(status.generation) is not ready\(status.error.map { " — \($0)" } ?? "")"
             )
         }
+        guard let desired else {
+            return .init(level: .fail, title: "mesh owner", detail: "helper has configuration but login-owned mesh intent is absent")
+        }
+        if status.generation > desired.generation {
+            return .init(
+                level: .fail,
+                title: "mesh owner",
+                detail: "helper generation \(status.generation) is ahead of intent generation \(desired.generation) — rollback detected" + updateOutcome
+            )
+        }
+        if status.generation == desired.generation, status.publicDigest != desired.publicDigest {
+            return .init(
+                level: .fail,
+                title: "mesh owner",
+                detail: "generation \(status.generation) names a different public configuration digest" + updateOutcome
+            )
+        }
+        if status.generation < desired.generation || status.publicDigest != desired.publicDigest {
+            return .init(
+                level: .wait,
+                title: "mesh owner",
+                detail: "running generation \(status.generation); intent generation \(desired.generation) is pending"
+                    + (status.error.map { " — \($0)" } ?? ""),
+                action: "Run `reachd mesh apply`; this is the visible administrator action for the changed peer set."
+            )
+        }
         guard !status.interfaceName.isEmpty, exactInterface else {
-            return .init(level: .fail, title: "mesh owner", detail: "status claims ready but 10.86.0.1 is absent")
+            return .init(
+                level: .fail,
+                title: "mesh owner",
+                detail: "status claims ready but 10.86.0.1 is absent" + updateOutcome
+            )
         }
         guard status.peerCount == desired.peers.count else {
-            return .init(level: .fail, title: "mesh owner", detail: "status peer count does not match intent")
+            return .init(
+                level: .fail,
+                title: "mesh owner",
+                detail: "status peer count does not match intent" + updateOutcome
+            )
         }
+        let detail = "root-owned \(label) ready on \(status.interfaceName), generation \(status.generation), \(status.peerCount) peer\(status.peerCount == 1 ? "" : "s")"
         return .init(
-            level: .pass,
+            level: status.error == nil ? .pass : .warn,
             title: "mesh owner",
-            detail: "root-owned \(label) ready on \(status.interfaceName), generation \(status.generation), \(status.peerCount) peer\(status.peerCount == 1 ? "" : "s")"
+            detail: detail + updateOutcome,
+            action: status.error == nil ? nil : "The active road is ready. Inspect the rejected or recovered update before retrying it."
         )
     }
 

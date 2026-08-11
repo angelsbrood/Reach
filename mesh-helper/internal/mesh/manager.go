@@ -10,16 +10,27 @@ import (
 )
 
 type Manager struct {
-	mu      sync.Mutex
-	paths   Paths
-	backend Backend
-	owner   uint32
-	active  *Specification
-	status  Status
+	mu          sync.Mutex
+	paths       Paths
+	backend     Backend
+	owner       uint32
+	active      *Specification
+	status      Status
+	rename      func(string, string) error
+	remove      func(string) error
+	writeStatus func(string, Status) error
 }
 
 func NewManager(paths Paths, backend Backend) *Manager {
-	return &Manager{paths: paths, backend: backend, owner: 0, status: NewStatus()}
+	return &Manager{
+		paths:       paths,
+		backend:     backend,
+		owner:       0,
+		status:      NewStatus(),
+		rename:      os.Rename,
+		remove:      os.Remove,
+		writeStatus: WriteStatus,
+	}
 }
 
 func (manager *Manager) Start() error {
@@ -30,133 +41,186 @@ func (manager *Manager) Start() error {
 	}
 	active, activeErr := readSpecification(manager.paths.Active, manager.owner)
 	if activeErr != nil && !errors.Is(activeErr, os.ErrNotExist) {
-		manager.status = manager.status.WithError("configuration rejected")
-		_ = WriteStatus(manager.paths.Status, manager.status)
-		return activeErr
+		return errors.Join(activeErr, manager.publishUnavailable("configuration rejected"))
 	}
 	if activeErr == nil {
 		manager.active = &active
 	}
 
 	if _, err := os.Lstat(manager.paths.Pending); err == nil {
-		if err := manager.applyPendingLocked(); err == nil {
+		result := manager.applyPendingTransactionLocked()
+		if result.err == nil {
 			return nil
 		}
-		// A pending update may fail without taking the last-known-good road
-		// down. Apply the active specification again before reporting it.
-		if manager.active != nil {
-			if _, restoreErr := manager.applyBackend(*manager.active); restoreErr == nil {
-				_ = os.Remove(manager.paths.Pending)
-				manager.status.Error = "rollback restored"
-				_ = WriteStatus(manager.paths.Status, manager.status)
+		if result.recovered && !result.beforeBackend {
+			return nil
+		}
+		if result.beforeBackend && manager.active != nil {
+			name, restoreErr := manager.backend.Apply(*manager.active)
+			if restoreErr != nil {
+				return errors.Join(
+					result.err,
+					fmt.Errorf("pending configuration refused and active configuration unavailable: %w", restoreErr),
+					manager.publishUnavailable("interface unavailable"),
+				)
+			}
+			if err := manager.publishReady(*manager.active, name, result.reason); err != nil {
+				return errors.Join(result.err, err)
+			}
+			if result.recovered {
 				return nil
 			}
+			return result.err
 		}
-		return errors.New("pending and active configurations unavailable")
+		return result.err
 	}
 
 	if manager.active == nil {
-		manager.status = manager.status.WithError("unconfigured")
-		return WriteStatus(manager.paths.Status, manager.status)
+		return manager.publishUnavailable("unconfigured")
 	}
-	_, err := manager.applyBackend(*manager.active)
-	return err
+	name, err := manager.backend.Apply(*manager.active)
+	if err != nil {
+		return errors.Join(err, manager.publishUnavailable("interface unavailable"))
+	}
+	return manager.publishReady(*manager.active, name, "")
 }
 
 func (manager *Manager) ApplyPending() error {
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
-	return manager.applyPendingLocked()
+	return manager.applyPendingTransactionLocked().err
 }
 
-func (manager *Manager) applyPendingLocked() error {
+type pendingResult struct {
+	err           error
+	beforeBackend bool
+	reason        string
+	recovered     bool
+}
+
+func (manager *Manager) applyPendingTransactionLocked() pendingResult {
 	candidate, err := readSpecification(manager.paths.Pending, manager.owner)
 	if err != nil {
-		manager.status = manager.status.WithError("configuration rejected")
-		_ = WriteStatus(manager.paths.Status, manager.status)
-		return err
+		publicationErr := manager.recordRefusal("configuration rejected")
+		return pendingResult{
+			err: errors.Join(err, publicationErr), beforeBackend: true,
+			reason: "configuration rejected", recovered: publicationErr == nil,
+		}
 	}
 	if manager.active != nil {
 		activeDigest := manager.active.PublicDigest()
 		candidateDigest := candidate.PublicDigest()
 		switch {
 		case candidate.Generation < manager.active.Generation:
-			_ = os.Remove(manager.paths.Pending)
-			manager.status = manager.status.WithError("update refused")
-			_ = WriteStatus(manager.paths.Status, manager.status)
-			return errors.New("generation rollback refused")
+			refusal := errors.New("generation rollback refused")
+			if err := manager.remove(manager.paths.Pending); err != nil {
+				return pendingResult{err: errors.Join(refusal, fmt.Errorf("could not remove refused pending configuration: %w", err)), beforeBackend: true, reason: "update refused"}
+			}
+			publicationErr := manager.recordRefusal("update refused")
+			return pendingResult{err: errors.Join(refusal, publicationErr), beforeBackend: true, reason: "update refused", recovered: publicationErr == nil}
 		case candidate.Generation == manager.active.Generation && candidateDigest != activeDigest:
-			_ = os.Remove(manager.paths.Pending)
-			manager.status = manager.status.WithError("update refused")
-			_ = WriteStatus(manager.paths.Status, manager.status)
-			return errors.New("generation reused with different configuration")
+			refusal := errors.New("generation reused with different configuration")
+			if err := manager.remove(manager.paths.Pending); err != nil {
+				return pendingResult{err: errors.Join(refusal, fmt.Errorf("could not remove refused pending configuration: %w", err)), beforeBackend: true, reason: "update refused"}
+			}
+			publicationErr := manager.recordRefusal("update refused")
+			return pendingResult{err: errors.Join(refusal, publicationErr), beforeBackend: true, reason: "update refused", recovered: publicationErr == nil}
 		case candidate.Generation == manager.active.Generation && candidateDigest == activeDigest:
-			_ = os.Remove(manager.paths.Pending)
-			_, err := manager.applyBackend(*manager.active)
-			return err
+			if err := manager.remove(manager.paths.Pending); err != nil {
+				return pendingResult{err: fmt.Errorf("could not remove idempotent pending configuration: %w", err), beforeBackend: true}
+			}
+			name, err := manager.backend.Apply(*manager.active)
+			if err != nil {
+				return pendingResult{err: errors.Join(err, manager.publishUnavailable("interface unavailable"))}
+			}
+			return pendingResult{err: manager.publishReady(*manager.active, name, "")}
 		}
 	}
 
-	if _, err := manager.applyBackend(candidate); err != nil {
+	candidateName, err := manager.backend.Apply(candidate)
+	if err != nil {
 		if manager.active != nil {
-			if _, restoreErr := manager.applyBackend(*manager.active); restoreErr == nil {
-				_ = os.Remove(manager.paths.Pending)
-				manager.status.Error = "rollback restored"
-				_ = WriteStatus(manager.paths.Status, manager.status)
+			if name, restoreErr := manager.backend.Apply(*manager.active); restoreErr == nil {
+				if removeErr := manager.remove(manager.paths.Pending); removeErr != nil {
+					return pendingResult{err: errors.Join(err, fmt.Errorf("active configuration restored but failed pending configuration remains: %w", removeErr))}
+				}
+				if publicationErr := manager.publishReady(*manager.active, name, "rollback restored"); publicationErr != nil {
+					return pendingResult{err: errors.Join(err, publicationErr)}
+				}
+				return pendingResult{err: err, recovered: true}
+			} else {
+				return pendingResult{err: errors.Join(
+					fmt.Errorf("candidate failed: %v; active restoration failed: %w", err, restoreErr),
+					manager.publishUnavailable("interface unavailable"),
+				)}
 			}
-		}
-		return err
-	}
-	if err := os.Rename(manager.paths.Pending, manager.paths.Active); err != nil {
-		if manager.active != nil {
-			_, _ = manager.applyBackend(*manager.active)
 		} else {
-			_ = manager.backend.Close()
-			manager.status = manager.status.WithError("configuration rejected")
+			return pendingResult{err: errors.Join(err, manager.publishUnavailable("interface unavailable"))}
 		}
+	}
+	if err := manager.rename(manager.paths.Pending, manager.paths.Active); err != nil {
 		if manager.active != nil {
-			manager.status = manager.status.WithError("rollback restored")
+			if name, restoreErr := manager.backend.Apply(*manager.active); restoreErr == nil {
+				if removeErr := manager.remove(manager.paths.Pending); removeErr != nil {
+					return pendingResult{err: errors.Join(err, fmt.Errorf("active configuration restored but non-durable pending configuration remains: %w", removeErr))}
+				}
+				if publicationErr := manager.publishReady(*manager.active, name, "rollback restored"); publicationErr != nil {
+					return pendingResult{err: errors.Join(err, publicationErr)}
+				}
+				return pendingResult{err: err, recovered: true}
+			} else {
+				return pendingResult{err: errors.Join(
+					fmt.Errorf("promotion failed: %v; active restoration failed: %w", err, restoreErr),
+					manager.publishUnavailable("interface unavailable"),
+				)}
+			}
+		} else {
+			return pendingResult{err: errors.Join(err, manager.backend.Close(), manager.publishUnavailable("configuration rejected"))}
 		}
-		_ = WriteStatus(manager.paths.Status, manager.status)
-		return err
 	}
 	manager.active = &candidate
 	if directory, err := os.Open(manager.paths.Private); err == nil {
 		_ = directory.Sync()
 		_ = directory.Close()
 	}
+	return pendingResult{err: manager.publishReady(candidate, candidateName, "")}
+}
+
+func (manager *Manager) recordRefusal(reason string) error {
+	if manager.status.Ready {
+		return manager.publish(manager.status.WithLastError(reason))
+	}
+	if manager.active == nil || manager.status.Error == "" {
+		return manager.publishUnavailable(reason)
+	}
 	return nil
 }
 
-func (manager *Manager) applyBackend(spec Specification) (string, error) {
-	name, err := manager.backend.Apply(spec)
-	if err != nil {
-		manager.status = manager.status.WithError("interface unavailable")
-		_ = WriteStatus(manager.paths.Status, manager.status)
-		return "", err
+func (manager *Manager) publishReady(spec Specification, name, reason string) error {
+	status := ReadyStatus(spec, name)
+	if reason != "" {
+		status = status.WithLastError(reason)
 	}
-	manager.status = Status{
-		HelperVersion: HelperVersion,
-		PID:           os.Getpid(),
-		Generation:    spec.Generation,
-		PublicDigest:  spec.PublicDigest(),
-		InterfaceName: name,
-		Ready:         true,
-		PeerCount:     len(spec.Peers),
+	return manager.publish(status)
+}
+
+func (manager *Manager) publishUnavailable(reason string) error {
+	return manager.publish(UnavailableStatus(manager.active, reason))
+}
+
+func (manager *Manager) publish(status Status) error {
+	if err := manager.writeStatus(manager.paths.Status, status); err != nil {
+		return fmt.Errorf("could not publish mesh status: %w", err)
 	}
-	if err := WriteStatus(manager.paths.Status, manager.status); err != nil {
-		return "", err
-	}
-	return name, nil
+	manager.status = status
+	return nil
 }
 
 func (manager *Manager) Close() error {
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
 	err := manager.backend.Close()
-	manager.status = manager.status.WithError("stopped")
-	_ = WriteStatus(manager.paths.Status, manager.status)
-	return err
+	return errors.Join(err, manager.publishUnavailable("stopped"))
 }
 
 func readSpecification(path string, owner uint32) (Specification, error) {
