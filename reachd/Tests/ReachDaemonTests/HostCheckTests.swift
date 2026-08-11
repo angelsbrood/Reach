@@ -59,15 +59,14 @@ import Testing
         #expect(report.isSound, "a rig that has not been started is not a broken one")
         #expect(report.count(.fail) == 0)
         #expect(report.count(.wait) > 0)
-        for title in ["mesh interface", "cluster CA", "wg host key", "wg config", "enrolled devices", "session port"] {
+        for title in ["mesh interface", "cluster CA", "wg host key", "mesh intent", "mesh owner", "enrolled devices", "session port"] {
             #expect(try finding(report, title).level == .wait, "\(title) should be waiting, not faulted")
         }
     }
 
-    @Test func theMeshInterfaceIsAFaultOnceADaemonIsUp() async throws {
-        // The same condition, two verdicts. Down before serving is the next
-        // step; down while serving is a rig that streams on the LAN and has
-        // nothing to fall to when the demonstrator walks out the door.
+    @Test func aMissingUnconfiguredMeshOwnerStaysWaitingWhileLANServingContinues() async throws {
+        // The login daemon and the privileged mesh owner are separate facts.
+        // An absent/unconfigured helper is actionable WAIT, not a daemon fault.
         let directory = try fixture()
         defer { try? FileManager.default.removeItem(at: directory) }
         var config = DaemonConfig()
@@ -79,8 +78,9 @@ import Testing
         #expect(waiting.isSound)
 
         let serving = await report(directory, addresses: [[192, 168, 8, 104]], portsHeld: true)
-        #expect(try finding(serving, "mesh interface").level == .fail)
-        #expect(!serving.isSound, "a daemon serving with no mesh must not exit zero")
+        #expect(try finding(serving, "mesh interface").level == .wait)
+        #expect(try finding(serving, "mesh owner").level == .wait)
+        #expect(serving.isSound)
     }
 
     // MARK: - Absent is not the same answer as broken
@@ -105,44 +105,43 @@ import Testing
         #expect(!corrupt.isSound)
     }
 
-    @Test func aWireGuardConfThatServeWillNotRecreateIsAFault() async throws {
+    @Test func aHostKeyWithoutItsMeshIntentIsAFault() async throws {
         let directory = try fixture()
         defer { try? FileManager.default.removeItem(at: directory) }
         let conf = directory.appendingPathComponent("reach0.conf").path
 
-        // No host key yet: a missing conf is a genuine first run, and the
-        // very next serve writes both together.
+        // No host key yet: missing intent is a genuine first run.
         let firstRun = await report(directory, conf: conf)
-        #expect(try finding(firstRun, "wg config").level == .wait)
+        #expect(try finding(firstRun, "mesh intent").level == .wait)
         #expect(firstRun.isSound)
 
-        // Host key present, conf gone. WireGuardHost only writes the skeleton
-        // alongside a fresh keypair, so serve will never recreate this — and
-        // addPeer will read the absent file as "" and emit a bare [Peer] with
-        // no [Interface], which wg-quick refuses.
-        let wg = directory.appendingPathComponent("wg", isDirectory: true)
-        try FileManager.default.createDirectory(at: wg, withIntermediateDirectories: true)
-        try Data("Zm9v".utf8).write(to: wg.appendingPathComponent("server.pub"))
+        _ = try WireGuardHost(
+            keysDirectory: directory.appendingPathComponent("wg", isDirectory: true),
+            confPath: conf,
+            endpoint: "192.0.2.1:51820"
+        )
+        try FileManager.default.removeItem(at: MeshIntentStore.intentURL(in: directory))
 
         let stranded = await report(directory, conf: conf)
-        #expect(try finding(stranded, "wg config").level == .fail)
-        #expect(!stranded.isSound, "a conf serve cannot recreate must not exit zero")
+        #expect(try finding(stranded, "mesh intent").level == .fail)
+        #expect(!stranded.isSound)
     }
 
-    @Test func anUnreadableConfIsAFaultAndSaysSo() async throws {
+    @Test func anUnsafeIntentIsAFaultAndSaysSo() async throws {
         let directory = try fixture()
         defer { try? FileManager.default.removeItem(at: directory) }
-        let conf = directory.appendingPathComponent("reach0.conf")
+        _ = try WireGuardHost(
+            keysDirectory: directory.appendingPathComponent("wg", isDirectory: true),
+            confPath: directory.appendingPathComponent("absent.conf").path,
+            endpoint: "192.0.2.1:51820"
+        )
+        let intent = MeshIntentStore.intentURL(in: directory)
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: intent.path)
 
-        // Invalid UTF-8 rather than chmod 000: a permission trick reads as
-        // readable when the suite happens to run as root, and this must fail
-        // for whoever runs it.
-        try Data([0xFF, 0xFE, 0xFF]).write(to: conf)
-
-        let report = await report(directory, conf: conf.path)
-        let wgConf = try finding(report, "wg config")
-        #expect(wgConf.level == .fail)
-        #expect(wgConf.detail.contains("will not read"))
+        let report = await report(directory)
+        let meshIntent = try finding(report, "mesh intent")
+        #expect(meshIntent.level == .fail)
+        #expect(meshIntent.detail.contains("unsafe ownership, mode"))
         #expect(!report.isSound)
     }
 
@@ -289,13 +288,12 @@ import Testing
         }
     }
 
-    @Test func theWireGuardIdentityMustAgreeWithTheHostKey() async throws {
+    @Test func theWireGuardPrivateAndPublicKeysMustAgree() async throws {
         let directory = try fixture()
         defer { try? FileManager.default.removeItem(at: directory) }
         let conf = directory.appendingPathComponent("reach0.conf").path
 
-        // WireGuardHost mints the keypair and writes the skeleton together,
-        // so a fixture built through it agrees with itself by construction.
+        // WireGuardHost mints the keypair and intent together.
         _ = try WireGuardHost(
             keysDirectory: directory.appendingPathComponent("wg", isDirectory: true),
             confPath: conf,
@@ -305,37 +303,26 @@ import Testing
         #expect(try finding(agreeing, "wg identity").level == .pass)
         #expect(agreeing.isSound)
 
-        // Now the divergence that actually happens: the state directory is
-        // re-minted and the conf is left behind naming the old host.
-        let stale = try String(contentsOfFile: conf, encoding: .utf8)
-        let other = Curve25519.KeyAgreement.PrivateKey().rawRepresentation.base64EncodedString()
-        let confKey = try #require(WireGuardConf.parse(stale).privateKey)
-        try stale.replacingOccurrences(of: confKey, with: other)
-            .write(toFile: conf, atomically: true, encoding: .utf8)
+        let pub = directory.appendingPathComponent("wg/server.pub")
+        let other = Curve25519.KeyAgreement.PrivateKey().publicKey.rawRepresentation.base64EncodedString()
+        try other.write(to: pub, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: pub.path)
 
         let diverged = await report(directory, conf: conf)
-        let identity = try finding(diverged, "wg identity")
+        let identity = try finding(diverged, "wg host key")
         #expect(identity.level == .fail)
-        #expect(!diverged.isSound, "a host whose conf names a different key must not exit zero")
+        #expect(!diverged.isSound)
     }
 
-    @Test func aConfWithNoInterfaceIsAFailure() async throws {
-        // Exactly what addPeer used to write when it read an unreadable conf
-        // as "": a bare peer block, and the host's own key line gone.
-        let directory = try fixture()
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let conf = directory.appendingPathComponent("reach0.conf")
-        try """
+    @Test func legacyEvidenceWithNoInterfaceIsStillRecognizedAsInvalid() throws {
+        let parsed = try WireGuardConf.parse("""
             [Peer]
             PublicKey = \(Data(repeating: 4, count: 32).base64EncodedString())
             AllowedIPs = 10.86.0.2/32
-            """.write(to: conf, atomically: true, encoding: .utf8)
-
-        let report = await report(directory, conf: conf.path)
-        let identity = try finding(report, "wg identity")
+            """)
+        let identity = HostCheck.checkWireGuardIdentity(parsed, hostKey: nil, conf: "rollback.conf")
         #expect(identity.level == .fail)
         #expect(identity.detail.contains("no [Interface]"))
-        #expect(!report.isSound)
     }
 
     @Test func noFindingEverRendersThePrivateKey() async throws {
@@ -348,16 +335,17 @@ import Testing
             confPath: conf,
             endpoint: "192.0.2.1:51820"
         )
-        let secret = try #require(WireGuardConf.parse(String(contentsOfFile: conf, encoding: .utf8)).privateKey)
+        let keyURL = directory.appendingPathComponent("wg/server.key")
+        let secret = try MeshIntentStore.readCanonicalKey(keyURL, role: "host private key", exactMode: 0o600)
 
         // Both the agreeing case and the mismatching one, since the mismatch
         // is the branch that has keys in hand and something to say about them.
         for mutate in [false, true] {
             if mutate {
-                let text = try String(contentsOfFile: conf, encoding: .utf8)
-                let other = Curve25519.KeyAgreement.PrivateKey().rawRepresentation.base64EncodedString()
-                try text.replacingOccurrences(of: secret, with: other)
-                    .write(toFile: conf, atomically: true, encoding: .utf8)
+                let pub = directory.appendingPathComponent("wg/server.pub")
+                let other = Curve25519.KeyAgreement.PrivateKey().publicKey.rawRepresentation.base64EncodedString()
+                try other.write(to: pub, atomically: true, encoding: .utf8)
+                try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: pub.path)
             }
             let rendered = await report(directory, conf: conf).findings
                 .map { "\($0.level.rawValue) \($0.title) \($0.detail) \($0.action ?? "")" }
@@ -427,11 +415,11 @@ import Testing
     }
 
     /// The case that actually bit, and the one counting could never see. A torn
-    /// re-pair leaves the previous peer block in place, so the tally balances at
-    /// one active device and one peer while the phone — holding a key the conf
+    /// re-pair leaves the previous intent peer in place, so the tally balances at
+    /// one active device and one peer while the phone — holding a key intent
     /// does not name — has no road at all. Measured on the rig on 2026-07-29: the
     /// registry held one key, the conf held another, and doctor called it sound.
-    @Test func aDeviceWhoseConfKeyIsStaleIsAFault() async throws {
+    @Test func aDeviceWhoseIntentKeyIsStaleIsAFault() async throws {
         let directory = try fixture()
         defer { try? FileManager.default.removeItem(at: directory) }
         let conf = directory.appendingPathComponent("reach0.conf").path
@@ -443,7 +431,7 @@ import Testing
         // The block the phone walked in with.
         try await host.addPeer(publicKey: Data(repeating: 7, count: 32), allowedIP: "10.86.0.2")
 
-        // The registry moved on to the key a re-pair brought; the conf did not.
+        // The registry moved on to the key a re-pair brought; intent did not.
         let registry = DeviceRegistry(directory: directory)
         let record = try await registry.reserve(
             name: "phone",
@@ -453,19 +441,15 @@ import Testing
 
         // One active device and one peer: the counts agree, the keys do not, and
         // the old check read exactly this as a sound rig.
-        let wg = try await finding(report(directory, conf: conf), "wg config")
-        #expect(wg.detail.contains("1 peer"))
+        let intent = try await finding(report(directory, conf: conf), "mesh intent")
+        #expect(intent.detail.contains("1 ordered peer"))
         let devices = try await finding(report(directory, conf: conf), "enrolled devices")
         #expect(devices.level == .fail)
         #expect(devices.detail.contains("no road onto the mesh"))
         #expect(await !report(directory, conf: conf).isSound)
     }
 
-    /// `addPeer`'s invariant, asserted against the file rather than trusted to the
-    /// code that writes it. Two peers claiming one /32 is a conf wg will load, and
-    /// a mesh that hands the address to whichever block it read — so one device
-    /// silently takes another's. A hand-edit produces it without going through
-    /// `addPeer` at all, which is why the file is where it has to be caught.
+    /// Strict intent refuses a hand edit that gives two keys the same /32.
     @Test func twoPeersClaimingOneAddressIsAFault() async throws {
         let directory = try fixture()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -476,23 +460,25 @@ import Testing
             endpoint: "192.0.2.1:51820"
         )
         try await host.addPeer(publicKey: Data(repeating: 7, count: 32), allowedIP: "10.86.0.2")
-        // Appended by hand, the way an operator would.
-        let text = try String(contentsOfFile: conf, encoding: .utf8)
-        try (text + """
+        let intentURL = MeshIntentStore.intentURL(in: directory)
+        var object = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: intentURL)) as? [String: Any])
+        var peers = try #require(object["peers"] as? [[String: Any]])
+        peers.append([
+            "publicKey": Data(repeating: 8, count: 32).base64EncodedString(),
+            "allowedIP": "10.86.0.2/32",
+            "keepalive": 0,
+        ])
+        object["peers"] = peers
+        try JSONSerialization.data(withJSONObject: object).write(to: intentURL)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: intentURL.path)
 
-        [Peer]
-        PublicKey = \(Data(repeating: 8, count: 32).base64EncodedString())
-        AllowedIPs = 10.86.0.2/32
-
-        """).write(toFile: conf, atomically: true, encoding: .utf8)
-
-        let peers = try await finding(report(directory, conf: conf), "wg peers")
-        #expect(peers.level == .fail)
-        #expect(peers.detail.contains("10.86.0.2/32"))
+        let duplicate = try await finding(report(directory, conf: conf), "mesh intent")
+        #expect(duplicate.level == .fail)
+        #expect(duplicate.detail.contains("repeats a peer route"))
         #expect(await !report(directory, conf: conf).isSound)
     }
 
-    @Test func thePeerCountSaysItReadTheFile() async throws {
+    @Test func thePeerCountSaysItReadTheIntent() async throws {
         let directory = try fixture()
         defer { try? FileManager.default.removeItem(at: directory) }
         let conf = directory.appendingPathComponent("reach0.conf").path
@@ -503,14 +489,9 @@ import Testing
         )
         try await host.addPeer(publicKey: Data(repeating: 5, count: 32), allowedIP: "10.86.0.2")
 
-        let wgConfig = try await finding(report(directory, conf: conf), "wg config")
-        #expect(wgConfig.level == .pass)
-        #expect(wgConfig.detail.contains("the file, not the interface"))
-        // Bare `wg show`, not the named form: `wg show reach0` fails on this
-        // rig while the interface is up, and naming a command that fails at
-        // the moment of confirmation is worse than naming none.
-        #expect(wgConfig.action?.contains("sudo wg show (bare") == true)
-        #expect(wgConfig.action?.contains("wg show reach0") != true)
+        let meshIntent = try await finding(report(directory, conf: conf), "mesh intent")
+        #expect(meshIntent.level == .pass)
+        #expect(meshIntent.detail.contains("1 ordered peer"))
     }
 
     // MARK: - The tally
@@ -987,7 +968,7 @@ import Testing
         #expect(!invalid.isStateContractValid)
         #expect(invalid.lines.contains { $0.contains("state: invalid") })
         #expect(invalid.lines.contains { $0.contains("agent: state = running") })
-        #expect(invalid.lines.contains { $0.contains("mesh: missing") })
+        #expect(invalid.lines.contains { $0.contains("mesh road: missing") })
 
         let divergent = LaunchAgent.status(
             definition: definition,
@@ -1001,7 +982,7 @@ import Testing
         )
         #expect(!divergent.isStateContractValid)
         #expect(divergent.lines.contains { $0.contains("login-owned service requires") })
-        #expect(divergent.lines.contains { $0.contains("mesh: ready") })
+        #expect(divergent.lines.contains { $0.contains("mesh road: present") })
     }
 
     @Test func statusAndDoctorShareTheExactReachMeshPredicate() {
@@ -1033,8 +1014,8 @@ import Testing
             launchctlOutput: nil,
             addresses: rejected
         )
-        #expect(status.lines.contains { $0.contains("mesh: missing") })
-        #expect(HostCheck.checkMeshInterface(rejected, daemonUp: true).level == .fail)
+        #expect(status.lines.contains { $0.contains("mesh road: missing") })
+        #expect(HostCheck.checkMeshInterface(rejected, daemonUp: true).level == .wait)
         #expect(HostCheck.checkMeshInterface(accepted, daemonUp: true).level == .pass)
     }
 
@@ -1060,7 +1041,7 @@ import Testing
         #expect(ready.lines.contains { $0.contains("login uid 501, domain gui/501") })
         #expect(ready.lines.contains { $0.contains("explicit REACH_STATE_DIR") })
         #expect(ready.lines.contains { $0.contains("agent: state = running") })
-        #expect(ready.lines.contains { $0.contains("mesh: ready") && $0.contains("10.86.0.1") })
+        #expect(ready.lines.contains { $0.contains("mesh road: present") && $0.contains("10.86.0.1") })
 
         let missing = LaunchAgent.status(
             definition: definition,
@@ -1072,6 +1053,6 @@ import Testing
         #expect(missing.isStateContractValid)
         #expect(missing.lines.contains { $0.contains("expected if installed") })
         #expect(missing.lines.contains { $0.contains("plist: not installed") })
-        #expect(missing.lines.contains { $0.contains("mesh: missing") && $0.contains("away readiness is incomplete") })
+        #expect(missing.lines.contains { $0.contains("mesh road: missing") && $0.contains("away readiness is incomplete") })
     }
 }

@@ -239,17 +239,23 @@ covers a process death. If the listener is absent after wake, inspect
 `reachd doctor --dial` rather than assuming sleep was healthy because the PID
 now exists.
 
-Sleep also does not erase the login boundary above. The later S23 lifecycle
-matrix repeated lock once, logout/login twice, and reboot/pre-login/login
-twice. Lock preserved the same daemon; each login created exactly one new
-supervised daemon with unchanged state. Both reboots returned the LaunchAgent
-after login but did not raise WireGuard. Raising `reach0` manually after the
-daemon started worked without a daemon restart: the wildcard listener accepted
-the mesh road immediately, and the next authenticated hello advertised the
-new address. The final installed repeat also lost the mesh on both
-logout/login cycles, even though the earlier measurement happened to retain
-it. Interface survival across logout is therefore not a supported contract.
-Fast user switching and OS-update survival remain unmeasured.
+Sleep also does not erase the login boundary above. The S23 lifecycle matrix,
+before the privileged helper existed, repeated lock once, logout/login twice,
+and reboot/pre-login/login twice. Lock preserved the same daemon; each login
+created exactly one new supervised daemon with unchanged state. Both reboots
+returned the LaunchAgent after login but did not raise WireGuard. Raising
+`reach0` manually after the daemon started worked without a daemon restart:
+the wildcard listener accepted the mesh road immediately, and the next
+authenticated hello advertised the new address.
+
+S24 replaced that manual road ownership with `systems.reach.meshd`. A final
+reboot of the route-corrected installed helper brought `10.86.0.1/24` and its
+connected route up before login while `reachd` remained absent. Login then
+started exactly one serving daemon, and a building-network phone cold-opened
+over `10.86.0.2` and streamed to completion without a Terminal command.
+Pre-login serving remains unsupported; automatic mesh preparation is now the
+root helper's launchd contract. Fast user switching and OS-update survival
+remain unmeasured.
 
 ### What it restarts
 
@@ -272,20 +278,93 @@ That heals itself the moment the port frees — which is the restart race, and
 the common case — and if something else owns 47337 permanently, the reason
 lands in the log at the same pace. `lsof -nP -iUDP:47337` finds who has it.
 
-### The mesh road is still yours to raise
+### The mesh has a separate privileged owner
 
-`wg-quick up reach0` wants root, so it is not in the agent. That separation is
-intentional: the current Homebrew script executes hook fields and the current
-configuration is user-owned, so an unattended root job consuming it would be
-a privilege-escalation path. Automatic bootstrap needs a trusted installation
-and sanitized structured configuration of its own.
+The login service still owns the cluster; a distinct root service owns only
+the WireGuard interface:
 
-Until the interface is up, the daemon may serve on LAN but has no mesh road to
-fall to. `reachd doctor` and `reachd service status` both distinguish that
-state. Once WireGuard rises, **do not restart `reachd`**: every authenticated
-hello recomputes current addresses. A phone already away cannot learn an
-address that appeared after its last hello; let it authenticate once on LAN or
-another surviving road, then its next cold away launch can use `10.86.0.1`.
+| owner | executable | data it may read |
+| --- | --- | --- |
+| login user | `reachd` | cluster state, CA, registry, model, non-secret `mesh-intent.json` |
+| root | `systems.reach.meshd` | one strict mesh specification and its own root state |
+
+`systems.reach.meshd` is one ad-hoc-signed Go executable with pinned
+`wireguard-go` embedded in it. It has no Homebrew, `wg`, shell, user
+environment, cluster-state or model dependency. Its scriptless component
+package installs exactly the executable at
+`/Library/PrivilegedHelperTools/systems.reach.meshd` and a fixed
+`/Library/LaunchDaemons/systems.reach.meshd.plist`. The job is `RunAtLoad`,
+unconditionally kept alive, throttled to ten seconds, and starts with umask
+`077`. Developer ID signing and notarized distribution remain future release
+work; the local package records hashes and uses an ad-hoc code signature.
+
+The helper's version-1 input is data, not a configuration language. It fixes
+the host at `10.86.0.1/24`, UDP `51820`, MTU `1280`, installs the connected
+`10.86.0.0/24` route on the interface it created, and accepts only an
+ordered set of unique `10.86.0.2...254/32` peers with canonical 32-byte keys
+and bounded keepalives. Unknown or duplicate JSON keys, hooks, commands,
+paths, malformed routes, unsafe files, reused generations and rollbacks are
+refused. The root service retains the last-known-good generation and exposes
+only a public status containing its version, PID, generation, public digest,
+interface name, peer count, timestamp and bounded error.
+
+The user-owned `mesh-intent.json` is the persistent enrollment intent and
+contains no host private key. On the first upgraded serve, Reach strictly
+imports the existing hook-free `reach0.conf` once and leaves its bytes
+untouched as rollback evidence. It will never execute that file. Every later
+peer change updates intent and says that an administrator apply is pending:
+
+```
+reachd mesh stage
+reachd mesh apply
+```
+
+`stage` cross-checks the intent against the active device registry and creates
+one mode-`0600` secret-bearing file inside a mode-`0700` user directory.
+`apply` prints the exact operation, then uses `/usr/bin/sudo` to invoke only
+the installed root-owned helper. The helper requires a real root invocation,
+a valid `SUDO_UID`, the unchanged regular file owned by that user, and the
+root-only control socket; it consumes the staging file on acceptance or
+refusal. There is no `NOPASSWD` rule or permanent authorization. During a
+bounded local install/acceptance session, the package install, first apply,
+crash check and rollback can be grouped behind one native administrator
+authorization instead of prompting for each operation.
+
+`reachd service status` and `reachd doctor` report the login daemon and mesh
+owner separately. An absent or not-yet-configured helper is `WAIT`; a legacy
+manually raised interface is usable but unmanaged. Unsafe ownership,
+malformed state, PID or interface disagreement, a generation rollback, or a
+ready claim without exact `10.86.0.1` is `FAIL`. Only a matching helper PID,
+public digest, desired generation and live interface is `PASS`.
+
+The helper may already have prepared the mesh at the login screen after a
+reboot. That does not broaden Reach's serving boundary: no `reachd`, model or
+cluster session exists until the owning user logs in. Once the login daemon
+starts, it immediately sees the existing wildcard road. If the mesh instead
+rises later, **do not restart `reachd`**; every authenticated hello recomputes
+current addresses. A client already away still needs one reachable hello to
+learn a road that did not exist on its previous calling card.
+
+For diagnosis:
+
+```
+reachd service status
+reachd doctor
+sudo launchctl print system/systems.reach.meshd
+cat '/Library/Application Support/Reach Mesh/status.json'
+/sbin/route -n get 10.86.0.2
+```
+
+The status file is deliberately public and privacy-safe. The active and
+pending specifications under the adjacent `private` directory are root-only
+and must never be printed. The route query must name the helper's current
+`utun`; a default route or LAN interface means the address alone is not a
+usable mesh road. Uninstalling means booting out the system job, removing the
+two packaged artifacts and `/Library/Application Support/Reach Mesh`,
+forgetting the package receipt, and verifying that the control socket,
+process, `utun` address, and connected `10.86.0.0/24` route are gone. This
+leaves the login-owned cluster state, host key, registry, intent and preserved
+legacy file untouched.
 
 ## What a restart costs
 

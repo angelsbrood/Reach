@@ -19,8 +19,9 @@ import Foundation
 /// mint a different CA, and silently become a different cluster. The agent
 /// therefore pins `REACH_STATE_DIR` explicitly and the CLI refuses ambiguous
 /// root entry before touching configuration or CA state. Privileged
-/// WireGuard activation remains a separate authority: the current Homebrew
-/// script and user-owned hook-capable config are not safe LaunchAgent inputs.
+/// WireGuard activation remains a separate authority: the root-owned meshd
+/// owns only the interface, while the Homebrew script and user-owned
+/// hook-capable rollback config are never LaunchAgent or LaunchDaemon inputs.
 public enum LaunchAgent {
     public static let label = "systems.reach.reachd"
 
@@ -266,9 +267,9 @@ public enum LaunchAgent {
 
         let mesh = addresses.first(where: MeshEndpoint.isReachMeshAddress)
         if let mesh {
-            lines.append("[reachd] mesh: ready — \(mesh.map(String.init).joined(separator: ".")) is present")
+            lines.append("[reachd] mesh road: present — \(mesh.map(String.init).joined(separator: "."))")
         } else {
-            lines.append("[reachd] mesh: missing — the login service may answer on LAN, but away readiness is incomplete")
+            lines.append("[reachd] mesh road: missing — the login service may answer on LAN, but away readiness is incomplete")
         }
         return StatusReport(lines: lines, isStateContractValid: isStateContractValid)
     }

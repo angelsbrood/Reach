@@ -21,8 +21,8 @@ public enum HostCheck {
     /// Four levels, because the exit code was being asked two questions at
     /// once and could only answer one.
     ///
-    /// A cold rig used to exit non-zero — the mesh interface is down before
-    /// `wg-quick up`, which is the runbook working, not a fault — while a
+    /// A cold rig used to exit non-zero — the mesh interface was down before
+    /// its then-manual activation, which was an incomplete step, not a fault — while a
     /// derived endpoint, the silent failure this whole command exists to
     /// catch, warned and exited zero. So the runbook carried a note telling
     /// the operator to disregard the tool's own verdict, which is the point
@@ -72,9 +72,10 @@ public enum HostCheck {
         }
     }
 
-    /// The one wg-quick config this rig writes and the operator edits. The
-    /// daemon writes exactly one, and an edit to any other file fails silently,
-    /// so the path has a single name here rather than a literal per caller.
+    /// The one legacy wg-quick file eligible for strict, one-time migration.
+    /// It remains rollback evidence afterward and is never live authority or
+    /// a root input; the path has one name so diagnostics inspect the evidence
+    /// the migration actually considered.
     public static let defaultWireGuardConf = "/opt/homebrew/etc/wireguard/reach0.conf"
 
     /// Asking the cluster to answer, rather than inferring that it would.
@@ -178,9 +179,11 @@ public enum HostCheck {
         findings.append(contentsOf: checkMeshEndpoint(config: config, configExists: configExists, addresses: addresses))
         findings.append(checkMeshInterface(addresses, daemonUp: daemonUp))
         findings.append(checkClusterCA(in: stateDirectory, config: config))
-        let wireGuard = checkWireGuard(in: stateDirectory, conf: wireGuardConf)
+        let wireGuard = checkMeshIntent(in: stateDirectory)
         findings.append(contentsOf: wireGuard.findings)
+        findings.append(checkLegacyWireGuard(in: stateDirectory, conf: wireGuardConf))
         findings.append(await checkDevices(in: stateDirectory, peers: wireGuard.peers))
+        findings.append(MeshOwner.finding(stateDirectory: stateDirectory, addresses: addresses))
         findings.append(contentsOf: portFindings)
         findings.append(contentsOf: checkReachability(in: stateDirectory, daemonUp: daemonUp))
         findings.append(checkSupervision(
@@ -711,28 +714,18 @@ public enum HostCheck {
         return findings
     }
 
-    /// Note what this actually observes: a `10.86.0.x` address, not an
-    /// interface named reach0. They are the same thing only while the conf's
-    /// `Address` line says so, and that line sits in the `[Interface]` section
-    /// the operator edits by hand. So the wording claims an address, and the
-    /// remediation does not promise more than the check knows.
+    /// Note what this actually observes: an exact `10.86.0.x` address, not an
+    /// interface name. The helper's public status and this live address are
+    /// evaluated separately so neither can claim readiness for the other.
     static func checkMeshInterface(_ addresses: [[UInt8]], daemonUp: Bool) -> Finding {
         let rendered = addresses.map(MeshEndpoint.string(from:))
         let meshUp = addresses.contains(where: MeshEndpoint.isReachMeshAddress)
         guard meshUp else {
-            guard daemonUp else {
-                return Finding(
-                    level: .wait,
-                    title: "mesh interface",
-                    detail: "no 10.86.0.x address — reach0 is not up yet (\(rendered.joined(separator: ", ")))",
-                    action: "sudo wg-quick up reach0 — it may rise before or after reachd; authenticated hellos read the current address set."
-                )
-            }
             return Finding(
-                level: .fail,
+                level: .wait,
                 title: "mesh interface",
-                detail: "no 10.86.0.x address, but a daemon is already serving (\(rendered.joined(separator: ", ")))",
-                action: "This host will stream on the LAN and have nothing to fall to at the walk-out. sudo wg-quick up reach0; no daemon restart is required. A client already away must first authenticate on a reachable road to learn the newly available mesh road."
+                detail: "no 10.86.0.x address\(daemonUp ? ", while the login daemon is serving" : "") (\(rendered.joined(separator: ", ")))",
+                action: "Install/configure the privileged mesh owner, then run `reachd mesh apply`. The daemon does not need a restart; a later authenticated hello reads the current address set."
             )
         }
         return Finding(
@@ -891,8 +884,8 @@ public enum HostCheck {
             // at the exact moment the operator is confirming the one thing
             // doctor cannot see.
             action: peers > 0
-                ? "Whether the running interface carries them needs sudo wg show (bare, no interface name — the named form fails here), which doctor cannot run without root. The conf reads identically before and after wg-quick down/up."
-                : "No device has been admitted. Pair one, then apply with sudo wg-quick down/up reach0."
+                ? "This legacy parser describes rollback evidence only. Mesh intent, helper status and the live exact address are the managed authority."
+                : "No device has been admitted. Pair one, then run `reachd mesh apply`."
         ))
         findings.append(checkWireGuardIdentity(parsed, hostKey: hostKey, conf: path))
         // The invariant `addPeer` is built around, asserted against the file
@@ -912,6 +905,131 @@ public enum HostCheck {
             ))
         }
         return (findings, parsed.peers)
+    }
+
+    /// The live mesh authority is login-owned intent, not the hook-capable
+    /// rollback file. Keys, intent and registry meet here before the helper is
+    /// ever invited to consume a specification.
+    static func checkMeshIntent(in directory: URL) -> (findings: [Finding], peers: [[String: String]]?) {
+        var findings: [Finding] = []
+        let keyDirectory = directory.appendingPathComponent("wg", isDirectory: true)
+        let privateURL = keyDirectory.appendingPathComponent("server.key")
+        let publicURL = keyDirectory.appendingPathComponent("server.pub")
+        let privateExists = FileManager.default.fileExists(atPath: privateURL.path)
+        let publicExists = FileManager.default.fileExists(atPath: publicURL.path)
+        guard privateExists || publicExists else {
+            findings.append(Finding(
+                level: .wait,
+                title: "wg host key",
+                detail: "absent",
+                action: "Minted on first serve. A new key means every enrolled device must re-pair."
+            ))
+            findings.append(Finding(level: .wait, title: "mesh intent", detail: "absent — created on first serve"))
+            return (findings, nil)
+        }
+        guard privateExists && publicExists else {
+            findings.append(Finding(
+                level: .fail,
+                title: "wg host key",
+                detail: "wg/server.key and wg/server.pub do not exist together",
+                action: "Restore the missing half; re-minting changes the host key and requires every device to re-pair."
+            ))
+            return (findings, nil)
+        }
+
+        let privateKey: String
+        let publicKey: String
+        do {
+            privateKey = try MeshIntentStore.readCanonicalKey(privateURL, role: "host private key", exactMode: 0o600)
+            publicKey = try MeshIntentStore.readCanonicalKey(publicURL, role: "host public key", exactMode: nil)
+            let raw = try MeshIntent.decodeKey(privateKey, role: "host private key")
+            let derived = try Curve25519.KeyAgreement.PrivateKey(rawRepresentation: raw).publicKey.rawRepresentation
+            guard derived.base64EncodedString() == publicKey else {
+                throw MeshIntentError.refused("wg/server.key and wg/server.pub do not agree")
+            }
+            findings.append(Finding(level: .pass, title: "wg host key", detail: "present; private/public pair agrees"))
+        } catch {
+            findings.append(Finding(
+                level: .fail,
+                title: "wg host key",
+                detail: "present but invalid: \(error)",
+                action: "Restore the existing pair; do not re-mint unless every enrolled device will re-pair."
+            ))
+            return (findings, nil)
+        }
+
+        let intent: MeshIntent
+        do {
+            intent = try MeshIntentStore.load(in: directory)
+            guard intent.publicKey == publicKey else {
+                throw MeshIntentError.refused("mesh intent names a different host public key")
+            }
+        } catch {
+            findings.append(Finding(
+                level: .fail,
+                title: "mesh intent",
+                detail: "missing or invalid: \(error)",
+                action: "Restore mesh-intent.json or restart only after preserving the host key and strictly importing the legacy rollback config."
+            ))
+            return (findings, nil)
+        }
+        findings.append(Finding(
+            level: intent.peers.isEmpty ? .wait : .pass,
+            title: "mesh intent",
+            detail: "generation \(intent.generation), \(intent.peers.count) ordered peer\(intent.peers.count == 1 ? "" : "s"), host key agrees",
+            action: intent.peers.isEmpty ? "Enroll a device, then run `reachd mesh apply`." : nil
+        ))
+        findings.append(Finding(
+            level: .pass,
+            title: "wg identity",
+            detail: "wg/server.key, wg/server.pub and mesh-intent.json agree"
+        ))
+        return (
+            findings,
+            intent.peers.map { ["publickey": $0.publicKey, "allowedips": $0.allowedIP] }
+        )
+    }
+
+    /// The old file remains byte-for-byte rollback evidence, never live
+    /// authority. A hook or unknown field makes that evidence unsafe to import
+    /// but cannot grant root execution because neither reachd nor meshd runs it.
+    static func checkLegacyWireGuard(in directory: URL, conf path: String) -> Finding {
+        guard FileManager.default.fileExists(atPath: path) else {
+            return Finding(
+                level: .pass,
+                title: "legacy wg config",
+                detail: "absent — fresh mesh intent has no wg-quick rollback file"
+            )
+        }
+        do {
+            let privateKey = try MeshIntentStore.readCanonicalKey(
+                directory.appendingPathComponent("wg/server.key"),
+                role: "host private key",
+                exactMode: 0o600
+            )
+            let publicKey = try MeshIntentStore.readCanonicalKey(
+                directory.appendingPathComponent("wg/server.pub"),
+                role: "host public key",
+                exactMode: nil
+            )
+            let data = try Data(contentsOf: URL(fileURLWithPath: path), options: [.mappedIfSafe])
+            guard let text = String(data: data, encoding: .utf8) else {
+                throw MeshIntentError.refused("not UTF-8")
+            }
+            _ = try MeshIntent.importLegacy(text, privateKey: privateKey, publicKey: publicKey)
+            return Finding(
+                level: .pass,
+                title: "legacy wg config",
+                detail: "preserved at \(path); hook-free import evidence, not live authority"
+            )
+        } catch {
+            return Finding(
+                level: .warn,
+                title: "legacy wg config",
+                detail: "preserved but not safe to import: \(error); it is not live authority",
+                action: "Do not run it as root. mesh-intent.json and systems.reach.meshd own the live road."
+            )
+        }
     }
 
     /// Whether the conf and the state directory agree about who this host is.
@@ -978,8 +1096,8 @@ public enum HostCheck {
         )
     }
 
-    /// `peers` is what `checkWireGuard` parsed out of the conf, or nil when there
-    /// was no conf to read. It is passed in so this check can ask the one
+    /// `peers` is what the strict mesh intent carries, or nil when there was no
+    /// intent to read. It is passed in so this check can ask the one
     /// question neither half could answer alone: does every device that believes
     /// it is enrolled actually have a road?
     ///
@@ -1015,8 +1133,8 @@ public enum HostCheck {
                 return Finding(
                     level: .fail,
                     title: "enrolled devices",
-                    detail: "\(named) — no road onto the mesh: no peer in the conf holds that key at that address",
-                    action: "A ceremony was interrupted between admitting the device and writing its peer, or the conf still holds an older key for it. Re-pair the affected device; it will keep its identity and address, and the peer block is written again."
+                    detail: "\(named) — no road onto the mesh: no peer in mesh intent holds that key at that address",
+                    action: "A ceremony was interrupted between admitting the device and writing intent, or intent still holds an older key. Re-pair the affected device; it keeps its identity and address."
                 )
             }
             let orphans = peers.filter { peer in !active.contains { holds(peer, $0) } }
@@ -1031,8 +1149,8 @@ public enum HostCheck {
                 return Finding(
                     level: .warn,
                     title: "enrolled devices",
-                    detail: "\(active.count) active, and the conf also holds \(named)",
-                    action: "A peer block outlives the device that owned it, or holds a key that device has replaced. Harmless to the demo — it is a key that can still reach the mesh, which is why revocation is funded scope."
+                    detail: "\(active.count) active, and mesh intent also holds \(named)",
+                    action: "A peer outlives the device that owned it, or holds a key that device replaced. Reconcile intent before applying; revocation remains funded scope."
                 )
             }
         }

@@ -153,7 +153,7 @@ public struct EnrollmentService: Sendable {
         // Where this device will be told to find the mesh, settled before
         // anything is minted. A grant nobody can act on is worse than a
         // refusal, and refusing here leaves no half-enrolled device, no
-        // issued certificate and no peer block behind — though note the token
+        // issued certificate and no peer intent behind — though note the token
         // above is already spent, so this refusal costs a fresh `reachd pair`.
         let endpoint: String
         do {
@@ -274,10 +274,11 @@ public struct EnrollmentService: Sendable {
         do {
             applyPending = try await wgHost.addPeer(publicKey: request.wgPubKey, allowedIP: record.assignedIP)
         } catch {
-            // Reachable: the conf is the one file the operator edits by hand.
-            // It is also the phone's business, because the phone is about to
-            // decide whether it is paired — so it hears the reason rather than
-            // a closed stream. Nothing was admitted, so there is nothing to
+            // Reachable: login-owned intent is the persistent half of the mesh
+            // contract. It is also the phone's business, because the phone is
+            // about to decide whether it is paired — so it hears the reason
+            // rather than a closed stream. Nothing was admitted, so there is
+            // nothing to
             // undo: the reservation keeps its address and its certificate and
             // has no road, which is exactly what doctor now reports.
             Log.error("enrollment refused — no road for \(begin.deviceName): \(error)")
@@ -286,7 +287,7 @@ public struct EnrollmentService: Sendable {
             return
         }
         // The key and the active flag land here, on the same side of the
-        // confirmation as the peer block that carries them.
+        // confirmation as the peer intent that carries them.
         await devices.admit(record.id, wgPub: request.wgPubKey)
         // The endpoint is logged because it is the one thing in the grant
         // that cannot be re-derived later: the phone carries it into its
@@ -655,11 +656,11 @@ public actor DeviceRegistry {
     /// Reserves the device's identity — id, address, admin grant, name — and
     /// deliberately does NOT record its mesh key. The grant carries the address,
     /// so this has to run before the certificate is issued; the key is admitted
-    /// later, beside the peer block, by `admit`.
+    /// later, beside the peer intent, by `admit`.
     ///
     /// The split is the point. This used to write the key here too, which put
-    /// the registry and the wg conf on opposite sides of the confirmation: the
-    /// key landed before the grant was even sent, the peer block only after
+    /// the registry and mesh intent on opposite sides of the confirmation: the
+    /// key landed before the grant was even sent, the peer intent only after
     /// `EnrollComplete`. An abandoned re-pair therefore left the two disagreeing
     /// **by design**, and any check comparing them would accuse a rig whose mesh
     /// was carrying traffic. One decision writes both now.
@@ -673,7 +674,7 @@ public actor DeviceRegistry {
         }
         // Monotonic, not `2 + count`. A count re-issues an address as soon as
         // anything removes a record, and the /32 it hands out could be one a
-        // stale peer block still holds under a different key — breaking the
+        // stale peer intent still holds under a different key — breaking the
         // invariant `addPeer` exists to protect, at the one place `addPeer`
         // cannot see it. Nothing removes records yet; this is why it stays safe
         // when something does.
@@ -694,7 +695,7 @@ public actor DeviceRegistry {
     }
 
     /// Admits the device: its mesh key and its active flag, in one write, once
-    /// the peer block naming that key is on disk. Before this the record is a
+    /// the peer intent naming that key is on disk. Before this the record is a
     /// reservation — it holds an address and a certificate, and it has no road.
     public func admit(_ id: UUID, wgPub: Data) {
         if let index = devices.firstIndex(where: { $0.id == id }) {
@@ -720,10 +721,10 @@ public actor DeviceRegistry {
     }
 }
 
-/// The Mac end of the mesh, as reachd manages it in the pre-LaunchDaemon
-/// window: keys and the wg-quick config live under the state paths; new
-/// peers append to the config, and applying it is the operator's one
-/// visible sudo (`wg-quick down/up reach0` or `wg syncconf`).
+/// The login-owned half of the mesh contract. It owns the host key and a
+/// deterministic, non-secret intent. The root-owned mesh helper is the only
+/// process that owns the live interface, and sees a private key only through a
+/// validated, consumed mode-0600 specification produced by `reachd mesh apply`.
 public actor WireGuardHost {
     public nonisolated let serverPublicKey: Data
     public nonisolated let serverMeshIP = "10.86.0.1"
@@ -737,19 +738,12 @@ public actor WireGuardHost {
     /// to cache but the mistake.
     private nonisolated let endpointResolver: @Sendable () throws -> String
 
-    private let confURL: URL
+    private let stateDirectory: URL
 
-    /// How the operator loads a conf this actor has just written.
-    ///
-    /// `;`, not `&&`. `wg-quick down` exits non-zero on this machine even when
-    /// it tears the interface down correctly, so `&&` short-circuits and `up`
-    /// never runs — which happened twice on camera, leaving the mesh down in the
-    /// middle of a ceremony. It is a constant rather than a literal inside the
-    /// log call so a test can hold it to that, the way `HostCheck`'s remediation
-    /// strings are held: the last wrong command in this file survived four days
-    /// because nothing could see it.
-    public static let applyCommand =
-        "sudo /opt/homebrew/bin/wg-quick down reach0; sudo /opt/homebrew/bin/wg-quick up reach0"
+    /// The one visible administrator action after enrollment changes intent.
+    /// This command compiles data, names the exact privileged operation, and
+    /// invokes only the installed root-owned helper through `/usr/bin/sudo`.
+    public static let applyCommand = "reachd mesh apply"
 
     public nonisolated func currentEndpoint() throws -> String {
         try endpointResolver()
@@ -760,37 +754,42 @@ public actor WireGuardHost {
         confPath: String = HostCheck.defaultWireGuardConf,
         endpoint: @escaping @Sendable () throws -> String
     ) throws {
-        confURL = URL(fileURLWithPath: confPath)
+        stateDirectory = keysDirectory.deletingLastPathComponent()
         let fm = FileManager.default
         let pubURL = keysDirectory.appendingPathComponent("server.pub")
         let keyURL = keysDirectory.appendingPathComponent("server.key")
-        if !fm.fileExists(atPath: pubURL.path) {
-            // Fresh host: mint the mesh keypair and the interface skeleton.
+        let publicExists = fm.fileExists(atPath: pubURL.path)
+        let privateExists = fm.fileExists(atPath: keyURL.path)
+        guard publicExists == privateExists else {
+            throw CAError.stateMissing("wg/server.key and wg/server.pub must exist together")
+        }
+        if !publicExists {
+            // Fresh host: mint only Reach's identity. The legacy config is no
+            // longer live authority and is never created or rewritten here.
             try fm.createDirectory(at: keysDirectory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: keysDirectory.path)
             let key = Curve25519.KeyAgreement.PrivateKey()
             try key.rawRepresentation.base64EncodedString().write(to: keyURL, atomically: true, encoding: .utf8)
             try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: keyURL.path)
             try key.publicKey.rawRepresentation.base64EncodedString().write(to: pubURL, atomically: true, encoding: .utf8)
-            if !fm.fileExists(atPath: confPath) {
-                try? fm.createDirectory(atPath: (confPath as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
-                let skeleton = """
-                [Interface]
-                PrivateKey = \(key.rawRepresentation.base64EncodedString())
-                Address = 10.86.0.1/24
-                ListenPort = 51820
-
-                """
-                try skeleton.write(toFile: confPath, atomically: true, encoding: .utf8)
-                try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: confPath)
-            }
+            try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: pubURL.path)
         }
-        let pubText = try String(contentsOf: pubURL, encoding: .utf8)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let pub = Data(base64Encoded: pubText), pub.count == 32 else {
-            throw CAError.stateMissing("server.pub")
+        let privateText = try MeshIntentStore.readCanonicalKey(keyURL, role: "host private key", exactMode: 0o600)
+        let publicText = try MeshIntentStore.readCanonicalKey(pubURL, role: "host public key", exactMode: nil)
+        let privateData = try MeshIntent.decodeKey(privateText, role: "host private key")
+        let derived = try Curve25519.KeyAgreement.PrivateKey(rawRepresentation: privateData).publicKey.rawRepresentation
+        let pub = try MeshIntent.decodeKey(publicText, role: "host public key")
+        guard derived == pub else {
+            throw CAError.stateMissing("wg/server.key and wg/server.pub do not agree")
         }
         serverPublicKey = pub
         endpointResolver = endpoint
+        _ = try MeshIntentStore.loadOrImport(
+            stateDirectory: stateDirectory,
+            legacyConf: URL(fileURLWithPath: confPath),
+            privateKey: privateText,
+            publicKey: publicText
+        )
     }
 
     /// A fixed endpoint — for tests and for any caller that genuinely has
@@ -803,9 +802,9 @@ public actor WireGuardHost {
         try self.init(keysDirectory: keysDirectory, confPath: confPath, endpoint: { endpoint })
     }
 
-    /// Installs the peer: idempotent when this key already holds this address,
-    /// and otherwise REPLACES any block claiming either the address or the key.
-    /// Returns whether the config changed (the operator then applies it).
+    /// Installs the peer in user-owned intent: idempotent when this key already
+    /// holds this address, and otherwise replaces any entry claiming either.
+    /// Returns whether intent changed (the operator then applies it).
     ///
     /// Since the phone keeps its mesh key, the idempotent branch is the one a
     /// re-pair takes: nothing is written, nothing is evicted, and no sudo is
@@ -814,52 +813,34 @@ public actor WireGuardHost {
     /// now reached by a first pairing, or by a device whose address changed.
     @discardableResult
     public func addPeer(publicKey: Data, allowedIP: String) throws -> Bool {
-        let base64 = publicKey.base64EncodedString()
-        // Absent and unreadable are different answers, and collapsing them
-        // was the same mistake `DaemonConfig.load` used to make — left in
-        // place here for the one other file the operator edits by hand. An
-        // unreadable conf read as "" makes the rewrite below emit a bare
-        // [Peer] block with no [Interface], so the host's own key line is
-        // destroyed by a pairing that reports success. Refuse instead, and
-        // name the file; `init` is what creates a missing one, not this.
-        let text: String
-        if FileManager.default.fileExists(atPath: confURL.path) {
-            do {
-                text = try String(contentsOf: confURL, encoding: .utf8)
-            } catch {
-                throw CAError.stateMissing("\(confURL.path) exists but will not read: \(error)")
-            }
-        } else {
-            text = ""
+        guard publicKey.count == 32 else {
+            throw MeshIntentError.refused("peer public key is not 32 bytes")
         }
-        var chunks = text.components(separatedBy: "[Peer]")
-        let head = chunks.removeFirst()
-        // Already right: this key, under this address. Checking the pair rather
-        // than the key alone matters now that the key persists — a device whose
-        // address changed (a re-minted state directory reissues from
-        // 10.86.0.2) brings back a key the file already names, and answering
-        // "nothing to do" would leave it with no road at all.
-        if chunks.contains(where: { $0.contains(base64) && $0.contains("AllowedIPs = \(allowedIP)/32") }) {
+        let base64 = publicKey.base64EncodedString()
+        let route = "\(allowedIP)/32"
+        guard MeshIntent.peerOrdinal(route) != nil else {
+            throw MeshIntentError.refused("peer route is outside 10.86.0.2...254/32")
+        }
+        var intent = try MeshIntentStore.load(in: stateDirectory)
+        guard intent.publicKey == serverPublicKey.base64EncodedString() else {
+            throw MeshIntentError.refused("mesh intent host key no longer matches this host")
+        }
+        if intent.peers.contains(where: { $0.publicKey == base64 && $0.allowedIP == route }) {
             return false
         }
-        // Evict on EITHER match: the address, because two peers must never
-        // claim one /32; the key, because wg refuses a conf naming one public
-        // key twice, so a key that moved address has to lose its old block.
-        let kept = chunks.filter {
-            !$0.contains("AllowedIPs = \(allowedIP)/32") && !$0.contains(base64)
+        intent.peers.removeAll {
+            $0.allowedIP == route || $0.publicKey == base64
         }
-        var out = head + kept.map { "[Peer]" + $0 }.joined()
-        if !out.hasSuffix("\n") { out += "\n" }
-        out += """
-
-        [Peer]
-        # enrolled \(ISO8601DateFormatter().string(from: Date()))
-        PublicKey = \(base64)
-        AllowedIPs = \(allowedIP)/32
-
-        """
-        try out.write(to: confURL, atomically: true, encoding: .utf8)
-        Log.info("wg peer installed — apply with: \(Self.applyCommand)")
+        intent.peers.append(.init(publicKey: base64, allowedIP: route))
+        intent.peers.sort {
+            MeshIntent.peerOrdinal($0.allowedIP)! < MeshIntent.peerOrdinal($1.allowedIP)!
+        }
+        guard intent.generation < UInt64.max else {
+            throw MeshIntentError.refused("mesh intent generation is exhausted")
+        }
+        intent.generation += 1
+        try MeshIntentStore.save(intent, in: stateDirectory)
+        Log.info("mesh intent updated — apply with: \(Self.applyCommand)")
         return true
     }
 }

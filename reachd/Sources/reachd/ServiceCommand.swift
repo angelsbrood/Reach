@@ -123,7 +123,13 @@ struct Service: AsyncParsableCommand {
             for line in report.lines {
                 print(line)
             }
-            guard report.isStateContractValid else {
+            let meshOwner = MeshOwner.finding(
+                stateDirectory: DaemonInfo.canonicalLoginStateDirectory,
+                addresses: LocalAddresses.ipv4()
+            )
+            print("[reachd] mesh owner: \(meshOwner.level.rawValue) — \(meshOwner.detail)")
+            if let action = meshOwner.action { print("[reachd] mesh action: \(action)") }
+            guard report.isStateContractValid, meshOwner.level != .fail else {
                 throw ExitCode.failure
             }
         }

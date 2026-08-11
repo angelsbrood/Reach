@@ -150,8 +150,8 @@ enum EnrollOutcome {
         // cancel here can outrun the frame — which is how a pairing came to
         // report success while the daemon's read failed with ENOTCONN.
         stream.finishSending()
-        // The peer block is written before this frame is sent, so receiving it
-        // IS the deterministic wait for a test that reads reach0.conf — and a
+        // Mesh intent is committed before this frame is sent, so receiving it
+        // IS the deterministic wait for a test that reads mesh-intent.json — and a
         // stronger one than draining, which could not tell "the daemon finished"
         // from "the daemon gave up." Bounded, because the absence of this frame
         // is the fault under test: an unbounded read would hang the suite where
@@ -201,13 +201,13 @@ enum EnrollOutcome {
             return
         }
 
-        // Mesh provision: first device gets .2, and the host config gained
-        // the peer for the operator's one visible sudo.
+        // Mesh provision: first device gets .2, and login-owned intent gained
+        // the peer for the operator's one visible `reachd mesh apply`.
         #expect(grant.wg.assignedIP == "10.86.0.2/24")
         #expect(grant.wg.serverPublicKey.count == 32)
         #expect(grant.wg.endpoint == "192.0.2.1:51820")
-        let conf = try String(contentsOfFile: fixture.confPath, encoding: .utf8)
-        #expect(conf.contains("10.86.0.2/32"))
+        let intent = try MeshIntentStore.load(in: fixture.stateDir)
+        #expect(intent.peers.map(\.allowedIP) == ["10.86.0.2/32"])
     }
 
     @Test func tokensAreSingleUseAndFakePoPCloses() async throws {
@@ -238,8 +238,8 @@ enum EnrollOutcome {
     /// Re-pairing is the demo-day path: the same Secure Enclave key comes
     /// back and must keep its identity — id, mesh address, and the admin grant.
     /// Two legs, because the mesh key decides which branch of `addPeer` runs:
-    /// a key the conf has never seen swaps the stale block for it, and a key the
-    /// conf already holds is left alone. The second is the ordinary case now that
+    /// a key intent has never seen swaps the stale peer for it, and a key intent
+    /// already holds is left alone. The second is the ordinary case now that
     /// the phone keeps its mesh key, and it is what closes the torn-ceremony
     /// window rather than shrinking it — with host and phone already agreeing, a
     /// lost confirmation costs the pairing nothing.
@@ -269,8 +269,8 @@ enum EnrollOutcome {
             Issue.record("re-pair was refused")
             return
         }
-        // A key the conf has not seen: a block was written, so the host still
-        // has to load it.
+        // A key intent has not seen: intent changed, so the root owner still
+        // has to apply it.
         #expect(try #require(secondConfirmed).applyPending)
 
         // Same device, same address, admin intact — and only one record.
@@ -284,15 +284,17 @@ enum EnrollOutcome {
         #expect(record.name == "keeper-phone-renamed")
         #expect(secondGrant.wg.assignedIP == firstGrant.wg.assignedIP)
 
-        // The conf holds exactly one peer for the address — the new key.
-        let conf = try String(contentsOfFile: fixture.confPath, encoding: .utf8)
-        #expect(conf.components(separatedBy: "AllowedIPs = \(record.assignedIP)/32").count == 2)
-        #expect(conf.contains(record.wgPub.base64EncodedString()))
+        // Intent holds exactly one peer for the address — the new key.
+        let intent = try MeshIntentStore.load(in: fixture.stateDir)
+        #expect(intent.peers.count == 1)
+        #expect(intent.peers.first?.allowedIP == "\(record.assignedIP)/32")
+        #expect(intent.peers.first?.publicKey == record.wgPub.base64EncodedString())
         #expect(record.wgPub != original.wgPub)
 
         // Third leg: the same phone, back again with the key it kept. `addPeer`
-        // has nothing to do, so the conf must come out byte-identical and the
+        // has nothing to do, so intent must come out byte-identical and the
         // host must not ask for a sudo it does not need.
+        let beforeSameKey = try Data(contentsOf: MeshIntentStore.intentURL(in: fixture.stateDir))
         let third = try await enroll(
             fixture, token: fixture.tokens.mint(), name: "keeper-phone-renamed",
             deviceKey: deviceKey, wgKey: secondWG
@@ -302,8 +304,8 @@ enum EnrollOutcome {
             return
         }
         #expect(!(try #require(thirdConfirmed).applyPending), "the host asked for a sudo it did not need")
-        let afterSameKey = try String(contentsOfFile: fixture.confPath, encoding: .utf8)
-        #expect(afterSameKey == conf, "a re-pair with an unchanged mesh key rewrote the conf")
+        let afterSameKey = try Data(contentsOf: MeshIntentStore.intentURL(in: fixture.stateDir))
+        #expect(afterSameKey == beforeSameKey, "a re-pair with an unchanged mesh key rewrote intent")
     }
 
     /// Arriving at a venue is exactly this: re-pin `meshEndpoint`, re-pair the
@@ -373,11 +375,11 @@ enum EnrollOutcome {
         // a debugging session at a venue.
         #expect(error.message.contains("config.json"))
 
-        // Nothing half-enrolled: no device record, and no peer block.
+        // Nothing half-enrolled: no device record, and no peer intent.
         let devices = await DeviceRegistry(directory: fixture.stateDir).all
         #expect(devices.isEmpty)
-        let conf = (try? String(contentsOfFile: fixture.confPath, encoding: .utf8)) ?? ""
-        #expect(!conf.contains("10.86.0.2/32"))
+        let intent = try MeshIntentStore.load(in: fixture.stateDir)
+        #expect(intent.peers.isEmpty)
 
         // …but the QR IS spent, and that is deliberate rather than an
         // oversight: consuming it late enough to survive a refusal means
@@ -449,17 +451,17 @@ enum EnrollOutcome {
             deviceKey: deviceKey, completeCeremony: false
         )
         try? await Task.sleep(for: .milliseconds(400))
-        let afterAbandonedFirst = try String(contentsOfFile: fixture.confPath, encoding: .utf8)
-        #expect(!afterAbandonedFirst.contains("[Peer]"), "an abandoned first pairing wrote a peer block")
+        let afterAbandonedFirst = try MeshIntentStore.load(in: fixture.stateDir)
+        #expect(afterAbandonedFirst.peers.isEmpty, "an abandoned first pairing wrote a peer")
         let reserved = await DeviceRegistry(directory: fixture.stateDir).all
         #expect(reserved.count == 1, "the reservation should survive so a retry keeps the address")
         #expect(reserved.first?.active == false, "an abandoned pairing left the device reading as active")
-        #expect(reserved.first?.wgPub.isEmpty == true, "a mesh key was recorded with no peer block to match it")
+        #expect(reserved.first?.wgPub.isEmpty == true, "a mesh key was recorded with no peer intent to match it")
 
         _ = try await enroll(fixture, token: fixture.tokens.mint(), name: "phone", deviceKey: deviceKey)
 
-        let afterFirst = try String(contentsOfFile: fixture.confPath, encoding: .utf8)
-        #expect(afterFirst.contains("10.86.0.2/32"))
+        let afterFirst = try Data(contentsOf: MeshIntentStore.intentURL(in: fixture.stateDir))
+        #expect(try MeshIntent.decode(afterFirst).peers.map(\.allowedIP) == ["10.86.0.2/32"])
 
         // Same Secure Enclave key, so the daemon treats it as the same device
         // and the fresh wg key would replace the working block. Abandon after
@@ -473,29 +475,27 @@ enum EnrollOutcome {
         )
         try? await Task.sleep(for: .milliseconds(400))
 
-        let afterAbandon = try String(contentsOfFile: fixture.confPath, encoding: .utf8)
-        #expect(afterAbandon == afterFirst, "an abandoned re-pair rewrote the peer block the phone was using")
+        let afterAbandon = try Data(contentsOf: MeshIntentStore.intentURL(in: fixture.stateDir))
+        #expect(afterAbandon == afterFirst, "an abandoned re-pair rewrote the peer the phone was using")
 
-        // And when the conf itself will not read, the phone hears which file
+        // And when intent itself will not read, the phone hears a refusal
         // rather than a stream that simply stops — it is one frame away from
-        // deciding it is paired, so the reason is its business too. Invalid UTF-8
-        // rather than chmod 000: a mode of 000 does not stop root, so the
-        // permission form silently passes under `sudo swift test`.
-        try Data([0xFF, 0xFE, 0xFD]).write(to: URL(fileURLWithPath: fixture.confPath))
+        // deciding it is paired, so the reason is its business too.
+        let intentURL = MeshIntentStore.intentURL(in: fixture.stateDir)
+        try Data([0xFF, 0xFE, 0xFD]).write(to: intentURL)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: intentURL.path)
         let refused = try await enroll(fixture, token: fixture.tokens.mint(), name: "another-phone")
         guard case .refused(let error) = refused else {
-            Issue.record("a conf that could not be read still reported a pairing")
+            Issue.record("intent that could not be read still reported a pairing")
             return
         }
         #expect(error.code == "enroll-peer")
-        #expect(error.message.contains(fixture.confPath), "the refusal did not name the file")
+        #expect(error.message.contains("mesh JSON"), "the refusal did not name the malformed authority")
     }
 
-    /// The same collapse `DaemonConfig.load` had, in the one other file the
-    /// operator edits by hand: read failure and empty file are not the same
-    /// answer, and treating them alike rewrites the conf without its
-    /// [Interface] — destroying the host's own key line.
-    @Test func anUnreadableWireGuardConfRefusesRatherThanRewritingIt() async throws {
+    /// Intent is secret-free, but it is still authority. An unsafe mode must
+    /// refuse rather than be read and rewritten as though it were empty.
+    @Test func anUnsafeMeshIntentRefusesRatherThanRewritingIt() async throws {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("reach-wg-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -507,20 +507,19 @@ enum EnrollOutcome {
             confPath: confPath,
             endpoint: "192.0.2.1:51820"
         )
-        let before = try String(contentsOfFile: confPath, encoding: .utf8)
-        #expect(before.contains("[Interface]"))
-        #expect(before.contains("PrivateKey"))
+        let intentURL = MeshIntentStore.intentURL(in: dir)
+        let before = try Data(contentsOf: intentURL)
 
-        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: confPath)
-        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: confPath) }
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: intentURL.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: intentURL.path) }
 
         await #expect(throws: (any Error).self) {
             try await host.addPeer(publicKey: Data(repeating: 7, count: 32), allowedIP: "10.86.0.2")
         }
 
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: confPath)
-        let after = try String(contentsOfFile: confPath, encoding: .utf8)
-        #expect(after == before, "a conf that could not be read was rewritten anyway")
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: intentURL.path)
+        let after = try Data(contentsOf: intentURL)
+        #expect(after == before, "intent that could not be read was rewritten anyway")
     }
 
     @Test func aSpentTokenSaysWhatToDoAboutIt() async throws {
@@ -541,13 +540,9 @@ enum EnrollOutcome {
         #expect(error.message.contains("reachd pair"))
     }
 
-    /// `;`, not `&&`. `wg-quick down` exits non-zero on this host even on a clean
-    /// teardown, so `&&` short-circuits and `up` never runs — twice, on camera,
-    /// leaving the mesh down mid-ceremony. Asserted rather than trusted because
-    /// the last wrong command in this file survived four days as a literal inside
-    /// a log call, where nothing could see it.
-    @Test func theApplyCommandSurvivesADownThatExitsNonZero() {
-        #expect(WireGuardHost.applyCommand.contains("down reach0;"))
-        #expect(!WireGuardHost.applyCommand.contains("&&"))
+    @Test func theApplyCommandNamesOnlyTheVisibleCompilerAndHelperPath() {
+        #expect(WireGuardHost.applyCommand == "reachd mesh apply")
+        #expect(!WireGuardHost.applyCommand.contains("wg-quick"))
+        #expect(!WireGuardHost.applyCommand.contains("sudo"))
     }
 }

@@ -18,7 +18,7 @@ struct Doctor: AsyncParsableCommand {
     @Option(name: .long, help: "State directory to inspect.")
     var state: String?
 
-    @Option(name: .long, help: "wg-quick config to inspect.")
+    @Option(name: .long, help: "Legacy wg-quick rollback file to inspect; it is never live authority.")
     var wgConf = HostCheck.defaultWireGuardConf
 
     /// Opt-in, because every other check here is read-only and this one opens

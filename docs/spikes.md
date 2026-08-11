@@ -26,6 +26,8 @@ the decision. Kill criteria come from the pre-filing plan.
 | S20 | Can baseline-v0 `Ping`/`Pong` distinguish legitimate model silence from a progressively degrading active road quickly enough to enter the existing candidate race? | **PASS** (2026-08-08) — signed Simulator acceptance kept queued real-weight silence in place 3/3 and recovered seeded degradation 3/3; the natural phone walk reattached the same generation over `10.86.0.2` at sequences 1016 and 1433 and visibly completed |
 | S21 | Does the installed cluster survive short, residency-scale and overnight system sleep without product wake machinery? | **PASS / DOCUMENTATION ONLY** (2026-08-10) — 2× short, 2× ten-minute and 2× eight-hour-plus trials preserved the daemon, listeners, model and mesh; the system broker recreated expired mappings four seconds after wake, so no Reach sleep code was licensed |
 | S22 | Why does one installed `reachd` find MLX resources by its canonical path but not through a symlink or bare `PATH` command? | **PASS / CANONICAL RE-EXEC** (2026-08-10) — the loaded image and `dladdr` already resolve to the canonical binary, while `Bundle.main` remains beside the launch alias; one early `execv` of the resolved executable makes every invocation use the canonical adjacent bundle set |
+| S23 | Which authority owns the host across lock, logout and reboot? | **PASS / LOGIN CLUSTER, ROOT ROAD** (2026-08-10) — one lock, two logout/login and two reboot/pre-login/login trials selected login-owned serving, proved late roads need no daemon restart, and isolated automatic privileged mesh activation as a separate pass |
+| S24 | What least-privileged installed component can restore the host mesh without owning the cluster? | **PASS / ROOT-OWNED HEADLESS MESH OWNER** (2026-08-11) — a scriptless helper with strict data-only state survived the physical lifecycle matrix; final-byte crash recovery restored interface plus connected route, and a strict building-network cold open arrived from `10.86.0.2` and streamed to `done` |
 
 ## S19 — the typed mismatch is architectural under the shipped greedy path (2026-08-08)
 
@@ -1408,3 +1410,228 @@ schemas 15/15. The four CA/server hashes, device registry, WireGuard host
 public key and WireGuard configuration remained byte-identical, and no
 `cluster CA created` line appeared. No phone, logout, reboot, re-pair or
 privileged mutation was needed for this correctness repair.
+
+## S24 — privilege owns only the WireGuard road (2026-08-10)
+
+**Question.** What supported boundary can raise the host WireGuard peer after
+logout or reboot without moving `reachd`, cluster authority or model execution
+into root, and without executing a user-writable Homebrew program or
+hook-capable configuration as root?
+
+**Candidate trace.** Three boundaries were compared before tracked product
+work:
+
+| candidate | measured/documented requirement | verdict |
+| --- | --- | --- |
+| `SMAppService` privileged helper | current SDK requires an app-bundle service and a notarized containing app; Reach ships a CLI and this rig has no suitable distribution identity | reject for this release shape |
+| packet-tunnel provider | Apple says a packet-tunnel provider is not a general host network-listener mechanism; it would also entangle the phone-side Keeper boundary | reject |
+| root LaunchDaemon with embedded `wireguard-go` | scriptless component package can protect one executable and fixed plist as root; compile-only prototype linked only system libraries and needed no Homebrew, `wg`, shell or user runtime | select |
+
+The embedded dependency is annotated tag `0.0.20250522`, commit
+`f333402bd9cbe0f3eeb02507bd14e23d7d639280`. The boundary is a root-owned
+`systems.reach.meshd` process that owns only a dynamic `utun`, while the
+existing `systems.reach.reachd` LaunchAgent, CA, registry, sessions, model and
+serving remain login-owned.
+
+**Disposable privileged proof.** Before tracked edits, a temporary helper and
+scriptless component package used the isolated label
+`systems.reach.meshd.s24`, address `10.86.254.1/24`, and unused UDP `55182`.
+The helper SHA-256 was
+`fc0fc1e5a3e7cd43c2d86a8698609a7dc748acaa0afd37ab37bef5ef3520e78f`;
+the unsigned local package SHA-256 was
+`e8b2475e46952a75628fb64ef243d9c50501d71a6f2cfe46f65a2b50df05193c`;
+and its bounded configuration SHA-256 was
+`d121a53b7efa2285af8b722f6f3b1bd54aa688d5f4a17fe7667f5e432019ad6e`.
+The package payload listed only the helper and LaunchDaemon plist beneath the
+required system directories and contained no installer scripts.
+
+The founder-authorized operation installed the package and bootstrapped its
+fixed plist:
+
+```
+/usr/sbin/installer -pkg /private/tmp/reach-mesh-s24.toIdBh/systems.reach.meshd.s24.clean.pkg -target /
+/bin/launchctl bootstrap system /Library/LaunchDaemons/systems.reach.meshd.s24.plist
+```
+
+The job started root-owned, created one `utun` with `10.86.254.1/24`, held UDP
+`55182`, and exposed its expected process and launchd identity. Killing the
+helper reproduced unconditional launchd recovery. Teardown booted out the
+fixed system label, removed the two payload files and bounded prototype state,
+forgot receipt `systems.reach.meshd.s24`, and verified the absence of job,
+process, interface address, UDP listener, socket, log, receipt and
+configuration. No live Reach port, key, registry, CA, daemon or service was
+changed.
+
+**Verdict: PASS / ROOT-OWNED HEADLESS MESH OWNER.** The prototype needs root
+only for installation, lifecycle and interface ownership. It does not need a
+user-writable executable, package script, broader authorization, signing
+identity, shell or cluster-state access. Product work may therefore embed the
+pinned MIT implementation in one ad-hoc-signed local helper, define a strict
+version-1 data contract and leave Developer ID signing/notarized distribution
+as the later release frontier.
+
+**Product contract.** Login-owned `mesh-intent.json` carries deterministic
+public intent without the private host key. One-time migration strictly reads
+the existing hook-free `reach0.conf` and leaves those bytes untouched as
+rollback evidence. `reachd mesh stage` cross-checks intent, registry and host
+public key before writing one user-owned mode-`0600` specification inside a
+mode-`0700` directory. `reachd mesh apply` names and invokes only
+`/Library/PrivilegedHelperTools/systems.reach.meshd` through `/usr/bin/sudo`.
+The helper independently requires root, a valid `SUDO_UID`, its canonical
+root-owned executable, an unchanged regular user-owned input, strict schema
+validation and a root-only control peer. It consumes the input and promotes a
+validated pending generation only after the live backend accepts it; failure
+restores the active last-known-good generation.
+
+The root state is split into a public privacy-safe `status.json` and a
+mode-`0700` private directory containing mode-`0600` active/pending data. The
+public record is bounded to helper version, PID, generation, public digest,
+interface name, readiness, peer count, update time and a fixed error
+vocabulary. `doctor` and `service status` require package ownership and launch
+policy, helper/status PID agreement, desired generation/digest agreement, and
+the actual exact `10.86.0.1` address. Missing/unconfigured is waiting; a
+manually raised legacy road is usable but unmanaged; malformed or divergent
+authority is failure.
+
+**Pre-installation product checkpoint.** The helper's rootless backend,
+manager, strict decoder, secure-file, control-socket and status tests passed
+three times under Go's race detector; `go vet ./...` also passed. The focused
+Swift intent/owner/enrollment/diagnostic suite passed 63/63 three times.
+ReachKit passed 79/79 in all eight complete runs. reachd passed 200/200 in
+seven of eight required complete runs. One issue-bearing run completed in
+62.462 seconds; its duration matches the existing serialized cold-open timing
+sentinel rather than any mesh test. Both named cold-open guards then passed
+alone 3/3: the no-resident-generation case in 9.658–9.765 seconds and the
+30-second-connect-timeout case in 10.546–10.725 seconds. The five subsequent
+complete runs all passed in 48.278–49.651 seconds. No timing threshold was
+changed.
+
+The fresh warnings-as-errors `reachd` release has SHA-256
+`104ae97363ebc628cff85462b954d31dcafc48c40800826c7c3334802f6fce03`
+and exactly seven adjacent bundles. Canonical, installed-style absolute
+symlink (including a path containing spaces), and nested-symlink launches each
+passed the MLX spine, unconstrained sampling 3/3 and guided schemas 15/15;
+there were no bundles beside either alias. The normally signed generic
+Simulator Example and unsigned generic-iOS Keeper linkage guards both built.
+
+The scriptless local component package contains exactly
+`/Library/PrivilegedHelperTools/systems.reach.meshd` and
+`/Library/LaunchDaemons/systems.reach.meshd.plist`. The ad-hoc-signed helper
+has SHA-256
+`956ec948d490fce02305afaea4f49a0abc9e4853f950403db5ef52dd36bf8193`
+and CDHash `1bc0816e3993ab302db2618a73d30dc9dd786e78`; the plist has SHA-256
+`9c5d7d2b789ff984418119b56e332f98b53adde7c042f2e0083d6cbed5ff8b0b`;
+and the package has SHA-256
+`4d66905cce5acb8a927a9729c5415770c57221d23d2619e88142b3857bd38d0c`.
+The helper is a thin arm64 executable linked only to Apple system libraries,
+and its build metadata records the pinned `wireguard-go` revision above.
+
+No live privileged product has been installed at this checkpoint. No
+`NOPASSWD` rule is created. The bounded local installation, bootstrap, first
+apply and immediate privileged acceptance operations are arranged behind one
+native `sudo -v` administrator authorization, followed only by fixed Apple
+executables and the installed root-owned helper; no user-writable script is
+executed as root. The installed physical matrix is recorded below only after
+its separate founder authorization and completion.
+
+The recoverable pre-install backup is
+`~/Library/Application Support/Reach Backups/mesh-bootstrap-2026-08-11-0700Z`.
+Its 35 files / 58 MiB include the complete installed eight-item artifact,
+canonical state, LaunchAgent plist, 679-line log checkpoint, and untouched
+legacy `reach0.conf`. Source-versus-backup `diff`/`cmp` checks were empty. Its
+privacy-safe `MANIFEST.txt` records the four CA/server hashes, registry, host
+key, old/new executable and package hashes, and the pre-install PID/run count.
+
+### Installed S24 acceptance — 11 August 2026
+
+The authorized installation preserved the login/root split. One login-owned
+`reachd` continued to own the CA, registry, model, sessions and listeners; one
+root-owned `systems.reach.meshd` owned only its strict specification, dynamic
+`utun`, UDP `51820`, and mesh route. No `sudoers` entry, `NOPASSWD` rule,
+stored credential, package script, Homebrew runtime or root execution of the
+legacy file was introduced.
+
+The immediate privileged matrix passed an idempotent generation-1 apply, a
+controlled helper kill and launchd restart, generic malformed-update refusal,
+a registry-consistent temporary second-peer generation, and rollback to the
+canonical one-peer generation 3. Malformed and consumed staging data did not
+replace the active generation; the login daemon PID did not move. Two bounded
+implementation defects found by that matrix were closed before acceptance:
+the helper now explicitly applies the declared mode to a directory it has just
+created despite launchd's `Umask 077`, and it validates and removes only its
+own stale root-owned Unix socket after an unclean death.
+
+The physical lifecycle matrix passed one lock, two logout/login trials and two
+reboot/pre-login/login trials. Each pre-login phase had the root mesh helper
+but no serving daemon, and the phone got the bounded no-road refusal. Each
+login automatically produced exactly one login-owned daemon and an
+authenticated phone generation streamed to `done`; no Terminal command was
+needed to raise the helper. The helper remained PID 52231 across both logout
+trials, returned as PID 531 and PID 573 after the two reboots, and the daemon
+returned as PID 55070, PID 56518, PID 876 and PID 922 in the four supported
+post-login phases. These trials used the first installed helper build and
+prove its launchd ownership and lifecycle contract.
+
+The first strict building-network cold open then found a separate data-plane
+defect: the helper had assigned `10.86.0.1/24`, but had not installed the
+connected `10.86.0.0/24` route. `/sbin/route -n get 10.86.0.2` selected the
+default path through `en0`, and no daemon session arrived. The accepted helper
+now installs the exact route on its created `utun`, removes it on orderly
+teardown, and cleans it after a partial setup failure. Focused route command,
+failure and removal tests passed 3/3; the complete Go race suite passed 3/3
+and `go vet ./...` passed.
+
+The route-corrected scriptless package contains the same two payloads and no
+scripts. Its helper SHA-256 is
+`9f56170e54e0e4e96aefb732e0df42d5bb878a340b6e905596743e2fa545909b`,
+its plist SHA-256 is
+`9c5d7d2b789ff984418119b56e332f98b53adde7c042f2e0083d6cbed5ff8b0b`,
+and its package SHA-256 is
+`d91612140bb746215d3ba2676586842608c50bf3d6d3f70e42abc635de99ccdd`.
+The helper's ad-hoc CDHash is
+`448468b72738de4f718baa891a960ab925584b2a`. Replacement retained a complete
+rollback copy of the preceding helper. A later controlled kill changed the
+helper from PID 22263 to PID 22840, restored generation 3, `utun0`,
+`10.86.0.1/24`, and the connected route, while `reachd` remained PID 922.
+
+The final cold-open baseline had Example process-absent and the unchanged
+Keeper packet tunnel alive. From the building network, the daemon opened
+session `4EBDAA17-3740-4085-8A8D-E92CC78C8E19` from
+`10.86.0.2:57849`; the phone streamed and visibly reached `done`. This is the
+end-to-end proof for the corrected helper bytes. CoreDevice became unavailable
+across the network boundary, so process provenance comes from the immediately
+preceding profile-validated read-only inventory and the terminal result is the
+founder's visible report; the authenticated mesh source is daemon evidence.
+
+A final controlled reboot then exercised those exact corrected bytes. Before
+login, the phone was still on the building network and got the expected bounded
+no-road refusal: the root helper existed, but the deliberately login-owned
+serving daemon did not. After login, launchd had automatically started final
+helper SHA `9f56170e…5909b` as PID 525 and final `reachd` SHA
+`104ae973…ce03` as PID 957. `service status` reported generation 3, one peer,
+and `utun0`; `/sbin/route -n get 10.86.0.2` selected the connected
+`10.86.0.0/24` route on `utun0` with MTU 1280. A new strict cold open then
+authenticated daemon session `83886836-9931-46C9-84C0-C2ECAA1754B2` from
+`10.86.0.2:52996` and streamed visibly to `done`. No mesh or daemon command was
+run after reboot. Doctor's disposable identity hit the established
+`SecPKCS12Import -25291` fault on three bounded post-reboot attempts; all other
+findings passed, the same installed bytes had already completed authenticated
+doctor dials, and this normally signed real-client session supplies the direct
+post-reboot authentication proof.
+
+Installed canonical MLX, unconstrained sampling 3/3 and guided schemas 15/15
+all passed. Authenticated `doctor --dial` completed over loopback in 38 ms and
+the final closeout recheck in 41 ms, both with 15 pass, three expected mapping
+warnings, zero waiting and zero fail. The
+sandbox-only `SecPKCS12Import -25291` remained attributable because the same
+installed command passed outside the sandbox. The four CA/server hashes,
+device registry and WireGuard private/public identities remained
+byte-identical, no `cluster CA created` line appeared, and no re-pair occurred.
+
+**Verdict: PASS.** Automatic root-owned mesh bootstrap is installed baseline.
+The first two logout/reboot trials establish the selected ownership boundary;
+final-byte crash recovery and the added post-correction reboot establish route
+restoration for the exact accepted helper; and both building-network cold
+opens prove its corrected data plane. Developer ID signing, notarization,
+trusted distribution/update and broader VPN interoperability remain future
+work.

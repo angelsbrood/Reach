@@ -157,11 +157,10 @@ and hand the phone something no phone off this network can dial. A machine
 with no config at all only WAITs — nothing has been set up yet, so nothing has
 been left out.
 
-Two things doctor deliberately does not claim. The peer count is peers in the
-*file*; only `sudo wg show` sees what the running interface carries, and that
-needs root. (Bare, with no interface name — the named form can fail while the
-interface is up.) And the mesh check observes a `10.86.0.x` address, not an
-interface by name — those coincide only while the config says so.
+Doctor now distinguishes three facts: peers in login-owned intent, the
+root-owned helper's public generation/digest, and the exact live
+`10.86.0.1` address. It never needs to print keys or inspect the root-only
+active specification. Only all three agreeing is managed mesh readiness.
 
 It cannot see the edge — the port forward lives there, and a forward that was
 configured once is not a forward that is in force. Check the live firewall
@@ -169,14 +168,12 @@ rules before every away rehearsal, not the record of having set them up.
 
 Then, in order:
 
-1. `wg-quick up reach0` — **before** `reachd serve`, so the mesh address is
-   present in every artifact from the first instant. Nothing breaks if it comes
-   up second: the listener binds by port, verification pins the chain and not
-   the name, and the candidate list the away leg falls to is recomputed for
-   every Hello. The order is cheap insurance, and it stays.
-2. `reachd serve` — confirm the startup line reads `(pinned)`.
-3. A LAN generation, to prove the spine.
-4. The away leg, to prove the fall.
+1. `reachd service status` — require one login daemon and one ready root-owned
+   mesh owner; no Terminal command should be needed to raise the road.
+2. `reachd doctor --dial` — prove the authenticated local spine.
+3. A LAN generation, to refresh the phone's authenticated road card and prove
+   the filmed spine.
+4. The away leg, to prove the fall over the mesh.
 
 ## What is real, and what is named
 

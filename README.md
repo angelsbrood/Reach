@@ -94,6 +94,8 @@ Identity designed by [Vanessa Spiral](https://vanessaspiral.com).
 Apache-2.0. Copyright 2026 Cassie Spiral.
 
 Third-party code is carried under its own terms and marked as such: the
-patched WireGuardKit submodule under `Keeper/vendor/`, and the two
-wg-quick parser files copied into `Keeper/PacketTunnel/`, are WireGuard
-LLC's under the MIT license and keep their SPDX headers.
+patched WireGuardKit submodule under `Keeper/vendor/`, the two wg-quick parser
+files copied into `Keeper/PacketTunnel/`, and pinned `wireguard-go` embedded by
+`mesh-helper/` are WireGuard LLC's under the MIT license. The copied sources
+keep their SPDX headers and the host-helper attribution is in
+`mesh-helper/NOTICE.md`.
