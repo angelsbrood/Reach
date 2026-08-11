@@ -449,13 +449,13 @@ public enum HostCheck {
                 detail: daemonUp
                     ? "no launchd agent — the daemon is running, but nothing restarts it"
                     : "no launchd agent — nothing starts the daemon at login or restarts it",
-                action: "reachd service install, from a copy of the binary somewhere permanent. It starts at login, not at boot: the cluster's identity lives in the login keychain."
+                action: "reachd service install, from a complete permanent binary-and-bundle layout. The selected service is login-owned; pre-login serving is unsupported."
             )
         }
         return Finding(
             level: .pass,
             title: "supervision",
-            detail: "launchd agent installed at \(plist.path)"
+            detail: "login-owned launchd agent installed at \(plist.path); pre-login serving is unsupported"
         )
     }
 
@@ -646,14 +646,14 @@ public enum HostCheck {
                     level: .wait,
                     title: "mesh interface",
                     detail: "no 10.86.0.x address — reach0 is not up yet (\(rendered.joined(separator: ", ")))",
-                    action: "sudo wg-quick up reach0 (standing order: before reachd serve) — until it exists, the away leg has no mesh candidate to fall to."
+                    action: "sudo wg-quick up reach0 — it may rise before or after reachd; authenticated hellos read the current address set."
                 )
             }
             return Finding(
                 level: .fail,
                 title: "mesh interface",
                 detail: "no 10.86.0.x address, but a daemon is already serving (\(rendered.joined(separator: ", ")))",
-                action: "This host will stream on the LAN and have nothing to fall to at the walk-out. sudo wg-quick up reach0, then restart the daemon so the mesh address is in every artifact."
+                action: "This host will stream on the LAN and have nothing to fall to at the walk-out. sudo wg-quick up reach0; no daemon restart is required. A client already away must first authenticate on a reachable road to learn the newly available mesh road."
             )
         }
         return Finding(

@@ -1239,3 +1239,125 @@ alias bundles. Both listeners are held, the model prewarmed, all four CA/server
 fingerprints are unchanged, CA creation remains zero, authenticated
 `doctor --dial` is 13 pass / 3 expected warnings / 0 waiting / 0 fail, and
 installed canonical, symlink and bare-`PATH` MLX selftests all pass.
+
+## S23 — login brings the process back; privilege must bring the mesh (2026-08-10)
+
+**Question.** Which authority actually owns each part of the cluster across
+lock, logout and reboot, and can WireGuard rise after `reachd` without
+restarting the daemon? The old operator explanation attributed login ownership
+to a listener identity in the login keychain. The current source does not:
+`IdentityMaterializer` imports the disk-backed leaf with
+`kSecImportToMemoryOnly`.
+
+**Authority trace.** The serving system is six independent authorities, not
+one thing called launchd or the keychain:
+
+| surface | measured/current owner | contract established here |
+| --- | --- | --- |
+| daemon process | `systems.reach.reachd` in `gui/501` | login-owned; absent before login, automatically supervised after login |
+| cluster state and CA | UID 501, `~/Library/Application Support/Reach` | the generated agent pins this exact path through `REACH_STATE_DIR` |
+| listener identity | disk leaf → memory-only PKCS#12 import | not a login-keychain reason for the service boundary |
+| model runtime | the user's interactive MLX/Metal process | starts and prewarms after login; pre-login serving is unsupported rather than inferred |
+| mesh interface | root-applied WireGuard configuration | absent after both reboots; automatic privileged bootstrap needs a separate trust design |
+| client roads | each paired client's authenticated calling card | every hello recomputes current host addresses; a client already away cannot learn an address that appeared after its last hello |
+
+The local trust boundary rules out an unattended root shortcut.
+`/opt/homebrew/bin/wg-quick`, its Homebrew tree, and
+`/opt/homebrew/etc/wireguard/reach0.conf` are user-owned; the config is mode
+`0600`. The script parses and evaluates `PreUp`, `PostUp`, `PreDown`, and
+`PostDown` hook fields. A root job consuming that mutable file would therefore
+turn a user edit into persistent root command execution. No LaunchDaemon,
+`NOPASSWD` rule, wrapper script, or privileged helper was installed in this
+pass.
+
+**Physical matrix.** The accepted installed hash was
+`c0c4e08072d1e6fa0db1aaca702912c66b42d431eb7e72195f7351d0348d46af`.
+The pre-change daemon began as PID 66242/run 1 with both listeners, the model,
+and `10.86.0.1`. Each phone run was a normally launched, already-paired
+Example; Keeper and its PacketTunnel were left untouched.
+
+| transition | process and roads | authenticated result |
+| --- | --- | --- |
+| lock → unlock | same PID 66242/run 1, listeners/model/mesh retained | Slate session completed 11,701 characters |
+| logout/login 1 | new PID 82109/run 1 in the new `gui/501` instance; mesh retained | cold Slate session completed 13,595 characters |
+| logout/login 2 | new PID 83911/run 1; mesh retained | cold Slate session completed 14,547 characters |
+| reboot 1, pre-login | no GUI LaunchAgent and no daemon | phone refused boundedly: no answer on its four known roads |
+| reboot 1, post-login untouched | PID 961/run 1, both listeners/model present; no `10.86.0.1` | LAN session `34C4B0F4-…` opened from `192.168.8.225`; doctor exposed the missing mesh |
+| reboot 1, late mesh | `sudo wg-quick up reach0` produced `utun4 10.86.0.1`; PID stayed 961/run 1 | after one Slate hello refreshed roads, away session `FC216C98-…` opened from `10.86.0.2` and streamed to `done` |
+| reboot 2, pre-login | final controlled reboot again had no GUI LaunchAgent or daemon | phone refused boundedly against three learned roads |
+| reboot 2, post-login untouched | PID 951/run 1 and both listeners returned; no mesh. The Mac first auto-joined `192.168.4.50`, then ordinary Wi-Fi selection returned it to Slate without restarting the daemon | local `doctor --dial` passed; Slate session `AFFAF33E-…` from `192.168.8.225` completed 10,644 characters |
+| reboot 2, late mesh | `utun4 10.86.0.1` rose; PID stayed 951/run 1; doctor returned 13 pass / 3 expected warnings / 0 fail | Slate refresh `14CA40B0-…` completed 10,062 characters; cold away session `2063672E-…` opened from `10.86.0.2`, reattached at seq 381, 744, 925, 1235, 1491 and 3468, and visibly reached `done` |
+
+The first attempt in reboot trial 1 taught an important ordering fact. A LAN
+hello while mesh was absent correctly replaced the phone's calling card with
+two then-current roads. Raising WireGuard after the phone had already left
+could not teach it the new address, so that attempt refused without reaching
+the daemon. Returning to Slate for one authenticated hello populated
+`10.86.0.1`; the next cold away launch passed. The daemon listener itself had
+already been capable of accepting on the late interface. No restart or re-pair
+was required.
+
+One accidental login/reboot before the second controlled pre-login attempt is
+retained as an unmeasured extra boot, not counted as a trial. The final reboot
+then followed the exact pre-login sequence and is the recorded trial. Fast
+user switching remained unmeasured because no suitable second account was
+evidenced or authorized; no account was created. No safe OS update naturally
+occurred, so update survival remains unmeasured.
+
+All four CA/server SHA-256 values remained byte-identical, `cluster CA
+created` remained zero, the enrolled device stayed `iPhone (10.86.0.2)`, the
+WireGuard public identity remained `zBiw+nU3TWFz…`, and the phone never
+re-paired. The initial rollback copy under `/private/tmp` was correctly erased
+by reboot; before implementation work the accepted eight-item artifact, state,
+plist, and WireGuard config were re-backed up under user-owned Application
+Support so the actual rollback unit survives the transition it protects.
+
+**Verdict: LOGIN-OWNED PASS / PRIVILEGED FOLLOW-ON REQUIRED.** Lock and
+logout recover within the chosen login boundary. Pre-login serving is
+unsupported. Both reboots reproduce one missing authority: root-owned mesh
+activation. A late interface is immediately usable by the unchanged wildcard
+listener, and the next authenticated hello advertises it, so restarting
+`reachd` is both unnecessary and harmful to the distinction being measured.
+The bounded product change is an explicit login-owned launch definition,
+root preflight guards, readiness-aware status, current-address hello tests,
+and corrected operational truth. Automatic mesh bootstrap requires a trusted
+installer and sanitized structured configuration and is a separate pass.
+
+### Installed-release repeat
+
+The implementation release was built warnings-as-errors at
+`fb4864642e9cd3590d7caffb6ad6dc3ca4e79d7b0b882156b8ad5f57ad7ef324`,
+installed as one executable plus seven adjacent bundles, and exercised again
+through the complete physical matrix. ReachKit passed 79/79 and reachd passed
+182/182 in each of eight complete runs; the normally signed generic-Simulator
+Example and generic-iOS Keeper linkage builds also passed. Keeper source and
+behavior were unchanged.
+
+| installed transition | process and roads | authenticated result |
+| --- | --- | --- |
+| lock → unlock | PID 37579/run 1 remained; listeners and mesh stayed present | normally launched Example completed 10,934 characters; session `80963E3F-…` opened from `192.168.8.225` |
+| logout/login 1 | exactly one new PID 40245/run 1; both listeners and model returned; mesh was absent | visible Slate completion; session `44A69E32-…` opened from `192.168.8.225` and its generation reattached at seq 797 |
+| logout/login 2 | exactly one new PID 41564/run 1; both listeners and model returned; mesh was absent | 15,832-character Slate completion; session `8450B517-…` opened from `192.168.8.225` |
+| reboot 1, pre-login | no login-owned daemon | screenshot retained the bounded no-road refusal against two then-known roads |
+| reboot 1, post-login untouched | exactly one PID 860/run 1; both listeners/model returned; mesh was absent | session `D11FDF23-…` opened from `192.168.8.225` and the phone visibly completed |
+| reboot 1, late mesh | `utun6` acquired `10.86.0.1`; PID stayed 860/run 1 | a 12,628-character Slate refresh opened session `7B866659-…`; cold away session `61EA960B-…` opened from `10.86.0.2` and streamed to `done` |
+| reboot 2, pre-login | no login-owned daemon | screenshot retained the bounded no-road refusal against three then-known roads |
+| reboot 2, post-login untouched | exactly one PID 989/run 1; both listeners/model returned; mesh was absent | 10,508-character Slate completion; session `EED3F4F6-…` opened from `192.168.8.225` |
+| reboot 2, late mesh | `utun4` acquired `10.86.0.1`; PID stayed 989/run 1 | a 14,882-character Slate refresh opened session `887817B1-…`; cold away session `585F8035-…` opened from `10.86.0.2`, reattached at seq 143, 231, 486 and 1112, and streamed to `done` |
+
+The installed repeat strengthens the privilege finding. The pre-change
+logout observations happened to retain the user-space WireGuard interface;
+both installed logout trials did not. Interface survival across logout is not
+a contract and must not be inferred from one run. Automatic mesh bootstrap
+must cover every supported login transition, while service status must keep
+reporting a running daemon with no mesh as incomplete away readiness.
+
+The four CA/server fingerprints remained byte-identical throughout, the
+device registry and WireGuard host public identity were unchanged, no phone
+re-paired, and `cluster CA created` remained zero. The final installed
+`doctor --dial` reported 11 pass, four expected warnings, zero waiting and
+zero fail; its diagnostic identity hit the attributed intermittent
+`SecPKCS12Import` `-25291` seam, while the normally signed Example completed
+authenticated LAN and mesh sessions in the same installed state. An earlier
+installed diagnostic dial had completed successfully before the disruptive
+matrix.

@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 /// The launchd agent that keeps the daemon running, as data.
@@ -8,27 +9,78 @@ import Foundation
 ///
 /// ## Why an agent and not a daemon
 ///
-/// A `LaunchDaemon` starts at boot without anyone logging in, which is what
-/// you actually want from a cluster. It cannot have it here, for two reasons
-/// that are both about where the cluster's keys live:
+/// Login ownership is the selected product contract. The cluster's state,
+/// model process and operator commands belong to one user and one `gui/<uid>`
+/// domain; pre-login serving is deliberately unsupported. The listener leaf
+/// is imported from disk into process memory, not stored in the login
+/// keychain, so keychain folklore is not the reason for this boundary.
 ///
-/// 1. **The login keychain.** `IdentityMaterializer` imports the listener's
-///    identity into it on every start, and a root `LaunchDaemon` has no
-///    login keychain to import into. That identity is the cluster's TLS
-///    identity — without it there is no listener at all.
-/// 2. **The state directory.** `DaemonInfo.stateDirectory` resolves the home
-///    directory through `FileManager`, which reads the password database and
-///    ignores `HOME`. As root that is `/var/root/Library/Application
-///    Support`, where `serve` would find no CA and **mint a fresh one** —
-///    not a broken service but a *different cluster*, with every paired
-///    phone orphaned and every grant void. `REACH_STATE_DIR` can point that
-///    back; the keychain cannot be pointed anywhere.
-///
-/// So: an agent, starting at login rather than at boot. Worth saying plainly
-/// rather than implying a Mac that has rebooted is serving before someone
-/// has sat down at it.
+/// A root process without an explicit state path would resolve `/var/root`,
+/// mint a different CA, and silently become a different cluster. The agent
+/// therefore pins `REACH_STATE_DIR` explicitly and the CLI refuses ambiguous
+/// root entry before touching configuration or CA state. Privileged
+/// WireGuard activation remains a separate authority: the current Homebrew
+/// script and user-owned hook-capable config are not safe LaunchAgent inputs.
 public enum LaunchAgent {
     public static let label = "systems.reach.reachd"
+
+    /// The complete login-owned launch contract, before any filesystem IO.
+    ///
+    /// `uid` and `domain` do not become redundant merely because launchd can
+    /// infer them: service installation, status and removal must all name the
+    /// same bootstrap namespace. Keeping the paths here also makes the plist
+    /// serializer a mechanical encoding step rather than another authority.
+    package struct Definition: Sendable, Equatable {
+        package let uid: uid_t
+        package let domain: String
+        package let executable: String
+        package let stateDirectory: URL
+        package let logURL: URL
+        package let runAtLoad: Bool
+        package let keepAlive: Bool
+        package let throttleInterval: Int
+        package let processType: String
+
+        package var serviceTarget: String { "\(domain)/\(LaunchAgent.label)" }
+
+        package func propertyListData() throws -> Data {
+            let propertyList: [String: Any] = [
+                "Label": LaunchAgent.label,
+                "ProgramArguments": [executable, "serve"],
+                "EnvironmentVariables": [DaemonInfo.stateEnvironmentKey: stateDirectory.path],
+                "RunAtLoad": runAtLoad,
+                "KeepAlive": keepAlive,
+                "ThrottleInterval": throttleInterval,
+                "StandardOutPath": logURL.path,
+                "StandardErrorPath": logURL.path,
+                "ProcessType": processType,
+            ]
+            return try PropertyListSerialization.data(
+                fromPropertyList: propertyList,
+                format: .xml,
+                options: 0
+            )
+        }
+    }
+
+    package static func definition(
+        executable: String,
+        uid: uid_t = getuid(),
+        stateDirectory: URL = DaemonInfo.stateDirectory,
+        home: URL? = nil
+    ) -> Definition {
+        Definition(
+            uid: uid,
+            domain: "gui/\(uid)",
+            executable: executable,
+            stateDirectory: stateDirectory,
+            logURL: logURL(home: home),
+            runAtLoad: true,
+            keepAlive: true,
+            throttleInterval: 10,
+            processType: "Interactive"
+        )
+    }
 
     public static func plistURL(home: URL? = nil) -> URL {
         (home ?? FileManager.default.homeDirectoryForCurrentUser)
@@ -91,33 +143,84 @@ public enum LaunchAgent {
     /// Both output paths are set because every line the daemon writes is
     /// `print` or stderr, and under launchd those go nowhere by default.
     public static func plist(executable: String, home: URL? = nil) -> String {
-        """
-        <?xml version="1.0" encoding="UTF-8"?>
-        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-        <plist version="1.0">
-        <dict>
-            <key>Label</key>
-            <string>\(label)</string>
-            <key>ProgramArguments</key>
-            <array>
-                <string>\(executable)</string>
-                <string>serve</string>
-            </array>
-            <key>RunAtLoad</key>
-            <true/>
-            <key>KeepAlive</key>
-            <true/>
-            <key>ThrottleInterval</key>
-            <integer>10</integer>
-            <key>StandardOutPath</key>
-            <string>\(logURL(home: home).path)</string>
-            <key>StandardErrorPath</key>
-            <string>\(logURL(home: home).path)</string>
-            <key>ProcessType</key>
-            <string>Interactive</string>
-        </dict>
-        </plist>
-        """
+        // Preserve the existing source-compatible helper while making
+        // PropertyListSerialization the one encoder. Every value in the
+        // definition is a property-list primitive, so failure here would be a
+        // programmer error rather than an operator input failure; the service
+        // command uses the throwing `propertyListData()` path directly.
+        String(
+            decoding: try! definition(
+                executable: executable,
+                stateDirectory: DaemonInfo.stateDirectory,
+                home: home
+            ).propertyListData(),
+            as: UTF8.self
+        )
+    }
+
+    package static func stateDirectory(inPlist data: Data) -> URL? {
+        guard let dictionary = try? PropertyListSerialization.propertyList(
+            from: data,
+            options: [],
+            format: nil
+        ) as? [String: Any],
+        let environment = dictionary["EnvironmentVariables"] as? [String: String],
+        let path = environment[DaemonInfo.stateEnvironmentKey],
+        !path.isEmpty
+        else { return nil }
+        return URL(fileURLWithPath: path, isDirectory: true)
+    }
+
+    /// Pure status rendering: a loaded process and an away-ready host are
+    /// separate facts. `service status` supplies launchctl output and the
+    /// current address set; tests can hold every sentence without a live job.
+    package static func statusLines(
+        definition: Definition,
+        installedPath: String?,
+        launchctlOutput: String?,
+        addresses: [[UInt8]]
+    ) -> [String] {
+        var lines = [
+            "[reachd] owner: login uid \(definition.uid), domain \(definition.domain)",
+            "[reachd] state: \(definition.stateDirectory.path) (explicit \(DaemonInfo.stateEnvironmentKey))",
+            "[reachd] log: \(definition.logURL.path)",
+            "[reachd] plist: \(installedPath ?? "not installed")",
+        ]
+        if let launchctlOutput {
+            let state = launchctlOutput
+                .split(separator: "\n")
+                .first { $0.contains("state = ") || $0.contains("pid = ") }
+                .map { $0.trimmingCharacters(in: .whitespaces) } ?? "loaded"
+            lines.append("[reachd] agent: \(state)")
+        } else {
+            lines.append("[reachd] agent: not loaded")
+        }
+
+        let mesh = addresses.first { $0.count == 4 && $0[0] == 10 && $0[1] == 86 }
+        if let mesh {
+            lines.append("[reachd] mesh: ready — \(mesh.map(String.init).joined(separator: ".")) is present")
+        } else {
+            lines.append("[reachd] mesh: missing — the login service may answer on LAN, but away readiness is incomplete")
+        }
+        return lines
+    }
+}
+
+/// Entry guards for the selected login-owned contract.
+package enum LoginOwnedHost {
+    package static func authorizeServiceInstall(effectiveUID: uid_t) throws {
+        guard effectiveUID != 0 else { throw ServiceError.rootInstall }
+    }
+
+    package static func authorizeServe(
+        effectiveUID: uid_t,
+        environment: [String: String]
+    ) throws {
+        guard effectiveUID == 0 else { return }
+        let override = environment[DaemonInfo.stateEnvironmentKey] ?? ""
+        guard !override.isEmpty, override.hasPrefix("/") else {
+            throw ServiceError.rootServeNeedsExplicitState
+        }
     }
 }
 
@@ -126,6 +229,8 @@ public enum ServiceError: Error, Sendable, Equatable, CustomStringConvertible, L
     case buildPath(String)
     case missingResources(String)
     case launchctlRefused(String)
+    case rootInstall
+    case rootServeNeedsExplicitState
 
     public var description: String {
         switch self {
@@ -137,6 +242,10 @@ public enum ServiceError: Error, Sendable, Equatable, CustomStringConvertible, L
             "\(path) has no mlx-swift_Cmlx.bundle beside it — reachd is not a single file, and without its resource bundles it starts, says it is serving, and then dies loading the model. Copy the whole build directory's bundles alongside the binary, not just the binary"
         case .launchctlRefused(let detail):
             "launchd would not take the agent: \(detail)"
+        case .rootInstall:
+            "service install is login-owned and refuses root — run it as the user whose gui domain and Reach state should own the cluster"
+        case .rootServeNeedsExplicitState:
+            "root serve refuses an implicit state directory — set REACH_STATE_DIR to an explicit absolute scratch path; pre-login serving is unsupported"
         }
     }
 

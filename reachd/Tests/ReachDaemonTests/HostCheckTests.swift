@@ -629,6 +629,12 @@ import Testing
 /// went to a bin directory on its own, launchd started it, it printed that
 /// it was serving, bound the port, and died on the metallib.
 @Suite struct LaunchAgentInstallTests {
+    private func propertyList(_ data: Data) throws -> [String: Any] {
+        try #require(
+            try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
+        )
+    }
+
     private func stage(_ files: [String]) throws -> URL {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("reach-agent-\(UUID())", isDirectory: true)
@@ -678,18 +684,105 @@ import Testing
     /// which is the likeliest unplanned death of a process holding several
     /// gigabytes of weights. A supervisor cannot be selective about which
     /// deaths count.
-    @Test func theAgentComesBackFromAnyDeath() {
-        let plist = LaunchAgent.plist(executable: "/usr/local/bin/reachd")
+    @Test func theAgentComesBackFromAnyDeath() throws {
+        let plist = try propertyList(Data(LaunchAgent.plist(executable: "/usr/local/bin/reachd").utf8))
+        #expect(plist["Crashed"] == nil, "Crashed does not cover SIGKILL")
+        #expect(plist["SuccessfulExit"] == nil)
+        #expect(plist["KeepAlive"] as? Bool == true)
         #expect(
-            !plist.contains("<key>Crashed</key>"),
-            "Crashed does not cover SIGKILL, which is how this daemon most plausibly dies"
-        )
-        #expect(!plist.contains("SuccessfulExit"))
-        #expect(plist.contains("<key>KeepAlive</key>\n    <true/>"))
-        #expect(
-            plist.contains("<key>ThrottleInterval</key>"),
+            plist["ThrottleInterval"] as? Int == 10,
             "unconditional restart needs a floor, or a permanently held port spins"
         )
-        #expect(plist.contains("<key>StandardOutPath</key>"), "print goes nowhere under launchd otherwise")
+        #expect(plist["RunAtLoad"] as? Bool == true)
+        #expect(plist["ProcessType"] as? String == "Interactive")
+        #expect(plist["StandardOutPath"] != nil, "print goes nowhere under launchd otherwise")
+        #expect(plist["StandardErrorPath"] != nil)
+    }
+
+    @Test func theLaunchDefinitionNamesOneLoginOwnerAndOneStateRoot() throws {
+        let home = URL(fileURLWithPath: "/Users/Reach Owner", isDirectory: true)
+        let state = home.appendingPathComponent("Library/Application Support/Reach & Co", isDirectory: true)
+        let executable = "/Applications/Reach & Tools/reachd"
+        let definition = LaunchAgent.definition(
+            executable: executable,
+            uid: 501,
+            stateDirectory: state,
+            home: home
+        )
+
+        #expect(definition.uid == 501)
+        #expect(definition.domain == "gui/501")
+        #expect(definition.serviceTarget == "gui/501/\(LaunchAgent.label)")
+        #expect(definition.executable == executable)
+        #expect(definition.stateDirectory == state)
+        #expect(definition.logURL.path == "/Users/Reach Owner/Library/Logs/reachd.log")
+
+        let data = try definition.propertyListData()
+        let plist = try propertyList(data)
+        #expect(plist["ProgramArguments"] as? [String] == [executable, "serve"])
+        let environment = try #require(plist["EnvironmentVariables"] as? [String: String])
+        #expect(environment[DaemonInfo.stateEnvironmentKey] == state.path)
+        #expect(LaunchAgent.stateDirectory(inPlist: data) == state)
+
+        let xml = String(decoding: data, as: UTF8.self)
+        #expect(xml.contains("Reach &amp; Tools"), "PropertyListSerialization must escape paths")
+        #expect(xml.contains("Reach &amp; Co"))
+    }
+
+    @Test func rootEntryRefusesBeforeAStateDirectoryCanBeMutated() throws {
+        let state = FileManager.default.temporaryDirectory
+            .appendingPathComponent("reach-root-refusal-\(UUID())", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: state) }
+
+        #expect(throws: ServiceError.rootInstall) {
+            try LoginOwnedHost.authorizeServiceInstall(effectiveUID: 0)
+            try FileManager.default.createDirectory(at: state, withIntermediateDirectories: true)
+        }
+        #expect(!FileManager.default.fileExists(atPath: state.path))
+
+        #expect(throws: ServiceError.rootServeNeedsExplicitState) {
+            try LoginOwnedHost.authorizeServe(effectiveUID: 0, environment: [:])
+        }
+        #expect(throws: ServiceError.rootServeNeedsExplicitState) {
+            try LoginOwnedHost.authorizeServe(
+                effectiveUID: 0,
+                environment: [DaemonInfo.stateEnvironmentKey: "relative-state"]
+            )
+        }
+
+        try LoginOwnedHost.authorizeServe(
+            effectiveUID: 0,
+            environment: [DaemonInfo.stateEnvironmentKey: state.path]
+        )
+        try LoginOwnedHost.authorizeServe(effectiveUID: 501, environment: [:])
+    }
+
+    @Test func serviceStatusSeparatesProcessStateFromMeshReadiness() {
+        let definition = LaunchAgent.definition(
+            executable: "/opt/reach/reachd",
+            uid: 501,
+            stateDirectory: URL(fileURLWithPath: "/Users/cassie/Reach State", isDirectory: true),
+            home: URL(fileURLWithPath: "/Users/cassie", isDirectory: true)
+        )
+        let loaded = "state = running\npid = 42\n"
+        let ready = LaunchAgent.statusLines(
+            definition: definition,
+            installedPath: "/Users/cassie/Library/LaunchAgents/\(LaunchAgent.label).plist",
+            launchctlOutput: loaded,
+            addresses: [[127, 0, 0, 1], [10, 86, 0, 1]]
+        )
+        #expect(ready.contains { $0.contains("login uid 501, domain gui/501") })
+        #expect(ready.contains { $0.contains("explicit REACH_STATE_DIR") })
+        #expect(ready.contains { $0.contains("agent: state = running") })
+        #expect(ready.contains { $0.contains("mesh: ready") && $0.contains("10.86.0.1") })
+
+        let missing = LaunchAgent.statusLines(
+            definition: definition,
+            installedPath: nil,
+            launchctlOutput: loaded,
+            addresses: [[127, 0, 0, 1], [192, 168, 8, 210]]
+        )
+        #expect(missing.contains { $0.contains("plist: not installed") })
+        #expect(missing.contains { $0.contains("mesh: missing") && $0.contains("away readiness is incomplete") })
     }
 }

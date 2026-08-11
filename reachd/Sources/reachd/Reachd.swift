@@ -23,6 +23,15 @@ struct Serve: AsyncParsableCommand {
     var noAdvertise = false
 
     func run() async throws {
+        // This is the first operation with authority over cluster state.
+        // Root's implicit Application Support path is /var/root, where the
+        // ordinary first-run path would mint a second CA before an operator
+        // saw the mistake. An explicit absolute REACH_STATE_DIR is the one
+        // allowed scratch/system-context escape hatch.
+        try LoginOwnedHost.authorizeServe(
+            effectiveUID: geteuid(),
+            environment: ProcessInfo.processInfo.environment
+        )
         // stdout to a *file* is block-buffered, and a daemon that prints four
         // lines at startup never fills a 4 KB buffer — so under launchd,
         // where `StandardOutPath` is the only way to read those lines at all,

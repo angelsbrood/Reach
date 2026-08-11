@@ -106,7 +106,8 @@ needs no `sudo`; either works. `service install` refuses a binary with no
 `mlx-swift_Cmlx.bundle` beside it, and refuses one inside a build directory:
 `~/Library/Caches` is purgeable — macOS reclaims it under disk pressure
 without asking — so an agent pointed there works until the day it silently
-does not.
+does not. It also refuses to install as root: the service belongs to one login
+user and one `gui/<uid>` domain.
 
 The installed command normalizes its executable identity before argument
 parsing or MLX access. These all reach the same binary and the same seven
@@ -154,7 +155,15 @@ just done:
    host and were all green, five separate times on 6 August 2026, over a
    cluster that could not serve a client.
 
-`reachd service status` reports whether it is installed and loaded;
+`reachd service status` reports the owning login UID and `gui/<uid>` domain,
+the exact state and log paths, whether the agent is loaded, and separately
+whether a `10.86.0.x` mesh address is present. A running PID with a missing
+mesh is explicitly incomplete away readiness, not a healthy service inferred
+from process state. `reachd service install` writes the plist through
+`PropertyListSerialization` and pins the user's existing state with an
+explicit `REACH_STATE_DIR`; paths containing spaces or XML-significant
+characters are data, not hand-built XML.
+
 `reachd service uninstall` removes it. Output goes to
 `~/Library/Logs/reachd.log`, because every line the daemon writes is `print`
 or stderr and launchd sends those nowhere by default. `serve` line-buffers
@@ -163,24 +172,25 @@ would fill it only when the process died, which is the wrong way round.
 
 ### It starts at login, not at boot
 
-This is a **LaunchAgent**, and the reason is where the cluster's keys live.
+This is deliberately a **login-owned LaunchAgent**. A Mac that has rebooted
+does not serve at the login screen; it begins serving after the owning user
+logs in and the `gui/<uid>` domain exists. Two physical reboot trials showed
+that exact bounded refusal before login and one automatically supervised
+daemon after login.
 
-A `LaunchDaemon` would start at boot without anyone logging in, which is what
-you actually want from a cluster. It cannot, for two reasons:
+The reason is the selected ownership contract, not a login-keychain
+requirement. The cluster state, operator commands, and MLX/Metal process belong
+to one user. The listener leaf is loaded from that user's disk state and
+imported into process memory with `kSecImportToMemoryOnly`. A root process with
+no explicit state path would instead resolve `/var/root/Library/Application
+Support`, mint a different CA, and silently become a different cluster.
 
-1. **The login keychain.** The listener's TLS identity is imported into it on
-   every start. A root `LaunchDaemon` has no login keychain to import into,
-   and without that identity there is no listener at all.
-2. **The state directory.** It resolves the home directory through the
-   password database, ignoring `HOME`. As root that is
-   `/var/root/Library/Application Support`, where `serve` finds no CA and
-   **mints a fresh one** — not a broken service but a *different cluster*,
-   with every paired phone orphaned and every grant void. `REACH_STATE_DIR`
-   can point the directory back; the keychain cannot be pointed anywhere.
-
-So a Mac that has rebooted serves once somebody has logged in. Moving key
-material off the login keychain is what would change that, and it has not
-been done.
+Accordingly, `service install` refuses root, and `reachd serve` refuses root
+unless `REACH_STATE_DIR` names an explicit absolute state directory. That
+override is for controlled scratch/system-context work; it does not make
+pre-login serving supported. The generated agent always sets
+`REACH_STATE_DIR` to the owning user's existing Reach directory, so launchd
+never guesses which cluster it should start.
 
 ### What closing the lid does
 
@@ -214,12 +224,17 @@ covers a process death. If the listener is absent after wake, inspect
 `reachd doctor --dial` rather than assuming sleep was healthy because the PID
 now exists.
 
-Sleep also does not erase the login boundary above. A reboot observed during
-the same measurement returned the LaunchAgent after login, but did not raise
-`reach0`; the mesh required `sudo wg-quick up reach0` and a daemon restart so
-the new serving artifact advertised `10.86.0.1`. Automatic mesh bootstrap,
-logout, fast user switching, OS updates and keychain migration remain broader
-host-lifecycle work, not sleep behavior.
+Sleep also does not erase the login boundary above. The later S23 lifecycle
+matrix repeated lock once, logout/login twice, and reboot/pre-login/login
+twice. Lock preserved the same daemon; each login created exactly one new
+supervised daemon with unchanged state. Both reboots returned the LaunchAgent
+after login but did not raise WireGuard. Raising `reach0` manually after the
+daemon started worked without a daemon restart: the wildcard listener accepted
+the mesh road immediately, and the next authenticated hello advertised the
+new address. The final installed repeat also lost the mesh on both
+logout/login cycles, even though the earlier measurement happened to retain
+it. Interface survival across logout is therefore not a supported contract.
+Fast user switching and OS-update survival remain unmeasured.
 
 ### What it restarts
 
@@ -244,9 +259,18 @@ lands in the log at the same pace. `lsof -nP -iUDP:47337` finds who has it.
 
 ### The mesh road is still yours to raise
 
-`wg-quick up reach0` wants a password, so it is not in the agent. Until it is
-up, the daemon serves on the LAN and has nothing to fall to at a walk-out.
-`reachd doctor` checks the interface.
+`wg-quick up reach0` wants root, so it is not in the agent. That separation is
+intentional: the current Homebrew script executes hook fields and the current
+configuration is user-owned, so an unattended root job consuming it would be
+a privilege-escalation path. Automatic bootstrap needs a trusted installation
+and sanitized structured configuration of its own.
+
+Until the interface is up, the daemon may serve on LAN but has no mesh road to
+fall to. `reachd doctor` and `reachd service status` both distinguish that
+state. Once WireGuard rises, **do not restart `reachd`**: every authenticated
+hello recomputes current addresses. A phone already away cannot learn an
+address that appeared after its last hello; let it authenticate once on LAN or
+another surviving road, then its next cold away launch can use `10.86.0.1`.
 
 ## What a restart costs
 

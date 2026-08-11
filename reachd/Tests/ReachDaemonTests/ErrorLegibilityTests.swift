@@ -89,6 +89,8 @@ import Testing
         ServiceError.notExecutable("/usr/local/bin/reachd"),
         ServiceError.missingResources("/usr/local/bin/reachd"),
         ServiceError.launchctlRefused("Load failed: 5: Input/output error"),
+        ServiceError.rootInstall,
+        ServiceError.rootServeNeedsExplicitState,
         ReachEnrollmentError.badCAHash,
         ReachEnrollmentError.refused(code: "grant-denied", message: "the ruling was no"),
         ReachEnrollmentError.sequence("expected EnrollGrant"),

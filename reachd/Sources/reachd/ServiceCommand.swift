@@ -30,36 +30,44 @@ struct Service: AsyncParsableCommand {
         var noLoad = false
 
         func run() async throws {
+            // Before directory creation, plist writes, config reads or CA
+            // creation: a LaunchAgent belongs to a login user and gui domain.
+            try LoginOwnedHost.authorizeServiceInstall(effectiveUID: geteuid())
             let resolved = try LaunchAgent.executablePath(
                 executable ?? ProcessInfo.processInfo.arguments[0]
+            )
+            let definition = LaunchAgent.definition(
+                executable: resolved,
+                uid: getuid(),
+                stateDirectory: DaemonInfo.stateDirectory
             )
             let plistURL = LaunchAgent.plistURL()
             try FileManager.default.createDirectory(
                 at: plistURL.deletingLastPathComponent(),
                 withIntermediateDirectories: true
             )
-            try LaunchAgent.plist(executable: resolved)
-                .write(to: plistURL, atomically: true, encoding: .utf8)
+            try definition.propertyListData().write(to: plistURL, options: .atomic)
             print("[reachd] wrote \(plistURL.path)")
 
             guard !noLoad else {
-                print("[reachd] not loaded — run: launchctl bootstrap gui/$(id -u) \(plistURL.path)")
+                print("[reachd] not loaded — run: launchctl bootstrap \(definition.domain) \(plistURL.path)")
                 return
             }
             // Booting out first makes this re-runnable: an install over an
             // older agent otherwise fails with launchd's "service already
             // loaded", which reads as a problem and is not one.
-            _ = try? Service.launchctl(["bootout", "gui/\(getuid())/\(LaunchAgent.label)"])
-            let result = try Service.launchctl(["bootstrap", "gui/\(getuid())", plistURL.path])
+            _ = try? Service.launchctl(["bootout", definition.serviceTarget])
+            let result = try Service.launchctl(["bootstrap", definition.domain, plistURL.path])
             guard result.status == 0 else {
                 throw ServiceError.launchctlRefused(
                     result.output.isEmpty ? "exit \(result.status)" : result.output
                 )
             }
-            print("[reachd] agent loaded — it starts at login and restarts if it dies")
-            print("[reachd] log: \(LaunchAgent.logURL().path)")
-            print("[reachd] ⚠️ at login, not at boot: the cluster's identity lives in the login keychain")
-            print("[reachd] ⚠️ the mesh road still needs `wg-quick up reach0`, which wants a password and so is not in the agent")
+            print("[reachd] agent loaded in \(definition.domain) — it starts at login and restarts if it dies")
+            print("[reachd] state: \(definition.stateDirectory.path) (explicit \(DaemonInfo.stateEnvironmentKey))")
+            print("[reachd] log: \(definition.logURL.path)")
+            print("[reachd] ⚠️ pre-login serving is unsupported: the login domain does not exist before sign-in")
+            print("[reachd] ⚠️ privileged mesh bootstrap is separate and not installed by this command")
         }
     }
 
@@ -69,7 +77,12 @@ struct Service: AsyncParsableCommand {
         )
 
         func run() async throws {
-            _ = try? Service.launchctl(["bootout", "gui/\(getuid())/\(LaunchAgent.label)"])
+            let definition = LaunchAgent.definition(
+                executable: ProcessInfo.processInfo.arguments[0],
+                uid: getuid(),
+                stateDirectory: DaemonInfo.stateDirectory
+            )
+            _ = try? Service.launchctl(["bootout", definition.serviceTarget])
             let plistURL = LaunchAgent.plistURL()
             if FileManager.default.fileExists(atPath: plistURL.path) {
                 try FileManager.default.removeItem(at: plistURL)
@@ -89,16 +102,22 @@ struct Service: AsyncParsableCommand {
         func run() async throws {
             let plistURL = LaunchAgent.plistURL()
             let installed = FileManager.default.fileExists(atPath: plistURL.path)
-            print("[reachd] plist: \(installed ? plistURL.path : "not installed")")
-            let result = try Service.launchctl(["print", "gui/\(getuid())/\(LaunchAgent.label)"])
-            if result.status == 0 {
-                let state = result.output
-                    .split(separator: "\n")
-                    .first { $0.contains("state = ") || $0.contains("pid = ") }
-                    .map { $0.trimmingCharacters(in: .whitespaces) } ?? "loaded"
-                print("[reachd] agent: \(state)")
-            } else {
-                print("[reachd] agent: not loaded")
+            let installedState = (try? Data(contentsOf: plistURL))
+                .flatMap(LaunchAgent.stateDirectory(inPlist:))
+            let definition = LaunchAgent.definition(
+                executable: ProcessInfo.processInfo.arguments[0],
+                uid: getuid(),
+                stateDirectory: installedState ?? DaemonInfo.stateDirectory
+            )
+            let result = try Service.launchctl(["print", definition.serviceTarget])
+            let lines = LaunchAgent.statusLines(
+                definition: definition,
+                installedPath: installed ? plistURL.path : nil,
+                launchctlOutput: result.status == 0 ? result.output : nil,
+                addresses: LocalAddresses.ipv4()
+            )
+            for line in lines {
+                print(line)
             }
         }
     }

@@ -23,6 +23,25 @@ private func withTimeout<T: Sendable>(
     }
 }
 
+private final class MutableAddressSource: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: [[UInt8]]
+
+    init(_ value: [[UInt8]]) { self.value = value }
+
+    func read() -> [[UInt8]] {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+
+    func replace(with value: [[UInt8]]) {
+        lock.lock()
+        self.value = value
+        lock.unlock()
+    }
+}
+
 @Suite struct ClusterCATests {
     @Test func issuedChainsVerifyAgainstTheRoot() async throws {
         let ca = try ClusterCA.create(commonName: "Reach Test CA")
@@ -426,5 +445,54 @@ final class IdentityBin: @unchecked Sendable {
         try await compatible.send(SessionOpen(modelID: "scripted"), for: ack.version)
         _ = try (try #require(try await frames.next())).decode(SessionOpened.self)
         #expect(await registry.residentSessions == 1)
+    }
+
+    @Test func aLaterAuthenticatedHelloLearnsAnAddressThatAppearedAfterStartup() async throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+
+        let addresses = MutableAddressSource([[127, 0, 0, 1]])
+        var config = DaemonConfig()
+        config.port = TestPorts.port(47459)
+        config.clusterName = "late-road-test"
+        let daemon = Daemon(
+            config: config,
+            filling: ScriptedFilling(),
+            identity: Daemon.ListenerIdentity(
+                identity: fixture.serverIdentity,
+                caCertificate: fixture.caCert
+            ),
+            currentAddresses: { addresses.read() }
+        )
+        try await daemon.start(advertise: false)
+        defer { Task { await daemon.stop() } }
+
+        let dialer = QUICDialer(
+            endpoint: .hostPort(
+                host: "127.0.0.1",
+                port: .init(rawValue: TestPorts.port(47459))!
+            ),
+            parameters: .reachQUIC(options: TLSBuilder.clientOptions(
+                alpn: Wire.alpn,
+                identity: fixture.clientIdentity,
+                serverTrustRoots: [fixture.caCert]
+            ))
+        )
+
+        func hello() async throws -> HelloAck {
+            let stream = try await dialer.openStream(timeout: 45)
+            defer { stream.cancel() }
+            var frames = stream.frames.makeAsyncIterator()
+            try await stream.send(Hello(client: "late-road-test"))
+            return try (try #require(try await frames.next())).decode(HelloAck.self)
+        }
+
+        let before = try await hello()
+        #expect(!(before.roads ?? []).contains { $0.host == "10.86.0.1" })
+
+        addresses.replace(with: [[127, 0, 0, 1], [10, 86, 0, 1]])
+        let after = try await hello()
+        #expect((after.roads ?? []).contains { $0.host == "10.86.0.1" && $0.port == config.port })
+        #expect(after.addrs?.contains("10.86.0.1") == true)
     }
 }

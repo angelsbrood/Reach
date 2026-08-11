@@ -9,22 +9,21 @@ import Security
 public enum DaemonInfo {
     public static let version = "0.0.1"
     public static let wireVersion = Wire.version
+    public static let stateEnvironmentKey = "REACH_STATE_DIR"
 
     /// Runtime state root; never inside the repository. `REACH_STATE_DIR`
     /// overrides it, because `applicationSupportDirectory` resolves the home
     /// directory from the password database and ignores `HOME`.
     ///
-    /// It is not how the tests reach throwaway state — they pass a path in,
-    /// through `HostCheck.examine(stateDirectory:)`, `DaemonConfig`'s
-    /// `in:`/`from:`/`to:`, and `reachd doctor --state`. Nothing in the tree
-    /// sets this variable, and the generated LaunchAgent deliberately does
-    /// not: the subcommands resolve their own state root from the operator's
-    /// shell, so an override the agent alone saw would split `reachd pair`'s
-    /// CA from the one the running daemon serves. It survives as the
-    /// documented lever for the LaunchDaemon question, which
-    /// `docs/running.md` describes and §3 left at login-not-boot.
+    /// It is not how tests reach throwaway state — they pass a path through
+    /// `HostCheck.examine(stateDirectory:)`, `DaemonConfig`'s
+    /// `in:`/`from:`/`to:`, and `reachd doctor --state`. The generated
+    /// LaunchAgent *does* set this variable to the same user Application
+    /// Support path the CLI resolves, making the service's state identity
+    /// explicit rather than dependent on ambient home resolution. Root serve
+    /// is accepted only when this variable names an explicit path.
     public static var stateDirectory: URL {
-        if let override = ProcessInfo.processInfo.environment["REACH_STATE_DIR"], !override.isEmpty {
+        if let override = ProcessInfo.processInfo.environment[stateEnvironmentKey], !override.isEmpty {
             return URL(fileURLWithPath: override, isDirectory: true)
         }
         return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -126,6 +125,7 @@ public final class Daemon: Sendable {
     private let tls: ListenerIdentity
     private let grants: GrantWiring?
     private let reachability: ReachabilityCoordinator?
+    private let currentAddresses: @Sendable () -> [[UInt8]]
     private let state = StateBox()
 
     public init(
@@ -142,6 +142,28 @@ public final class Daemon: Sendable {
         self.tls = identity
         self.grants = grants
         self.reachability = reachability
+        self.currentAddresses = LocalAddresses.ipv4
+    }
+
+    /// Test-only/package seam for the fact authenticated hellos read the
+    /// address set *now*, not the set that existed when the listener started.
+    /// The public initializer above is intentionally unchanged.
+    package init(
+        config: DaemonConfig,
+        filling: any SlotFilling,
+        identity: ListenerIdentity,
+        registry: SessionRegistry = SessionRegistry(),
+        grants: GrantWiring? = nil,
+        reachability: ReachabilityCoordinator? = nil,
+        currentAddresses: @escaping @Sendable () -> [[UInt8]]
+    ) {
+        self.config = config
+        self.filling = filling
+        self.registry = registry
+        self.tls = identity
+        self.grants = grants
+        self.reachability = reachability
+        self.currentAddresses = currentAddresses
     }
 
     /// Starts listening (and advertising, unless disabled for tests).
@@ -301,7 +323,7 @@ public final class Daemon: Sendable {
         iterator: inout AsyncThrowingStream<RawFrame, Error>.AsyncIterator,
         version: UInt8
     ) async throws -> FrameEnding {
-        let localAddresses = LocalAddresses.ipv4().map { $0.map(String.init).joined(separator: ".") }
+        let localAddresses = currentAddresses().map { $0.map(String.init).joined(separator: ".") }
         let advertisement = Self.roadAdvertisement(
             localAddresses: localAddresses,
             port: config.port,
