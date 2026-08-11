@@ -66,7 +66,7 @@ public enum LaunchAgent {
     package static func definition(
         executable: String,
         uid: uid_t = getuid(),
-        stateDirectory: URL = DaemonInfo.stateDirectory,
+        stateDirectory: URL = DaemonInfo.canonicalLoginStateDirectory,
         home: URL? = nil
     ) -> Definition {
         Definition(
@@ -151,38 +151,106 @@ public enum LaunchAgent {
         String(
             decoding: try! definition(
                 executable: executable,
-                stateDirectory: DaemonInfo.stateDirectory,
+                stateDirectory: DaemonInfo.canonicalLoginStateDirectory,
                 home: home
             ).propertyListData(),
             as: UTF8.self
         )
     }
 
-    package static func stateDirectory(inPlist data: Data) -> URL? {
-        guard let dictionary = try? PropertyListSerialization.propertyList(
-            from: data,
-            options: [],
-            format: nil
-        ) as? [String: Any],
-        let environment = dictionary["EnvironmentVariables"] as? [String: String],
-        let path = environment[DaemonInfo.stateEnvironmentKey],
-        !path.isEmpty
-        else { return nil }
-        return URL(fileURLWithPath: path, isDirectory: true)
+    package enum InstalledState: Sendable, Equatable {
+        case notInstalled
+        case valid(serializedPath: String, stateDirectory: URL)
+        case invalid(String)
+    }
+
+    package static func installedState(
+        at plistURL: URL,
+        fileExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) },
+        readData: (URL) throws -> Data = { try Data(contentsOf: $0) }
+    ) -> InstalledState {
+        guard fileExists(plistURL.path) else {
+            return .notInstalled
+        }
+        do {
+            return installedState(inPlist: try readData(plistURL))
+        } catch {
+            return .invalid("could not read \(plistURL.path): \(error)")
+        }
+    }
+
+    package static func installedState(inPlist data: Data) -> InstalledState {
+        let propertyList: Any
+        do {
+            propertyList = try PropertyListSerialization.propertyList(
+                from: data,
+                options: [],
+                format: nil
+            )
+        } catch {
+            return .invalid("not a valid property list: \(error)")
+        }
+        guard let dictionary = propertyList as? [String: Any] else {
+            return .invalid("the property list root is not a dictionary")
+        }
+        guard let environment = dictionary["EnvironmentVariables"] as? [String: Any] else {
+            return .invalid("EnvironmentVariables is missing or is not a dictionary")
+        }
+        guard let rawValue = environment[DaemonInfo.stateEnvironmentKey] else {
+            return .invalid("\(DaemonInfo.stateEnvironmentKey) is missing from EnvironmentVariables")
+        }
+        guard let path = rawValue as? String else {
+            return .invalid("\(DaemonInfo.stateEnvironmentKey) is not a string")
+        }
+        guard !path.isEmpty else {
+            return .invalid("\(DaemonInfo.stateEnvironmentKey) is empty")
+        }
+        guard (path as NSString).isAbsolutePath else {
+            return .invalid("\(DaemonInfo.stateEnvironmentKey) is relative: \"\(path)\"")
+        }
+        return .valid(
+            serializedPath: path,
+            stateDirectory: URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL
+        )
+    }
+
+    package struct StatusReport: Sendable, Equatable {
+        package let lines: [String]
+        package let isStateContractValid: Bool
     }
 
     /// Pure status rendering: a loaded process and an away-ready host are
     /// separate facts. `service status` supplies launchctl output and the
     /// current address set; tests can hold every sentence without a live job.
-    package static func statusLines(
+    package static func status(
         definition: Definition,
+        installedState: InstalledState,
         installedPath: String?,
         launchctlOutput: String?,
         addresses: [[UInt8]]
-    ) -> [String] {
+    ) -> StatusReport {
+        let canonical = definition.stateDirectory.standardizedFileURL
+        let stateLine: String
+        let isStateContractValid: Bool
+        switch installedState {
+        case .notInstalled:
+            stateLine = "[reachd] state: \(canonical.path) (expected if installed; no explicit service contract)"
+            isStateContractValid = true
+        case .valid(let serializedPath, let stateDirectory):
+            if stateDirectory == canonical {
+                stateLine = "[reachd] state: \(serializedPath) (explicit \(DaemonInfo.stateEnvironmentKey))"
+                isStateContractValid = true
+            } else {
+                stateLine = "[reachd] state: invalid — installed \(DaemonInfo.stateEnvironmentKey) is \"\(serializedPath)\"; the login-owned service requires \"\(canonical.path)\""
+                isStateContractValid = false
+            }
+        case .invalid(let reason):
+            stateLine = "[reachd] state: invalid — \(reason)"
+            isStateContractValid = false
+        }
         var lines = [
             "[reachd] owner: login uid \(definition.uid), domain \(definition.domain)",
-            "[reachd] state: \(definition.stateDirectory.path) (explicit \(DaemonInfo.stateEnvironmentKey))",
+            stateLine,
             "[reachd] log: \(definition.logURL.path)",
             "[reachd] plist: \(installedPath ?? "not installed")",
         ]
@@ -196,20 +264,42 @@ public enum LaunchAgent {
             lines.append("[reachd] agent: not loaded")
         }
 
-        let mesh = addresses.first { $0.count == 4 && $0[0] == 10 && $0[1] == 86 }
+        let mesh = addresses.first(where: MeshEndpoint.isReachMeshAddress)
         if let mesh {
             lines.append("[reachd] mesh: ready — \(mesh.map(String.init).joined(separator: ".")) is present")
         } else {
             lines.append("[reachd] mesh: missing — the login service may answer on LAN, but away readiness is incomplete")
         }
-        return lines
+        return StatusReport(lines: lines, isStateContractValid: isStateContractValid)
     }
 }
 
-/// Entry guards for the selected login-owned contract.
+/// Entry guards and state selection for the login-owned contract.
 package enum LoginOwnedHost {
-    package static func authorizeServiceInstall(effectiveUID: uid_t) throws {
+    package static func selectServiceState(
+        effectiveUID: uid_t,
+        environment: [String: String],
+        canonicalState: URL
+    ) throws -> URL {
         guard effectiveUID != 0 else { throw ServiceError.rootInstall }
+        let canonical = canonicalState.standardizedFileURL
+        guard let override = environment[DaemonInfo.stateEnvironmentKey], !override.isEmpty else {
+            return canonical
+        }
+        guard (override as NSString).isAbsolutePath else {
+            throw ServiceStateOverrideError(
+                selected: override,
+                supported: canonical.path
+            )
+        }
+        let selected = URL(fileURLWithPath: override, isDirectory: true).standardizedFileURL
+        guard selected == canonical else {
+            throw ServiceStateOverrideError(
+                selected: override,
+                supported: canonical.path
+            )
+        }
+        return canonical
     }
 
     package static func authorizeServe(
@@ -222,6 +312,23 @@ package enum LoginOwnedHost {
             throw ServiceError.rootServeNeedsExplicitState
         }
     }
+}
+
+package struct ServiceStateOverrideError:
+    Error,
+    Sendable,
+    Equatable,
+    CustomStringConvertible,
+    LocalizedError
+{
+    package let selected: String
+    package let supported: String
+
+    package var description: String {
+        "service install cannot persist REACH_STATE_DIR \"\(selected)\"; the login-owned service supports only \"\(supported)\". Unset REACH_STATE_DIR and try again."
+    }
+
+    package var errorDescription: String? { description }
 }
 
 public enum ServiceError: Error, Sendable, Equatable, CustomStringConvertible, LocalizedError {

@@ -106,10 +106,37 @@ public enum HostCheck {
     /// live interface list without saying so, which is how a suite becomes
     /// green-on-one-machine. The defaults belong on `doctor`'s own options,
     /// where they read as documentation instead of as a trap.
+    package enum SupervisionContext: Sendable, Equatable {
+        case ordinary
+        case explicitScratch
+    }
+
     public static func examine(
         stateDirectory: URL,
         wireGuardConf: String,
         addresses: [[UInt8]],
+        portIsHeld: @Sendable (UInt16) -> Bool = HostCheck.probePort,
+        dial: Dial? = nil
+    ) async -> Report {
+        await examine(
+            stateDirectory: stateDirectory,
+            wireGuardConf: wireGuardConf,
+            addresses: addresses,
+            supervision: .ordinary,
+            supervisionHome: nil,
+            canonicalState: DaemonInfo.canonicalLoginStateDirectory,
+            portIsHeld: portIsHeld,
+            dial: dial
+        )
+    }
+
+    package static func examine(
+        stateDirectory: URL,
+        wireGuardConf: String,
+        addresses: [[UInt8]],
+        supervision: SupervisionContext,
+        supervisionHome: URL? = nil,
+        canonicalState: URL = DaemonInfo.canonicalLoginStateDirectory,
         portIsHeld: @Sendable (UInt16) -> Bool = HostCheck.probePort,
         dial: Dial? = nil
     ) async -> Report {
@@ -156,7 +183,13 @@ public enum HostCheck {
         findings.append(await checkDevices(in: stateDirectory, peers: wireGuard.peers))
         findings.append(contentsOf: portFindings)
         findings.append(contentsOf: checkReachability(in: stateDirectory, daemonUp: daemonUp))
-        findings.append(checkSupervision(daemonUp: daemonUp))
+        findings.append(checkSupervision(
+            daemonUp: daemonUp,
+            examinedState: stateDirectory,
+            context: supervision,
+            home: supervisionHome,
+            canonicalState: canonicalState
+        ))
 
         // Last, and deliberately: everything above says the host is dressed,
         // and this says whether the cluster answers. When the two disagree,
@@ -433,16 +466,23 @@ public enum HostCheck {
         return seconds < 1 ? String(format: "%.0f ms", seconds * 1000) : String(format: "%.1f s", seconds)
     }
 
-    /// Whether anything brings the daemon back.
+    /// Whether anything brings the daemon back, and which cluster it brings.
     ///
     /// A `wait` rather than a `fail`: running `serve` by hand in a terminal
     /// is a legitimate way to work and is how every demo has been shot. What
     /// it is not is a service, and the difference only shows on the day the
     /// process dies with nobody watching — so it belongs somewhere a person
     /// can read it before that day rather than after.
-    static func checkSupervision(daemonUp: Bool, home: URL? = nil) -> Finding {
+    static func checkSupervision(
+        daemonUp: Bool,
+        examinedState: URL,
+        context: SupervisionContext = .ordinary,
+        home: URL? = nil,
+        canonicalState: URL = DaemonInfo.canonicalLoginStateDirectory
+    ) -> Finding {
         let plist = LaunchAgent.plistURL(home: home)
-        guard FileManager.default.fileExists(atPath: plist.path) else {
+        let installed = LaunchAgent.installedState(at: plist)
+        guard installed != .notInstalled else {
             return Finding(
                 level: .wait,
                 title: "supervision",
@@ -452,11 +492,50 @@ public enum HostCheck {
                 action: "reachd service install, from a complete permanent binary-and-bundle layout. The selected service is login-owned; pre-login serving is unsupported."
             )
         }
-        return Finding(
-            level: .pass,
-            title: "supervision",
-            detail: "login-owned launchd agent installed at \(plist.path); pre-login serving is unsupported"
-        )
+        let canonical = canonicalState.standardizedFileURL
+        switch installed {
+        case .notInstalled:
+            preconditionFailure("handled above")
+        case .invalid(let reason):
+            return Finding(
+                level: .fail,
+                title: "supervision",
+                detail: "installed login-owned agent has invalid state: \(reason)",
+                action: "Reinstall with REACH_STATE_DIR unset. Do not start the agent until its state line names \(canonical.path)."
+            )
+        case .valid(let serializedPath, let installedState):
+            guard installedState == canonical else {
+                return Finding(
+                    level: .fail,
+                    title: "supervision",
+                    detail: "installed login-owned agent names noncanonical state \"\(serializedPath)\"; it must name \"\(canonical.path)\"",
+                    action: "Reinstall with REACH_STATE_DIR unset. Restore the accepted cluster before serving if these paths contain different state."
+                )
+            }
+            let examined = examinedState.standardizedFileURL
+            guard examined != installedState else {
+                return Finding(
+                    level: .pass,
+                    title: "supervision",
+                    detail: "login-owned launchd agent supervises \(serializedPath) at \(plist.path); pre-login serving is unsupported"
+                )
+            }
+            switch context {
+            case .ordinary:
+                return Finding(
+                    level: .fail,
+                    title: "supervision",
+                    detail: "installed agent supervises \(serializedPath), but doctor is examining \(examined.path)",
+                    action: "Unset REACH_STATE_DIR to inspect the installed cluster, or pass --state explicitly for a scratch-state report."
+                )
+            case .explicitScratch:
+                return Finding(
+                    level: .wait,
+                    title: "supervision",
+                    detail: "installed agent supervises \(serializedPath); explicit scratch state \(examined.path) is not supervised"
+                )
+            }
+        }
     }
 
     // MARK: - Checks
@@ -639,7 +718,7 @@ public enum HostCheck {
     /// remediation does not promise more than the check knows.
     static func checkMeshInterface(_ addresses: [[UInt8]], daemonUp: Bool) -> Finding {
         let rendered = addresses.map(MeshEndpoint.string(from:))
-        let meshUp = addresses.contains { Array($0.prefix(3)) == MeshEndpoint.meshPrefix }
+        let meshUp = addresses.contains(where: MeshEndpoint.isReachMeshAddress)
         guard meshUp else {
             guard daemonUp else {
                 return Finding(

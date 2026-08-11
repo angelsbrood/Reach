@@ -30,16 +30,21 @@ struct Service: AsyncParsableCommand {
         var noLoad = false
 
         func run() async throws {
-            // Before directory creation, plist writes, config reads or CA
-            // creation: a LaunchAgent belongs to a login user and gui domain.
-            try LoginOwnedHost.authorizeServiceInstall(effectiveUID: geteuid())
+            // First: before executable resolution, directory creation or a
+            // plist write. A foreground override may select scratch state,
+            // but it cannot become the persistent login service's authority.
+            let serviceState = try LoginOwnedHost.selectServiceState(
+                effectiveUID: geteuid(),
+                environment: ProcessInfo.processInfo.environment,
+                canonicalState: DaemonInfo.canonicalLoginStateDirectory
+            )
             let resolved = try LaunchAgent.executablePath(
                 executable ?? ProcessInfo.processInfo.arguments[0]
             )
             let definition = LaunchAgent.definition(
                 executable: resolved,
                 uid: getuid(),
-                stateDirectory: DaemonInfo.stateDirectory
+                stateDirectory: serviceState
             )
             let plistURL = LaunchAgent.plistURL()
             try FileManager.default.createDirectory(
@@ -80,7 +85,7 @@ struct Service: AsyncParsableCommand {
             let definition = LaunchAgent.definition(
                 executable: ProcessInfo.processInfo.arguments[0],
                 uid: getuid(),
-                stateDirectory: DaemonInfo.stateDirectory
+                stateDirectory: DaemonInfo.canonicalLoginStateDirectory
             )
             _ = try? Service.launchctl(["bootout", definition.serviceTarget])
             let plistURL = LaunchAgent.plistURL()
@@ -101,23 +106,25 @@ struct Service: AsyncParsableCommand {
 
         func run() async throws {
             let plistURL = LaunchAgent.plistURL()
-            let installed = FileManager.default.fileExists(atPath: plistURL.path)
-            let installedState = (try? Data(contentsOf: plistURL))
-                .flatMap(LaunchAgent.stateDirectory(inPlist:))
+            let installedState = LaunchAgent.installedState(at: plistURL)
             let definition = LaunchAgent.definition(
                 executable: ProcessInfo.processInfo.arguments[0],
                 uid: getuid(),
-                stateDirectory: installedState ?? DaemonInfo.stateDirectory
+                stateDirectory: DaemonInfo.canonicalLoginStateDirectory
             )
             let result = try Service.launchctl(["print", definition.serviceTarget])
-            let lines = LaunchAgent.statusLines(
+            let report = LaunchAgent.status(
                 definition: definition,
-                installedPath: installed ? plistURL.path : nil,
+                installedState: installedState,
+                installedPath: installedState == .notInstalled ? nil : plistURL.path,
                 launchctlOutput: result.status == 0 ? result.output : nil,
                 addresses: LocalAddresses.ipv4()
             )
-            for line in lines {
+            for line in report.lines {
                 print(line)
+            }
+            guard report.isStateContractValid else {
+                throw ExitCode.failure
             }
         }
     }

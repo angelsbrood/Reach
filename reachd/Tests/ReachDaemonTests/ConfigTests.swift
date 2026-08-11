@@ -150,6 +150,7 @@ import Testing
         #expect(MeshEndpoint.classify("100.66.143.31") == .sharedAddressSpace)
         // Inside 10/8, but the mesh reading has to win.
         #expect(MeshEndpoint.classify("10.86.0.1") == .mesh)
+        #expect(MeshEndpoint.classify("10.86.1.1") == .privateNetwork)
         #expect(MeshEndpoint.classify("127.0.0.1") == .loopback)
         #expect(MeshEndpoint.classify("169.254.1.1") == .linkLocal)
         #expect(MeshEndpoint.classify("reach.local") == nil)

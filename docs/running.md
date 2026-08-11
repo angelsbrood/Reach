@@ -157,12 +157,26 @@ just done:
 
 `reachd service status` reports the owning login UID and `gui/<uid>` domain,
 the exact state and log paths, whether the agent is loaded, and separately
-whether a `10.86.0.x` mesh address is present. A running PID with a missing
+whether an exact `10.86.0.0/24` mesh address is present. An unrelated
+`10.86.1.x` address is not Reach mesh readiness. A running PID with a missing
 mesh is explicitly incomplete away readiness, not a healthy service inferred
-from process state. `reachd service install` writes the plist through
-`PropertyListSerialization` and pins the user's existing state with an
-explicit `REACH_STATE_DIR`; paths containing spaces or XML-significant
-characters are data, not hand-built XML.
+from process state.
+
+`reachd service install` writes the plist through
+`PropertyListSerialization` and pins the owning login user's canonical Reach
+state with an explicit `REACH_STATE_DIR`; paths containing spaces or
+XML-significant characters are data, not hand-built XML. A shell may use
+`REACH_STATE_DIR` for foreground or scratch commands, but it may not relocate
+the persistent service: installation refuses any nonempty override that does
+not standardize to the canonical login state and tells the operator to unset
+it. `--no-load` does not bypass that check.
+
+Status and doctor parse the installed plist rather than falling back to the
+calling shell. An unreadable plist, missing or relative state value, or
+noncanonical installed state is a failure. Ordinary doctor also fails when an
+ambient override makes it inspect a different state; explicit
+`doctor --state` keeps that deliberate scratch report useful by saying the
+scratch state is not supervised.
 
 `reachd service uninstall` removes it. Output goes to
 `~/Library/Logs/reachd.log`, because every line the daemon writes is `print`
@@ -187,10 +201,11 @@ Support`, mint a different CA, and silently become a different cluster.
 
 Accordingly, `service install` refuses root, and `reachd serve` refuses root
 unless `REACH_STATE_DIR` names an explicit absolute state directory. That
-override is for controlled scratch/system-context work; it does not make
-pre-login serving supported. The generated agent always sets
-`REACH_STATE_DIR` to the owning user's existing Reach directory, so launchd
-never guesses which cluster it should start.
+override is for controlled foreground/scratch/system-context work; it neither
+relocates the persistent login service nor makes pre-login serving supported.
+The generated agent always sets `REACH_STATE_DIR` to the owning user's
+canonical Reach directory, so launchd never guesses which cluster it should
+start.
 
 ### What closing the lid does
 

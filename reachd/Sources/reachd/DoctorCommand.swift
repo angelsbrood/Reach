@@ -41,6 +41,7 @@ struct Doctor: AsyncParsableCommand {
             stateDirectory: directory,
             wireGuardConf: wgConf,
             addresses: LocalAddresses.ipv4(),
+            supervision: state == nil ? .ordinary : .explicitScratch,
             dial: dial ? HostCheck.Dial(via: via, budget: .seconds(dialBudget)) : nil
         )
 

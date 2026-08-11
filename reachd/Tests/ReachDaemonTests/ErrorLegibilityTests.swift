@@ -90,6 +90,10 @@ import Testing
         ServiceError.missingResources("/usr/local/bin/reachd"),
         ServiceError.launchctlRefused("Load failed: 5: Input/output error"),
         ServiceError.rootInstall,
+        ServiceStateOverrideError(
+            selected: "/private/tmp/another cluster",
+            supported: "/Users/cassie/Library/Application Support/Reach"
+        ),
         ServiceError.rootServeNeedsExplicitState,
         ReachEnrollmentError.badCAHash,
         ReachEnrollmentError.refused(code: "grant-denied", message: "the ruling was no"),

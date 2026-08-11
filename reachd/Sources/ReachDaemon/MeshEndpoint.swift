@@ -16,6 +16,13 @@ public enum MeshEndpoint {
     /// would tell a phone to reach the mesh by way of the mesh.
     static let meshPrefix: [UInt8] = [10, 86, 0]
 
+    /// The complete address predicate shared by endpoint selection and host
+    /// readiness. A prefix match on a malformed or longer byte array is not a
+    /// Reach mesh address.
+    static func isReachMeshAddress(_ address: [UInt8]) -> Bool {
+        address.count == 4 && Array(address.prefix(3)) == meshPrefix
+    }
+
     public enum Source: Sendable, Equatable {
         /// Read from `meshEndpoint` in config.json.
         case pinned
@@ -67,7 +74,7 @@ public enum MeshEndpoint {
         let candidate = addresses.first { address in
             address.count == 4
                 && address != [127, 0, 0, 1]
-                && Array(address.prefix(3)) != meshPrefix
+                && !isReachMeshAddress(address)
         }
         guard let candidate else {
             return Resolution(endpoint: "127.0.0.1:\(port)", source: .unavailable)
@@ -105,7 +112,7 @@ public enum MeshEndpoint {
     public static func classify(_ host: String) -> AddressKind? {
         guard let octets = ipv4(host) else { return nil }
         if octets[0] == 127 { return .loopback }
-        if Array(octets.prefix(3)) == meshPrefix { return .mesh }
+        if isReachMeshAddress(octets) { return .mesh }
         if octets[0] == 169, octets[1] == 254 { return .linkLocal }
         if octets[0] == 100, (64...127).contains(octets[1]) { return .sharedAddressSpace }
         if octets[0] == 10 { return .privateNetwork }

@@ -31,6 +31,9 @@ import Testing
             stateDirectory: directory,
             wireGuardConf: conf ?? directory.appendingPathComponent("absent.conf").path,
             addresses: addresses,
+            supervision: .ordinary,
+            supervisionHome: directory,
+            canonicalState: directory.appendingPathComponent("Library/Application Support/Reach"),
             portIsHeld: { _ in portsHeld }
         )
     }
@@ -591,10 +594,34 @@ import Testing
         return home
     }
 
+    private func canonicalState(in home: URL) -> URL {
+        home.appendingPathComponent("Library/Application Support/Reach", isDirectory: true)
+    }
+
+    private func writeAgent(home: URL, state: URL) throws {
+        let plist = LaunchAgent.plistURL(home: home)
+        try FileManager.default.createDirectory(
+            at: plist.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try LaunchAgent.definition(
+            executable: "/opt/reach/reachd",
+            uid: 501,
+            stateDirectory: state,
+            home: home
+        ).propertyListData().write(to: plist)
+    }
+
     @Test func noAgentIsAWaitAndNotAFailure() throws {
         let home = try emptyHome()
         defer { try? FileManager.default.removeItem(at: home) }
-        let finding = HostCheck.checkSupervision(daemonUp: false, home: home)
+        let state = canonicalState(in: home)
+        let finding = HostCheck.checkSupervision(
+            daemonUp: false,
+            examinedState: state,
+            home: home,
+            canonicalState: state
+        )
         #expect(finding.level == .wait, "running serve by hand is a way to work, not a fault")
         #expect(finding.action?.contains("reachd service install") == true)
     }
@@ -604,7 +631,13 @@ import Testing
     @Test func aRunningDaemonWithNoAgentStillSaysNothingRestartsIt() throws {
         let home = try emptyHome()
         defer { try? FileManager.default.removeItem(at: home) }
-        let finding = HostCheck.checkSupervision(daemonUp: true, home: home)
+        let state = canonicalState(in: home)
+        let finding = HostCheck.checkSupervision(
+            daemonUp: true,
+            examinedState: state,
+            home: home,
+            canonicalState: state
+        )
         #expect(finding.level == .wait)
         #expect(finding.detail.contains("nothing restarts it"))
     }
@@ -612,14 +645,75 @@ import Testing
     @Test func anInstalledAgentPasses() throws {
         let home = try emptyHome()
         defer { try? FileManager.default.removeItem(at: home) }
-        let agents = home.appendingPathComponent("Library/LaunchAgents", isDirectory: true)
-        try FileManager.default.createDirectory(at: agents, withIntermediateDirectories: true)
-        try "<plist/>".write(
-            to: agents.appendingPathComponent("systems.reach.reachd.plist"),
-            atomically: true,
-            encoding: .utf8
+        let state = canonicalState(in: home)
+        try writeAgent(home: home, state: state)
+        let finding = HostCheck.checkSupervision(
+            daemonUp: true,
+            examinedState: state,
+            home: home,
+            canonicalState: state
         )
-        #expect(HostCheck.checkSupervision(daemonUp: true, home: home).level == .pass)
+        #expect(finding.level == .pass)
+        #expect(finding.detail.contains(state.path))
+    }
+
+    @Test func anInvalidOrNoncanonicalInstalledStateFails() throws {
+        let home = try emptyHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let canonical = canonicalState(in: home)
+        let plist = LaunchAgent.plistURL(home: home)
+        try FileManager.default.createDirectory(
+            at: plist.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try "<plist/>".write(to: plist, atomically: true, encoding: .utf8)
+
+        let malformed = HostCheck.checkSupervision(
+            daemonUp: true,
+            examinedState: canonical,
+            home: home,
+            canonicalState: canonical
+        )
+        #expect(malformed.level == .fail)
+        #expect(malformed.detail.contains("invalid state"))
+
+        try writeAgent(home: home, state: home.appendingPathComponent("Other Cluster"))
+        let divergent = HostCheck.checkSupervision(
+            daemonUp: true,
+            examinedState: canonical,
+            home: home,
+            canonicalState: canonical
+        )
+        #expect(divergent.level == .fail)
+        #expect(divergent.detail.contains("noncanonical"))
+    }
+
+    @Test func ordinaryAndExplicitScratchDiagnosisDisagreeDeliberately() throws {
+        let home = try emptyHome()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let canonical = canonicalState(in: home)
+        let scratch = home.appendingPathComponent("Scratch Cluster")
+        try writeAgent(home: home, state: canonical)
+
+        let ordinary = HostCheck.checkSupervision(
+            daemonUp: true,
+            examinedState: scratch,
+            context: .ordinary,
+            home: home,
+            canonicalState: canonical
+        )
+        #expect(ordinary.level == .fail)
+        #expect(ordinary.detail.contains("doctor is examining"))
+
+        let explicit = HostCheck.checkSupervision(
+            daemonUp: true,
+            examinedState: scratch,
+            context: .explicitScratch,
+            home: home,
+            canonicalState: canonical
+        )
+        #expect(explicit.level == .wait)
+        #expect(explicit.detail.contains("not supervised"))
     }
 }
 
@@ -633,6 +727,18 @@ import Testing
         try #require(
             try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
         )
+    }
+
+    private func propertyListData(_ value: Any) throws -> Data {
+        try PropertyListSerialization.data(fromPropertyList: value, format: .xml, options: 0)
+    }
+
+    private func invalidReason(_ state: LaunchAgent.InstalledState) throws -> String {
+        guard case .invalid(let reason) = state else {
+            Issue.record("expected invalid installed state, got \(state)")
+            return ""
+        }
+        return reason
     }
 
     private func stage(_ files: [String]) throws -> URL {
@@ -722,7 +828,10 @@ import Testing
         #expect(plist["ProgramArguments"] as? [String] == [executable, "serve"])
         let environment = try #require(plist["EnvironmentVariables"] as? [String: String])
         #expect(environment[DaemonInfo.stateEnvironmentKey] == state.path)
-        #expect(LaunchAgent.stateDirectory(inPlist: data) == state)
+        #expect(LaunchAgent.installedState(inPlist: data) == .valid(
+            serializedPath: state.path,
+            stateDirectory: state.standardizedFileURL
+        ))
 
         let xml = String(decoding: data, as: UTF8.self)
         #expect(xml.contains("Reach &amp; Tools"), "PropertyListSerialization must escape paths")
@@ -735,7 +844,11 @@ import Testing
         defer { try? FileManager.default.removeItem(at: state) }
 
         #expect(throws: ServiceError.rootInstall) {
-            try LoginOwnedHost.authorizeServiceInstall(effectiveUID: 0)
+            _ = try LoginOwnedHost.selectServiceState(
+                effectiveUID: 0,
+                environment: [DaemonInfo.stateEnvironmentKey: "/another/cluster"],
+                canonicalState: state
+            )
             try FileManager.default.createDirectory(at: state, withIntermediateDirectories: true)
         }
         #expect(!FileManager.default.fileExists(atPath: state.path))
@@ -757,6 +870,174 @@ import Testing
         try LoginOwnedHost.authorizeServe(effectiveUID: 501, environment: [:])
     }
 
+    @Test func serviceStateSelectionKeepsOneCanonicalAuthority() throws {
+        let canonical = URL(
+            fileURLWithPath: "/Users/Reach Owner/Library/Application Support/Reach",
+            isDirectory: true
+        )
+        let normalized = canonical.standardizedFileURL
+
+        #expect(try LoginOwnedHost.selectServiceState(
+            effectiveUID: 501,
+            environment: [:],
+            canonicalState: canonical
+        ) == normalized)
+        #expect(try LoginOwnedHost.selectServiceState(
+            effectiveUID: 501,
+            environment: [DaemonInfo.stateEnvironmentKey: ""],
+            canonicalState: canonical
+        ) == normalized)
+        #expect(try LoginOwnedHost.selectServiceState(
+            effectiveUID: 501,
+            environment: [
+                DaemonInfo.stateEnvironmentKey:
+                    "/Users/Reach Owner/Library/Application Support/Reach/../Reach"
+            ],
+            canonicalState: canonical
+        ) == normalized)
+
+        let relative = ServiceStateOverrideError(
+            selected: "scratch/reach",
+            supported: canonical.path
+        )
+        #expect(throws: relative) {
+            _ = try LoginOwnedHost.selectServiceState(
+                effectiveUID: 501,
+                environment: [DaemonInfo.stateEnvironmentKey: "scratch/reach"],
+                canonicalState: canonical
+            )
+        }
+
+        let selected = "/private/tmp/another cluster"
+        let divergent = ServiceStateOverrideError(
+            selected: selected,
+            supported: canonical.path
+        )
+        #expect(throws: divergent) {
+            _ = try LoginOwnedHost.selectServiceState(
+                effectiveUID: 501,
+                environment: [DaemonInfo.stateEnvironmentKey: selected],
+                canonicalState: canonical
+            )
+        }
+        #expect(divergent.description == "service install cannot persist REACH_STATE_DIR \"\(selected)\"; the login-owned service supports only \"\(canonical.path)\". Unset REACH_STATE_DIR and try again.")
+    }
+
+    @Test func installedStateParsingDistinguishesEveryContractShape() throws {
+        let canonical = "/Users/Reach Owner/Library/Application Support/Reach & Co"
+        let valid = try propertyListData([
+            "EnvironmentVariables": [
+                DaemonInfo.stateEnvironmentKey: canonical,
+                "UNRELATED": "preserved",
+            ],
+        ])
+        #expect(LaunchAgent.installedState(inPlist: valid) == .valid(
+            serializedPath: canonical,
+            stateDirectory: URL(fileURLWithPath: canonical, isDirectory: true).standardizedFileURL
+        ))
+
+        #expect(try invalidReason(LaunchAgent.installedState(inPlist: Data("not plist".utf8))).contains("not a valid property list"))
+        #expect(try invalidReason(LaunchAgent.installedState(inPlist: propertyListData(["not", "a", "dictionary"]))).contains("root is not a dictionary"))
+        #expect(try invalidReason(LaunchAgent.installedState(inPlist: propertyListData([:]))).contains("EnvironmentVariables"))
+        #expect(try invalidReason(LaunchAgent.installedState(inPlist: propertyListData(["EnvironmentVariables": "no"]))).contains("not a dictionary"))
+        #expect(try invalidReason(LaunchAgent.installedState(inPlist: propertyListData(["EnvironmentVariables": [:]]))).contains("is missing"))
+        #expect(try invalidReason(LaunchAgent.installedState(inPlist: propertyListData([
+            "EnvironmentVariables": [DaemonInfo.stateEnvironmentKey: 42],
+        ]))).contains("is not a string"))
+        #expect(try invalidReason(LaunchAgent.installedState(inPlist: propertyListData([
+            "EnvironmentVariables": [DaemonInfo.stateEnvironmentKey: ""],
+        ]))).contains("is empty"))
+        #expect(try invalidReason(LaunchAgent.installedState(inPlist: propertyListData([
+            "EnvironmentVariables": [DaemonInfo.stateEnvironmentKey: "relative/path"],
+        ]))).contains("is relative"))
+    }
+
+    @Test func installedStateDistinguishesMissingAndUnreadableFiles() throws {
+        let plist = URL(fileURLWithPath: "/Users/cassie/Library/LaunchAgents/systems.reach.reachd.plist")
+        #expect(LaunchAgent.installedState(
+            at: plist,
+            fileExists: { _ in false },
+            readData: { _ in Issue.record("a missing plist must not be read"); return Data() }
+        ) == .notInstalled)
+
+        let unreadable = LaunchAgent.installedState(
+            at: plist,
+            fileExists: { _ in true },
+            readData: { _ in throw CocoaError(.fileReadNoPermission) }
+        )
+        #expect(try invalidReason(unreadable).contains("could not read"))
+    }
+
+    @Test func invalidStatusKeepsProcessAndMeshFactsVisible() {
+        let canonical = URL(fileURLWithPath: "/Users/cassie/Library/Application Support/Reach")
+        let definition = LaunchAgent.definition(
+            executable: "/opt/reach/reachd",
+            uid: 501,
+            stateDirectory: canonical,
+            home: URL(fileURLWithPath: "/Users/cassie")
+        )
+        let loaded = "state = running\npid = 42\n"
+        let invalid = LaunchAgent.status(
+            definition: definition,
+            installedState: .invalid("REACH_STATE_DIR is relative"),
+            installedPath: "/Users/cassie/Library/LaunchAgents/\(LaunchAgent.label).plist",
+            launchctlOutput: loaded,
+            addresses: [[10, 86, 1, 1], [10, 86, 0, 1, 2]]
+        )
+        #expect(!invalid.isStateContractValid)
+        #expect(invalid.lines.contains { $0.contains("state: invalid") })
+        #expect(invalid.lines.contains { $0.contains("agent: state = running") })
+        #expect(invalid.lines.contains { $0.contains("mesh: missing") })
+
+        let divergent = LaunchAgent.status(
+            definition: definition,
+            installedState: .valid(
+                serializedPath: "/private/tmp/other",
+                stateDirectory: URL(fileURLWithPath: "/private/tmp/other")
+            ),
+            installedPath: "/Users/cassie/Library/LaunchAgents/\(LaunchAgent.label).plist",
+            launchctlOutput: loaded,
+            addresses: [[10, 86, 0, 1]]
+        )
+        #expect(!divergent.isStateContractValid)
+        #expect(divergent.lines.contains { $0.contains("login-owned service requires") })
+        #expect(divergent.lines.contains { $0.contains("mesh: ready") })
+    }
+
+    @Test func statusAndDoctorShareTheExactReachMeshPredicate() {
+        let accepted: [[UInt8]] = [[10, 86, 0, 1], [10, 86, 0, 222]]
+        let rejected: [[UInt8]] = [
+            [10, 86, 1, 1],
+            [10, 87, 0, 1],
+            [192, 168, 8, 210],
+            [127, 0, 0, 1],
+            [10, 86, 0],
+            [10, 86, 0, 1, 2],
+        ]
+        for address in accepted {
+            #expect(MeshEndpoint.isReachMeshAddress(address))
+        }
+        for address in rejected {
+            #expect(!MeshEndpoint.isReachMeshAddress(address))
+        }
+
+        let definition = LaunchAgent.definition(
+            executable: "/opt/reach/reachd",
+            uid: 501,
+            stateDirectory: URL(fileURLWithPath: "/Users/cassie/Reach")
+        )
+        let status = LaunchAgent.status(
+            definition: definition,
+            installedState: .notInstalled,
+            installedPath: nil,
+            launchctlOutput: nil,
+            addresses: rejected
+        )
+        #expect(status.lines.contains { $0.contains("mesh: missing") })
+        #expect(HostCheck.checkMeshInterface(rejected, daemonUp: true).level == .fail)
+        #expect(HostCheck.checkMeshInterface(accepted, daemonUp: true).level == .pass)
+    }
+
     @Test func serviceStatusSeparatesProcessStateFromMeshReadiness() {
         let definition = LaunchAgent.definition(
             executable: "/opt/reach/reachd",
@@ -765,24 +1046,32 @@ import Testing
             home: URL(fileURLWithPath: "/Users/cassie", isDirectory: true)
         )
         let loaded = "state = running\npid = 42\n"
-        let ready = LaunchAgent.statusLines(
+        let ready = LaunchAgent.status(
             definition: definition,
+            installedState: .valid(
+                serializedPath: definition.stateDirectory.path,
+                stateDirectory: definition.stateDirectory.standardizedFileURL
+            ),
             installedPath: "/Users/cassie/Library/LaunchAgents/\(LaunchAgent.label).plist",
             launchctlOutput: loaded,
             addresses: [[127, 0, 0, 1], [10, 86, 0, 1]]
         )
-        #expect(ready.contains { $0.contains("login uid 501, domain gui/501") })
-        #expect(ready.contains { $0.contains("explicit REACH_STATE_DIR") })
-        #expect(ready.contains { $0.contains("agent: state = running") })
-        #expect(ready.contains { $0.contains("mesh: ready") && $0.contains("10.86.0.1") })
+        #expect(ready.isStateContractValid)
+        #expect(ready.lines.contains { $0.contains("login uid 501, domain gui/501") })
+        #expect(ready.lines.contains { $0.contains("explicit REACH_STATE_DIR") })
+        #expect(ready.lines.contains { $0.contains("agent: state = running") })
+        #expect(ready.lines.contains { $0.contains("mesh: ready") && $0.contains("10.86.0.1") })
 
-        let missing = LaunchAgent.statusLines(
+        let missing = LaunchAgent.status(
             definition: definition,
+            installedState: .notInstalled,
             installedPath: nil,
             launchctlOutput: loaded,
             addresses: [[127, 0, 0, 1], [192, 168, 8, 210]]
         )
-        #expect(missing.contains { $0.contains("plist: not installed") })
-        #expect(missing.contains { $0.contains("mesh: missing") && $0.contains("away readiness is incomplete") })
+        #expect(missing.isStateContractValid)
+        #expect(missing.lines.contains { $0.contains("expected if installed") })
+        #expect(missing.lines.contains { $0.contains("plist: not installed") })
+        #expect(missing.lines.contains { $0.contains("mesh: missing") && $0.contains("away readiness is incomplete") })
     }
 }

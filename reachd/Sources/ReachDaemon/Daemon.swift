@@ -11,23 +11,33 @@ public enum DaemonInfo {
     public static let wireVersion = Wire.version
     public static let stateEnvironmentKey = "REACH_STATE_DIR"
 
+    /// The one state root a persistent login-owned service may name.
+    ///
+    /// This deliberately ignores the runtime environment. A command-scoped
+    /// override remains useful for foreground and scratch work, but allowing
+    /// it to enter the LaunchAgent plist would permanently attach the service
+    /// to a different cluster.
+    package static var canonicalLoginStateDirectory: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Reach", isDirectory: true)
+    }
+
     /// Runtime state root; never inside the repository. `REACH_STATE_DIR`
-    /// overrides it, because `applicationSupportDirectory` resolves the home
-    /// directory from the password database and ignores `HOME`.
+    /// overrides it for foreground commands and controlled scratch/system
+    /// work. It is not a persistent service-relocation mechanism.
     ///
     /// It is not how tests reach throwaway state — they pass a path through
     /// `HostCheck.examine(stateDirectory:)`, `DaemonConfig`'s
     /// `in:`/`from:`/`to:`, and `reachd doctor --state`. The generated
-    /// LaunchAgent *does* set this variable to the same user Application
-    /// Support path the CLI resolves, making the service's state identity
-    /// explicit rather than dependent on ambient home resolution. Root serve
-    /// is accepted only when this variable names an explicit path.
+    /// LaunchAgent sets this variable from `canonicalLoginStateDirectory`,
+    /// making the service's identity explicit without inheriting a shell's
+    /// override. Root serve is accepted only when this variable names an
+    /// explicit path.
     public static var stateDirectory: URL {
         if let override = ProcessInfo.processInfo.environment[stateEnvironmentKey], !override.isEmpty {
             return URL(fileURLWithPath: override, isDirectory: true)
         }
-        return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Reach", isDirectory: true)
+        return canonicalLoginStateDirectory
     }
 }
 

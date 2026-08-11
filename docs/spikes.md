@@ -1361,3 +1361,50 @@ zero fail; its diagnostic identity hit the attributed intermittent
 authenticated LAN and mesh sessions in the same installed state. An earlier
 installed diagnostic dial had completed successfully before the disruptive
 matrix.
+
+### Canonical service-state repair
+
+Review after S23 found two bounded authority defects before the privileged
+mesh-bootstrap pass could safely consume the login contract. An ambient
+`REACH_STATE_DIR` could be serialized into the persistent LaunchAgent, and
+service status treated any four-octet `10.86.x.x` address as mesh-ready while
+the rest of Reach required `10.86.0.0/24`. The roadmap and mesh-bootstrap plan
+were already based on synchronized `e1372b5`; no stale-state correction was
+fabricated.
+
+The repair separates canonical login state from the existing foreground and
+scratch runtime override. Service installation now refuses divergent state
+before executable or filesystem access, while status and doctor strictly
+parse and validate the installed plist. Endpoint derivation, doctor and status
+share one exact four-octet `10.86.0.x` predicate. No wire, dependency, public
+API, Keeper, WireGuard or privileged behavior changed.
+
+Focused state/status/mesh and late-hello coverage passed 34/34 three times.
+ReachKit passed 79/79 in eight complete runs. reachd passed 189/189 in eight
+accepted complete runs. One additional full-suite attempt reproduced the
+named cold-ask timing sentinel at 41.3437 seconds; the unchanged test then
+passed alone in 10.486, 11.019 and 10.511 seconds, and the replacement full
+run passed 189/189. No timing threshold or unrelated test was weakened.
+
+The fresh warnings-as-errors release has SHA-256
+`127081878c0aa014e39b07aea1f125c8c040dd05a5db51131e4a872e28e498d4`.
+Its seven bundles were byte-identical to the accepted installed bundle set.
+Before the authorized swap, the executable, seven bundles, plist, complete
+state, WireGuard configuration and the 655-line / 63,093-byte log checkpoint
+were copied byte-for-byte under
+`~/Library/Application Support/Reach Backups/host-lifecycle-fixes-2026-08-11-0337Z`.
+The stopped binary was replaced through a verified fresh sibling inode, then
+`service install` ran with `REACH_STATE_DIR` absent.
+
+The installed result is PID 42756/run 1 in `gui/501`, serving both UDP ports
+from the canonical executable with exactly seven adjacent bundles. The plist,
+status and doctor all name
+`~/Library/Application Support/Reach`; status reports exact mesh address
+`10.86.0.1`. Authenticated `doctor --dial` opened over
+`127.0.0.1:47337` in 34 ms and finished 13 pass / 3 expected mapping and
+pinned-endpoint warnings / 0 waiting / 0 fail. Installed canonical and alias
+launches each passed the MLX spine, unconstrained sampling 3/3 and guided
+schemas 15/15. The four CA/server hashes, device registry, WireGuard host
+public key and WireGuard configuration remained byte-identical, and no
+`cluster CA created` line appeared. No phone, logout, reboot, re-pair or
+privileged mutation was needed for this correctness repair.
