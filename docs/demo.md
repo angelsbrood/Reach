@@ -67,7 +67,8 @@ truncated), and the prompt asks for something with a natural length to it — a
 description rather than a fact — structured so the model keeps going.
 
 The prompt ships in the app, so nothing has to be typed or pasted while the rig
-is already moving. It is `ExampleModel.prompt`, and it reads:
+is already moving. Choose **Network transition** from the prompt menu; it is
+`ExampleModel.transitionPrompt`, and it reads:
 
 > Write about 3000 words on the life of a river, reach by reach. Take it in
 > order: the spring and the first cut of the channel; the steep young water; the

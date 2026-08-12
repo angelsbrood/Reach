@@ -442,6 +442,9 @@ public final class Daemon: Sendable {
             (events, epoch, version) = try await registry.begin(
                 sessionID: begin.sessionID,
                 genID: begin.genID,
+                receiptSource: GenerationReceipt.Source(
+                    remoteEndpointDescription: stream.remoteEndpointDescription()
+                ),
                 events: { filling.generate(begin.request) }
             )
         } catch {

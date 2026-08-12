@@ -29,6 +29,42 @@ the decision. Kill criteria come from the pre-filing plan.
 | S23 | Which authority owns the host across lock, logout and reboot? | **PASS / LOGIN CLUSTER, ROOT ROAD** (2026-08-10) — one lock, two logout/login and two reboot/pre-login/login trials selected login-owned serving, proved late roads need no daemon restart, and isolated automatic privileged mesh activation as a separate pass |
 | S24 | What least-privileged installed component can restore the host mesh without owning the cluster? | **PASS / ROOT-OWNED HEADLESS MESH OWNER** (2026-08-11) — a scriptless helper with strict data-only state survived the physical lifecycle matrix; final-byte crash recovery restored interface plus connected route, and a strict building-network cold open arrived from `10.86.0.2` and streamed to `done` |
 
+## Upstream checkpoint — nested tool grammar schema test (2026-08-11)
+
+The first prepared post-S19 dependency contribution is filed as
+[`mlx-swift-lm` PR #527](https://github.com/ml-explore/mlx-swift-lm/pull/527).
+Fresh upstream `main` was `0b47e698`; the publication commit is `634345a`,
+whose stable patch ID exactly matches prepared commit `7828993`. The PR is
+open, ready for review and mergeable, with review still required. It contains
+one commit and one changed test file (+12/-6), and changes no library, package,
+public API or runtime behavior. Post-filing review found no actionable
+correctness, security, performance or maintainability issue. GitHub Actions run
+`31547983222` completed immediately as `action_required` with zero jobs: an
+external approval gate, not a failing check and not a CI pass.
+
+The current-base `ToolCallingSchemaTests` reproduced the stale assertion at
+**11/12**: only `grammarBuilderHoistsNestedDefsInBothArms()` failed at its
+former direct-shape lookup. The replayed correction passed **12/12**. Paired
+complete `xcodebuild test` runs produced no branch-only failure line: both hit
+the same existing Foundation Models Swift Testing runner crashes and
+continuation-test failures, while the baseline additionally failed
+`TurboQuantIntegrationTests.testRawKeyModeBFloat16MatchesReference()`.
+`pre-commit run --all-files` passed, and `scripts/verify-docs.sh` ended with
+all documentation builds passed.
+
+This is ecosystem maintenance, not a Reach product or grant-frontier change.
+The project record is therefore **four merged upstream contributions and one
+open**. The signed-range prototype `fd04f2f` remains unpushed and unfiled but is
+now **retired**, not pending publication: it hand-edits MLX's pinned xgrammar
+v0.1.30 snapshot even though its vendor marker routes patches upstream, and
+upstream [xgrammar #669](https://github.com/mlc-ai/xgrammar/pull/669) already
+shipped the broader number-generation repair in
+[v0.2.3](https://github.com/mlc-ai/xgrammar/releases/tag/v0.2.3).
+Its tests cover the full two-sided range and one-sided minimum, but not the
+touched one-sided negative-maximum path. `b871cd7` remains parked and unfiled.
+A future MLX xgrammar sync would be a separate dependency upgrade, not this
+patch.
+
 ## S19 — the typed mismatch is architectural under the shipped greedy path (2026-08-08)
 
 **Question and gate.** S17 proved that sampled constrained generation can
@@ -90,6 +126,11 @@ at the founder's direction they are neither pushed nor filed while another
 `mlx-swift-lm` PR is pending. Typed numeric completion returns to Held as
 architectural hardening and as a prerequisite for any future sampled path,
 not as a claimed defect fixed in the current product.
+
+**Later status (11 August):** the structural-test commit became PR #527; the
+signed-range prototype was retired unfiled after the upstream/vendor review;
+the finite-double prototype remains parked. The paragraph above records the
+S19 stop-time state rather than the current publication queue.
 
 ## S18 — typed numerics closed the overflow hole, not the completion cliff (2026-08-08)
 
@@ -1757,3 +1798,138 @@ bundles remained adjacent only to the canonical binary, and no re-pair
 occurred. No logout, reboot or phone matrix was repeated because this review
 delta changes no launch policy, backend/route behavior, wire or Keeper
 behavior. **Verdict for the reviewed bytes: PASS.**
+
+## Controlled VPN interoperability matrix — 11 August 2026
+
+This was a measurement pass over the accepted `9bfdd8d` daemon/helper baseline,
+not a VPN-product certification. Router-level Proton remained enabled
+throughout. Host-local Proton cells were founder-excluded; no router, VPN
+profile, Reach wire, Keeper behavior, cluster identity, helper or daemon was
+changed. The iPhone's already-authenticated Tailscale profile made the tailnet
+arm executable without installation or login.
+
+The fixed cold prompt and long transition prompt were hashed once before the
+matrix. Fresh explicit-scratch verification passed ReachKit **79/79** and
+`reachd` **199/199 in 29 suites**. The installed control opened an authenticated
+loopback session in 38 ms before the matrix and 36 ms after restoration, each
+with **15 pass, three expected pin/mapping warnings, zero waiting and zero
+fail**.
+
+| cell | measured result | independent road evidence | verdict |
+|---|---|---|---|
+| C0 | login daemon and root mesh owner retained their accepted PIDs, run counts, generation and one-peer state | physical default remained Slate; exact Reach `/24` remained connected | **PASS** |
+| C1 | cold session opened from the phone's Slate-LAN address and reached visible `done` | physical-interface traffic moved while Reach-mesh bytes stayed flat | **PASS — direct LAN** |
+| C2 | building-network cold session opened from `10.86.0.2` and reached visible `done` | Reach `utun` gained 62 packets / 15,936 inbound bytes; helper identity did not move | **PASS — first-party mesh** |
+| C3 | cellular cold open produced the declared bounded all-roads refusal; no daemon session or generation appeared | private mapped/pinned edge was unreachable; background counters alone were rejected as evidence | **PASS — expected private-edge boundary** |
+| C4 | a known-good Slate session completed while the Mac tailnet address was present in authenticated roads | Reach mesh stayed flat and the phone still ran Keeper rather than Tailscale | **PASS — tailnet road learned** |
+| C5 | the first attempt was rejected as ambiguous because it was actually another Slate session. After closing Example and proving the phone tailnet peer 3/3, the single clean rerun cold-opened from a `100.x` phone address and reached visible `done` | Mac Tailscale bytes moved materially; Reach mesh stayed exactly flat | **PASS on the permitted rerun — user tailnet** |
+| C6 | one long generation began from `10.86.0.2`, held through the iOS provider gap, then the **same generation** reattached from the phone tailnet at sequence **601** and caught up to visible `done` | Reach bytes rose before the switch and froze afterward; Tailscale bytes then rose and its peer answered | **PASS — Keeper to Tailscale** |
+| C7 | a fresh long generation began on the tailnet, then the **same generation** reattached from `10.86.0.2` at sequence **563** and reached visible `done` | tailnet peer became unreachable; Reach peer answered and mesh bytes rose materially | **PASS — Tailscale to Keeper** |
+| C8–C9 | host-local commercial VPN was deliberately not enabled because Proton already remained the router baseline | no host-profile policy was changed to manufacture another cell | **OUT OF SCOPE BY FOUNDER RULING** |
+| C10 | Keeper truth was correct when it showed itself displaced, but iOS selected Tailscale unexpectedly before C2. Later Keeper's in-app Start failed while selecting the same Keeper profile in Settings succeeded. During C6, Tailscale initially remained disconnected after displacing Keeper, adding about 40 seconds before reattach | Settings, provider processes, daemon source, peer reachability and tunnel counters agreed on the eventual active profile | **FOLLOW-UP — profile authority and handoff truth** |
+
+The final restoration returned the phone to Slate with Keeper connected and
+on-demand enabled, phone Tailscale disconnected, and Mac Tailscale active in
+split-tunnel/no-exit-node mode. The accepted daemon and helper hashes, PIDs,
+routes, generation and peer count were unchanged. Example was terminated after
+the final cell; no re-pair or CA creation occurred.
+
+At the founder's explicit request during the matrix, Example alone gained a
+test convenience: the one-sentence cold prompt is now its default and a compact
+menu selects the unchanged long transition prompt. Normal generic Simulator
+and generic-device builds passed, and both presets were visually verified on
+the signed physical build without changing VPN state. A warnings-as-errors
+build isolated an existing Swift 6 implicit/weak-capture warning in the prior
+generation code; this measurement pass did not widen into that unrelated
+refactor. ReachKit, daemon, wire and Keeper behavior remain unchanged.
+
+**Behavior verdict: PASS for the combinations actually exercised.** Direct LAN,
+first-party mesh and an existing user tailnet coexist; cold tailnet sessions
+work; and active generations resume in both directions across the iPhone's
+single VPN slot. The matrix does not claim host-local commercial-VPN coverage,
+cellular ingress, relay behavior or universal VPN-product compatibility. The
+observed profile-selection/start/handoff behavior is retained as a focused
+Keeper-held follow-up rather than repaired here.
+
+**Acceptance verdict: STOP for a bounded observability gap.** The approved
+ledger required a generation ID and initial/final event sequence for every
+successful cell. Production logging names a generation only on reattach and
+names only that cursor. Cold C1/C2/C4/C5 therefore retain attributable
+session/source/counter/visible-done proof but no generation ID or terminal
+sequence; C6/C7 retain generation and reattach sequence but no terminal
+sequence. Those facts cannot be recovered honestly after completion. A narrow
+`PLAN-vpn-interop-evidence.md` follow-up adds privacy-safe begin/terminal
+receipts and repeats only C1, C2, C4, C5, C6 and C7. Until that closes, the matrix
+is measured behavior rather than a fully retired acceptance record.
+
+## VPN interoperability receipt closure — 11 August 2026
+
+The bounded follow-up closed that stop without changing the wire, roads,
+generation behavior, VPN profiles, Keeper, model or public API. `SessionRegistry`
+now emits one package-internal accepted receipt only when it creates a new
+generation and one terminal receipt only after it stamps the actual
+`.finished` event. The stable copy contains random session/generation cursors,
+the accepted sequence `0`, terminal sequence, ending category, and one of six
+source categories. It contains no address, port, prompt, output, identity,
+certificate, token count or raw error text. Duplicate begin, replay-only
+attachment, detach/reattach and post-terminal cleanup do not produce another
+receipt; an expiry with no wire terminal still produces none.
+
+Five focused receipt tests extended the existing registry matrix across exact
+rendering/classification, order, ordinary completion, cancellation, filling
+error, duplicate begin, replay, detach/reattach and cleanup. The 18-test focused
+suite passed three consecutive runs. Fresh explicit-scratch ReachKit passed
+**79/79** and reachd passed **204/204 in 29 suites**. The warnings-as-errors
+release hashes to
+`b5952c42078dfa6c2eb13e36c943b64fe3125e303b548e87e6938bd0c21912d6`;
+generic-Simulator Example and generic-iOS Keeper linkage builds passed. The
+staged real-weight spine also passed MLX, unconstrained sampling **3/3**, and
+guided schemas **15/15**.
+
+The first installation command exposed a bounded operator fact: the
+`--executable` option names the path launchd should execute; it is not a copy
+source. That attempt wrote a valid temporary-path plist, launchd refused it,
+and the accepted installed inode remained unchanged. The service was then
+replaced through the documented verified fresh-directory swap. The accepted
+installed executable has the release hash above, exactly seven adjacent
+bundles, PID 51546/run 1, both listeners and unchanged cluster state. The four
+CA/server files, device registry, mesh intent, identity and WireGuard host key
+remained byte-identical to the backup; CA creation stayed zero. Final
+authenticated `doctor --dial` opened over loopback in 36 ms with **15 pass,
+three expected warnings, zero waiting and zero fail**. The root helper remained
+PID 4622, generation 3, one peer and ready on the same Reach `/24`.
+
+The repeated six-cell matrix retained only receipt categories and counter
+deltas in the repository; raw endpoints and screenshots remain in the
+mode-private ledger. Every accepted receipt precedes exactly one terminal
+receipt with the same IDs:
+
+| cell | receipt cursor | route and independent evidence | terminal | verdict |
+|---|---|---|---|---|
+| C1 — direct Slate cold | session `55A05A32…`, generation `E63ED472…`, `private-lan` at seq 0 | Reach mesh exactly flat; phone Tailscale absent; signed Example screenshot showed the fixed answer | seq 32, complete, visible `done` | **PASS** |
+| C2 — Reach-mesh cold | session `A34C65B7…`, generation `639303B9…`, `reach-mesh` at seq 0 | Reach tunnel +54 packets / 17,736 bytes in and +44 / 11,499 out; tailnet phone peer offline | seq 29, complete, founder-witnessed `done` | **PASS** |
+| C4 — tailnet-learning control | session `38424DAB…`, generation `04897D6C…`, `private-lan` at seq 0 | Reach mesh flat; Mac tailnet address present in authenticated roads; C5 independently cold-used it | seq 30, complete, founder-witnessed `done`; the retained CoreDevice frame is horizontally displaced and is not accepted as independent UI proof | **PASS** |
+| C5 — tailnet cold | session `338801DD…`, generation `2C3CB359…`, `shared-address-space` at seq 0 | tailnet +45 packets / 10,016 bytes in and +67 / 11,357 out; peer active; Reach mesh flat | seq 30, complete, founder-witnessed `done` | **PASS** |
+| C6 — Keeper to Tailscale | session `7EA60524…`, generation `8394324C…`, `reach-mesh` at seq 0 | the same generation reattached from tailnet at seq 2223, 2572 and 2944; post-switch tailnet +347 packets / 48,269 bytes in and +1,044 / 231,376 out | seq 3659, complete, founder-witnessed `done` | **PASS** |
+| C7 — Tailscale to Keeper | session `2FFC3C2E…`, generation `B2954130…`, `shared-address-space` at seq 0 | the same generation reattached from Reach mesh at seq 908; post-switch Reach tunnel +966 packets / 88,006 bytes in and +1,129 / 161,565 out | seq 2030, complete, founder-witnessed `done` | **PASS** |
+
+CoreDevice becomes unavailable on the building network, so C2/C5/C6/C7 use
+the founder's visible terminal report joined to daemon receipts and independent
+tunnel evidence; no remote screenshot is claimed for those cells. C1 retains a
+fully framed signed-device screenshot. CoreDevice remained available for C4,
+but its retained frame is horizontally displaced and does not expose the prompt
+or `done`; its hash is preserved as a rejected capture, while the
+founder-witnessed terminal UI remains joined to the exact daemon terminal and
+counter evidence. This limitation no longer hides a protocol cursor or terminal
+sequence.
+
+The exact initial state was restored: Example absent, Keeper's packet tunnel
+active with founder-confirmed on-demand intent, phone Tailscale inactive, phone
+back on the initial Slate SSID, and Mac Tailscale active without an exit node.
+A read-only phone capture corroborated every provider/process fact; it could
+not display the Keeper toggle without foregrounding Keeper. Installed parity
+and the final authenticated control passed. The original evidenced stop is
+therefore **resolved**. Direct LAN, Reach mesh, user tailnet cold-open and both
+same-generation VPN-slot transitions now have the complete approved receipt.
+The Keeper profile-authority finding remains Held; slot admission is the sole
+Now pass.

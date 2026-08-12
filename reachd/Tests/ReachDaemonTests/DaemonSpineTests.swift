@@ -82,7 +82,179 @@ struct ScriptedToolFilling: SlotFilling {
     }
 }
 
+private final class GenerationReceiptRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [GenerationReceipt] = []
+
+    func record(_ receipt: GenerationReceipt) {
+        lock.lock()
+        storage.append(receipt)
+        lock.unlock()
+    }
+
+    var receipts: [GenerationReceipt] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
+}
+
 @Suite struct SessionRegistryTests {
+    @Test func receiptCopyAndSourceCategoriesAreExactAndPrivacySafe() {
+        let sessionID = UUID(uuidString: "11111111-1111-1111-1111-111111111111")!
+        let genID = UUID(uuidString: "22222222-2222-2222-2222-222222222222")!
+        #expect(GenerationReceipt.Source(remoteEndpointDescription: "127.0.0.1:47337") == .loopback)
+        #expect(GenerationReceipt.Source(remoteEndpointDescription: "10.86.0.2:49152") == .reachMesh)
+        #expect(GenerationReceipt.Source(remoteEndpointDescription: "192.168.8.225:49153") == .privateLAN)
+        #expect(GenerationReceipt.Source(remoteEndpointDescription: "100.103.193.21:49154") == .sharedAddressSpace)
+        #expect(GenerationReceipt.Source(remoteEndpointDescription: "203.0.113.4:49155") == .publicNetwork)
+        #expect(GenerationReceipt.Source(remoteEndpointDescription: "169.254.1.2:49156") == .unknown)
+        #expect(GenerationReceipt.Source(remoteEndpointDescription: "not-an-endpoint") == .unknown)
+        #expect(GenerationReceipt.Source(remoteEndpointDescription: nil) == .unknown)
+
+        let accepted = GenerationReceipt.accepted(
+            sessionID: sessionID,
+            genID: genID,
+            source: .privateLAN
+        ).message
+        #expect(accepted == "generation 22222222-2222-2222-2222-222222222222 accepted on session 11111111-1111-1111-1111-111111111111 from private-lan at seq 0")
+        #expect(!accepted.contains("192.168.8.225"))
+        #expect(!accepted.contains("49153"))
+
+        let terminal = GenerationReceipt.terminal(
+            sessionID: sessionID,
+            genID: genID,
+            finalSequence: 17,
+            ending: .error
+        ).message
+        #expect(terminal == "generation 22222222-2222-2222-2222-222222222222 on session 11111111-1111-1111-1111-111111111111 finished at seq 17 ending error")
+    }
+
+    @Test func ordinaryCompletionProducesOneOrderedReceiptPair() async throws {
+        let recorder = GenerationReceiptRecorder()
+        let registry = SessionRegistry(receiptSink: recorder.record)
+        let (sessionID, _) = await registry.openSession()
+        let genID = UUID()
+        let events = AsyncThrowingStream<WireEvent, Error> { continuation in
+            continuation.yield(.responseAppend(entryID: nil, text: "safe output", segmentID: nil, tokenCount: 1))
+            continuation.finish()
+        }
+        let (stream, _, _) = try await registry.begin(
+            sessionID: sessionID,
+            genID: genID,
+            receiptSource: .loopback,
+            events: { events }
+        )
+        _ = await drain(stream) { $0.contains { if case .finished = $0.event { return true }; return false } }
+
+        #expect(recorder.receipts == [
+            .accepted(sessionID: sessionID, genID: genID, source: .loopback),
+            .terminal(sessionID: sessionID, genID: genID, finalSequence: 1, ending: .complete),
+        ])
+    }
+
+    @Test func duplicateBeginReplayAndCleanupDoNotDuplicateReceipts() async throws {
+        let recorder = GenerationReceiptRecorder()
+        var limits = SessionRegistry.Limits()
+        limits.completedRetention = .milliseconds(20)
+        let registry = SessionRegistry(limits: limits, receiptSink: recorder.record)
+        let (sessionID, _) = await registry.openSession()
+        let genID = UUID()
+        let filling = ScriptedFilling(words: ["one"], delayMilliseconds: 0)
+        let request = WireGenerationRequest(id: UUID(), transcript: Transcript())
+
+        let (first, _, _) = try await registry.begin(
+            sessionID: sessionID,
+            genID: genID,
+            receiptSource: .privateLAN,
+            events: { filling.generate(request) }
+        )
+        _ = await drain(first) { $0.contains { if case .finished = $0.event { return true }; return false } }
+
+        let (duplicate, _, _) = try await registry.begin(sessionID: sessionID, genID: genID) {
+            Issue.record("a duplicate begin started another filling")
+            return filling.generate(request)
+        }
+        _ = await drain(duplicate) { $0.contains { if case .finished = $0.event { return true }; return false } }
+
+        let (replay, _, _) = try await registry.attach(sessionID: sessionID, genID: genID, fromSeq: nil)
+        _ = await drain(replay) { $0.contains { if case .finished = $0.event { return true }; return false } }
+
+        try await Task.sleep(for: .milliseconds(60))
+        #expect(await registry.sweep() == 1)
+        #expect(recorder.receipts == [
+            .accepted(sessionID: sessionID, genID: genID, source: .privateLAN),
+            .terminal(sessionID: sessionID, genID: genID, finalSequence: 2, ending: .complete),
+        ])
+    }
+
+    @Test func detachAndReattachKeepOneReceiptPair() async throws {
+        let recorder = GenerationReceiptRecorder()
+        let registry = SessionRegistry(receiptSink: recorder.record)
+        let (sessionID, _) = await registry.openSession()
+        let genID = UUID()
+        let filling = ScriptedFilling(words: ["one", "two", "three"], delayMilliseconds: 20)
+        let request = WireGenerationRequest(id: UUID(), transcript: Transcript())
+        let (first, epoch, _) = try await registry.begin(
+            sessionID: sessionID,
+            genID: genID,
+            receiptSource: .reachMesh,
+            events: { filling.generate(request) }
+        )
+        let head = await drain(first) { $0.count == 1 }
+        await registry.detach(sessionID: sessionID, genID: genID, epoch: epoch)
+        let (second, _, _) = try await registry.attach(
+            sessionID: sessionID,
+            genID: genID,
+            fromSeq: head.last?.seq
+        )
+        _ = await drain(second) { $0.contains { if case .finished = $0.event { return true }; return false } }
+
+        #expect(recorder.receipts == [
+            .accepted(sessionID: sessionID, genID: genID, source: .reachMesh),
+            .terminal(sessionID: sessionID, genID: genID, finalSequence: 4, ending: .complete),
+        ])
+    }
+
+    @Test func cancellationAndFillingErrorsExposeOnlyTheirCategories() async throws {
+        enum SecretFailure: Error { case transcriptContainedPrivateWords }
+
+        let recorder = GenerationReceiptRecorder()
+        let registry = SessionRegistry(receiptSink: recorder.record)
+        let (sessionID, _) = await registry.openSession()
+        let cancelledID = UUID()
+        let request = WireGenerationRequest(id: UUID(), transcript: Transcript())
+        let filling = ScriptedFilling(words: ["one", "two"], delayMilliseconds: 500)
+        let (cancelledStream, epoch, _) = try await registry.begin(
+            sessionID: sessionID,
+            genID: cancelledID,
+            receiptSource: .sharedAddressSpace,
+            events: { filling.generate(request) }
+        )
+        _ = await drain(cancelledStream) { $0.count == 1 }
+        await registry.cancel(sessionID: sessionID, genID: cancelledID, epoch: epoch)
+
+        let failedID = UUID()
+        let failedEvents = AsyncThrowingStream<WireEvent, Error> { continuation in
+            continuation.finish(throwing: SecretFailure.transcriptContainedPrivateWords)
+        }
+        let (failedStream, _, _) = try await registry.begin(
+            sessionID: sessionID,
+            genID: failedID,
+            receiptSource: .publicNetwork,
+            events: { failedEvents }
+        )
+        _ = await drain(failedStream) { $0.contains { if case .finished = $0.event { return true }; return false } }
+
+        #expect(recorder.receipts == [
+            .accepted(sessionID: sessionID, genID: cancelledID, source: .sharedAddressSpace),
+            .terminal(sessionID: sessionID, genID: cancelledID, finalSequence: 1, ending: .cancelled),
+            .accepted(sessionID: sessionID, genID: failedID, source: .publicNetwork),
+            .terminal(sessionID: sessionID, genID: failedID, finalSequence: 0, ending: .error),
+        ])
+        #expect(!recorder.receipts.map(\.message).joined().contains("transcriptContainedPrivateWords"))
+    }
+
     /// Does a cancelled generation actually reach a terminal state?
     ///
     /// `docs/wire.md` says "the generation finishes `.cancelled` rather than

@@ -2,6 +2,62 @@ import Crypto
 import Foundation
 import ReachWire
 
+/// Privacy-safe evidence for the lifecycle of one resident generation.
+///
+/// The session log remains the source-address record. These receipts join a
+/// generation to that session without repeating an address or port, and name
+/// the exact wire cursor at both ends without retaining prompt or output data.
+package enum GenerationReceipt: Sendable, Equatable {
+    package enum Source: String, Sendable, Equatable {
+        case loopback
+        case reachMesh = "reach-mesh"
+        case privateLAN = "private-lan"
+        case sharedAddressSpace = "shared-address-space"
+        case publicNetwork = "public"
+        case unknown
+
+        package init(remoteEndpointDescription: String?) {
+            guard let remoteEndpointDescription,
+                  let endpoint = MeshEndpoint.split(remoteEndpointDescription),
+                  let kind = MeshEndpoint.classify(endpoint.host) else {
+                self = .unknown
+                return
+            }
+            self = switch kind {
+            case .loopback: .loopback
+            case .mesh: .reachMesh
+            case .privateNetwork: .privateLAN
+            case .sharedAddressSpace: .sharedAddressSpace
+            case .publicAddress: .publicNetwork
+            case .linkLocal: .unknown
+            }
+        }
+    }
+
+    package enum Ending: String, Sendable, Equatable {
+        case complete
+        case cancelled
+        case error
+    }
+
+    case accepted(sessionID: UUID, genID: UUID, source: Source)
+    case terminal(sessionID: UUID, genID: UUID, finalSequence: UInt64, ending: Ending)
+
+    /// Stable, grep-friendly copy. UUIDs are random protocol cursors; every
+    /// other value is an enum or sequence number. In particular, an error's
+    /// associated text never reaches this surface.
+    package var message: String {
+        switch self {
+        case .accepted(let sessionID, let genID, let source):
+            "generation \(genID) accepted on session \(sessionID) from \(source.rawValue) at seq 0"
+        case .terminal(let sessionID, let genID, let finalSequence, let ending):
+            "generation \(genID) on session \(sessionID) finished at seq \(finalSequence) ending \(ending.rawValue)"
+        }
+    }
+}
+
+package typealias GenerationReceiptSink = @Sendable (GenerationReceipt) -> Void
+
 /// Session residency, minimal per the named stub: generations are owned by
 /// the registry and decoupled from connections — a transport death leaves
 /// the generation running inside its residency window, and a re-attach
@@ -117,10 +173,23 @@ public actor SessionRegistry {
 
     private var sessions: [UUID: SessionRecord] = [:]
     private let limits: Limits
+    private let receiptSink: GenerationReceiptSink
     private let clock = ContinuousClock()
 
     public init(limits: Limits = Limits()) {
         self.limits = limits
+        receiptSink = { receipt in Log.info(receipt.message) }
+    }
+
+    /// Test/package seam for observing receipts without intercepting stdout.
+    /// The sink is deliberately non-throwing: evidence must not become part of
+    /// generation control flow.
+    package init(
+        limits: Limits = Limits(),
+        receiptSink: @escaping GenerationReceiptSink
+    ) {
+        self.limits = limits
+        self.receiptSink = receiptSink
     }
 
     // MARK: Sessions
@@ -202,6 +271,22 @@ public actor SessionRegistry {
         genID: UUID,
         events: @escaping @Sendable () -> AsyncThrowingStream<WireEvent, Error>
     ) throws -> (stream: AsyncStream<Ev>, epoch: UInt64, version: UInt8) {
+        try begin(
+            sessionID: sessionID,
+            genID: genID,
+            receiptSource: .unknown,
+            events: events
+        )
+    }
+
+    /// Daemon-only form carrying a category derived from the transport's
+    /// remote endpoint. It never stores or logs the endpoint itself.
+    package func begin(
+        sessionID: UUID,
+        genID: UUID,
+        receiptSource: GenerationReceipt.Source,
+        events: @escaping @Sendable () -> AsyncThrowingStream<WireEvent, Error>
+    ) throws -> (stream: AsyncStream<Ev>, epoch: UInt64, version: UInt8) {
         guard sessions[sessionID] != nil else { throw RegistryError.unknownSession }
         if sessions[sessionID]!.generations[genID] != nil {
             // First-frame-loss idempotency (ruling 4). This delegates, so it
@@ -215,6 +300,7 @@ public actor SessionRegistry {
         let (stream, continuation) = AsyncStream<Ev>.makeStream()
         record.live = continuation
         sessions[sessionID]!.generations[genID] = record
+        receiptSink(.accepted(sessionID: sessionID, genID: genID, source: receiptSource))
 
         let task = Task { [weak self] in
             for await event in Self.terminating(events()) {
@@ -401,11 +487,17 @@ public actor SessionRegistry {
         record.live?.yield(stamped)
 
         var finished = false
+        var receiptEnding: GenerationReceipt.Ending?
         if case .finished(let reason) = event {
             record.state = switch reason {
             case .complete: .complete
             case .cancelled: .cancelled
             case .error: .failed
+            }
+            receiptEnding = switch reason {
+            case .complete: .complete
+            case .cancelled: .cancelled
+            case .error: .error
             }
             record.live?.finish()
             record.live = nil
@@ -414,6 +506,14 @@ public actor SessionRegistry {
         }
         session.generations[genID] = record
         sessions[sessionID] = session
+        if let receiptEnding {
+            receiptSink(.terminal(
+                sessionID: sessionID,
+                genID: genID,
+                finalSequence: stamped.seq,
+                ending: receiptEnding
+            ))
+        }
         return finished
     }
 

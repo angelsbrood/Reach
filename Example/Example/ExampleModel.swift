@@ -49,11 +49,13 @@ final class ExampleModel {
     /// Which timezone the tool was asked for, once it has run. The completion
     /// text cannot establish that the tool ran *here* — this can.
     var toolRan: String?
-    /// The demo prompt, in the repo rather than in the operator's clipboard.
+    static let quickPrompt = "In one sentence, describe the mouth of a river."
+
+    /// The long transition prompt selected from the app's prompt menu.
     ///
-    /// The one-line default it replaced finished in a sentence, which left no
-    /// generation running to survive the network switch — so every take meant
-    /// pasting a long prompt in by hand at the moment the rig was already moving.
+    /// The quick one-line default finishes in a sentence, which leaves no
+    /// generation running to survive the network switch. Keeping this preset
+    /// beside the quick test removes manual retyping while the rig is moving.
     /// `docs/demo.md` records why this shape: a long output from a short ask,
     /// with no natural stopping point early enough to strand the walk.
     ///
@@ -74,7 +76,7 @@ final class ExampleModel {
     /// signs off — a question, an offer to expand — and the final image belongs
     /// to a chatbot rather than to the river. Naming all four exits is what it
     /// takes; "no closing question" alone still buys an offer to continue.
-    var prompt = """
+    static let transitionPrompt = """
         Write about 3000 words on the life of a river, reach by reach. Take it in \
         order: the spring and the first cut of the channel; the steep young water; \
         the shallows and the pools; the meanders and the oxbows; the confluences \
@@ -86,6 +88,7 @@ final class ExampleModel {
         question, an offer to continue or expand, a summary of what you have \
         written, or any remark addressed to the reader.
         """
+    var prompt = ExampleModel.quickPrompt
     var output = ""
     var status = ""
     var isStreaming = false
@@ -95,6 +98,14 @@ final class ExampleModel {
     private var sessionKey: String?
 
     static let identityLabel = "reach-example"
+
+    func useQuickPrompt() {
+        prompt = Self.quickPrompt
+    }
+
+    func useTransitionPrompt() {
+        prompt = Self.transitionPrompt
+    }
 
     func bootstrap() async {
         // Identity: a prior enrollment's keychain items first, then the

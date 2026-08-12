@@ -40,6 +40,14 @@ struct ContentView: View {
                     .textFieldStyle(.roundedBorder)
                     .lineLimit(1...3)
                     .onSubmit { model.send() }
+                Menu {
+                    Button("Quick test") { model.useQuickPrompt() }
+                    Button("Network transition") { model.useTransitionPrompt() }
+                } label: {
+                    Image(systemName: "text.badge.plus")
+                }
+                .accessibilityLabel("Choose prompt")
+                .disabled(model.isStreaming)
                 Button(model.isStreaming ? "…" : "Send") { model.send() }
                     .buttonStyle(.borderedProminent)
                     .disabled(model.isStreaming)
