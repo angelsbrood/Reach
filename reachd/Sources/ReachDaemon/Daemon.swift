@@ -132,6 +132,7 @@ public final class Daemon: Sendable {
     private let config: DaemonConfig
     private let filling: any SlotFilling
     private let registry: SessionRegistry
+    private let admission: SlotAdmission
     private let tls: ListenerIdentity
     private let grants: GrantWiring?
     private let reachability: ReachabilityCoordinator?
@@ -149,6 +150,9 @@ public final class Daemon: Sendable {
         self.config = config
         self.filling = filling
         self.registry = registry
+        self.admission = SlotAdmission(policy: .init(
+            capacity: filling.maximumConcurrentGenerations
+        ))
         self.tls = identity
         self.grants = grants
         self.reachability = reachability
@@ -165,11 +169,15 @@ public final class Daemon: Sendable {
         registry: SessionRegistry = SessionRegistry(),
         grants: GrantWiring? = nil,
         reachability: ReachabilityCoordinator? = nil,
+        admission: SlotAdmission? = nil,
         currentAddresses: @escaping @Sendable () -> [[UInt8]]
     ) {
         self.config = config
         self.filling = filling
         self.registry = registry
+        self.admission = admission ?? SlotAdmission(policy: .init(
+            capacity: filling.maximumConcurrentGenerations
+        ))
         self.tls = identity
         self.grants = grants
         self.reachability = reachability
@@ -194,6 +202,7 @@ public final class Daemon: Sendable {
         // for its port is exactly what a restart is, so this is the shape the
         // daemon meets most.
         try await listener.waitUntilReady()
+        Log.info(await admission.startupMessage)
         // The system request is deliberately long-lived: it renews mappings
         // and follows primary-network changes, calling us again whenever the
         // assigned address or port moves.
@@ -239,6 +248,7 @@ public final class Daemon: Sendable {
 
     public func stop() async {
         reachability?.stop()
+        await admission.shutdown()
         await state.stop()
     }
 
@@ -445,8 +455,13 @@ public final class Daemon: Sendable {
                 receiptSource: GenerationReceipt.Source(
                     remoteEndpointDescription: stream.remoteEndpointDescription()
                 ),
+                admission: admission,
                 events: { filling.generate(begin.request) }
             )
+        } catch let error as SlotAdmission.AdmissionError where error.isImmediateRefusal {
+            try await stream.send(ErrorFrame(code: "cluster-busy", message: error.description))
+            stream.cancel()
+            return
         } catch {
             try await stream.send(ErrorFrame(code: "begin-rejected", message: "\(error)"))
             // Cancelled for the same reason the silent-opening path above
@@ -541,7 +556,12 @@ public final class Daemon: Sendable {
                     let ack = try raw.decode(EvAck.self)
                     await registry.ack(sessionID: sessionID, genID: genID, seq: ack.seq, epoch: epoch)
                 case .generateCancel:
-                    await registry.cancel(sessionID: sessionID, genID: genID, epoch: epoch)
+                    await registry.cancel(
+                        sessionID: sessionID,
+                        genID: genID,
+                        epoch: epoch,
+                        admission: admission
+                    )
                 default:
                     break
                 }

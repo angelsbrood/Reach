@@ -1933,3 +1933,148 @@ therefore **resolved**. Direct LAN, Reach mesh, user tailnet cold-open and both
 same-generation VPN-slot transitions now have the complete approved receipt.
 The Keeper profile-authority finding remains Held; slot admission is the sole
 Now pass.
+
+## S25 — concurrent provider-slot admission, 12 August 2026
+
+S25 first measured the unmodified `acb723b` runtime through a disposable fake
+registry and the cached Gemma 4 E4B weights. Four begins entered both the
+separate-session and same-session fake filling simultaneously (`peak=4`). The
+real filling did not have one concurrency shape: short ordinary decoding
+overlapped after serialized preparation, while guided and tool work advanced
+in staggered, effectively serialized passes. Four 25,000-word prefills ended at
+8.460, 15.070, 21.392 and 27.669 seconds. Nothing crashed, corrupted output or
+failed typed decoding, so the selected model-neutral one-generation contract
+remained admissible.
+
+| warmed shape | before wall | admitted wall | outcome |
+|---|---:|---:|---|
+| ordinary ×1 | 0.144 s | 0.164 s | complete; within run-to-run noise |
+| ordinary ×4 | 0.359 s | 0.489 s | four complete; one filling call at a time |
+| guided ×4 | 1.542 s | 4.811 s | four typed completions |
+| allowed tool ×4 | 2.428 s | 6.654 s | four constrained calls complete |
+| required tool ×4 | 1.286 s | 4.629 s | four required calls complete |
+| 25,000-word prefill ×4 | 27.669 s | 29.336 s | four complete; preparation was already serial |
+
+The admitted run prewarmed in 3.778 seconds. Its process RSS was 4.65 GiB after
+prewarm and 4.69 GiB at the end. MLX reported 4.044 GiB active after prewarm,
+a 5.349 GiB peak, and 4.046 GiB active at the end; the recorded cache high-water
+was 21.016 GiB. The passing test required the built `default.metallib` beside
+the scratch executable, directly exercising the Metal backend. A first test-
+bundle launch without that adjacency failed before model work and was
+attributed to the scratch layout, not admission.
+
+After implementation, every four-request batch observed exactly one public
+filling call with one active reservation and three FIFO waiters. Cancelling the
+active real-weight generation promoted the oldest waiter, which completed;
+the counters ended with two admitted and one cancelled. Deterministic actor,
+registry and QUIC tests separately proved FIFO order, a fifth immediate
+`cluster-busy`, one waiter per session, a 120-second timeout without filling
+execution, duplicate-begin idempotency, active and queued re-attach, replay-
+only release, and reuse of the same authenticated session after overload.
+
+**Verdict: PASS, with the serial-capacity tradeoff deliberate.** Single-request
+latency remains unchanged within measurement noise, while concurrent guided
+and tool requests now exchange accidental overlap for bounded FIFO latency.
+One lease covers the complete public generation and all of its internal model
+passes; no dialect, frame, persisted queue or public client queue API was
+added.
+
+Focused admission, registry and loopback coverage passed three complete runs
+at 14 tests in four suites. Fresh full products then passed ReachKit **79/79
+eight of eight** and reachd **218/218 in 33 suites eight of eight**. A known
+cold-open timing sentinel crossed its bound once while eight full products
+were competing for the host, then passed three isolated repetitions without a
+threshold change; two rejected back-to-back attempts also exposed fixed-port
+contention and a terminal-receipt observation race. The latter was a real
+ordering defect: the registry now commits the terminal state and receipt before
+yielding the terminal event, and its focused reproducer passed 3/3.
+
+The final tree adds one explicitly gated installed-host test, so its default
+inventory is 219 tests in 34 suites. A fresh audit passed every admission suite
+and found only the same cold-open timing sentinel at 40.341 seconds under the
+full concurrent runner. With that already-attributed sentinel selected out,
+the other **218/218 in 34 suites passed in 49.290 seconds**; the sentinel then
+passed immediately in isolation **3/3 at 11.131, 10.978 and 10.776 seconds**.
+Its 10-second budget and 2x failure bound remain unchanged. Full-suite load
+also showed that an end-to-end QUIC promotion can arrive after 1.5 seconds even
+when the admission actor has already promoted it correctly (observed at 3.955
+seconds), so only that integration test's observation allowance became ten
+seconds. The deterministic actor deadlines stayed unchanged, and the focused
+wire suite passed 3/3 after the calibration.
+
+The warnings-as-errors release had SHA-256
+`19462f3e4069aac8fe698a8f778cbf5165b419d95046c03e57436f9c0b65798b`
+and retained exactly seven adjacent resource bundles. Generic-Simulator
+Example and generic-iOS Keeper linkage builds passed. Installed acceptance
+used five simultaneous, separately authenticated loopback clients against the
+supervised exact release: four completed and the fifth received the exact
+`cluster-busy` refusal. The daemon recorded one active lease, FIFO positions
+one through three, one refusal without a generation receipt, promotions after
+7.240, 13.349 and 19.143 seconds, and complete terminal sequences 577, 496,
+472 and 475. It ended at active zero and waiting zero without restarting.
+
+Installation preserved all four CA/server fingerprints, the device registry,
+the WireGuard host keypair, mesh intent and zero CA creation. The canonical
+agent remained healthy as PID 82151/run 1, both listeners were present, and an
+authenticated installed `doctor --dial` opened a loopback session in 41 ms
+with **15 pass, 3 expected mapping/pin warnings, 0 waiting and 0 fail**. The
+complete previous eight-item installation remains recoverable from the guarded
+pre-replacement backup. A later read-only closeout spot-check reproduced the
+known host `SecPKCS12Import -25291` diagnostic-identity fault on four bounded
+attempts after that successful dial. No installed byte, daemon, listener or
+identity moved; the accepted gate is the actual 41 ms authenticated session,
+not the later warning, whose recurrence remains an attributed machine fault.
+
+### S25 post-review correction
+
+Two review rounds found three bounded defects in the otherwise accepted
+admission pass.
+The end-to-end QUIC test had assumed that sequential sends on separate streams
+established daemon admission order; one clean run admitted `1,0,2,3`, proving
+that assumption false. The test now sends and observes the active generation
+before it admits each waiter, so it tests the FIFO actor rather than
+Network.framework scheduling. Review also found that queued cancellation
+could publish `.cancelled` before an unawaited task removed its reservation.
+The daemon now awaits queued-reservation removal before making the terminal
+visible, and a regression immediately begins a replacement generation from
+the same session with no yield or retry. The second review then forced the
+remaining actor-reentry edge: cancellation removed a queued reservation while
+reattach bumped the generation epoch. A committed queue removal now finishes
+the current streaming record across that epoch change; an active or otherwise
+uncommitted cancellation still requires the original epoch. A deterministic
+barrier test proves the reattached stream receives `.cancelled`, the registry
+does not remain streaming, and the filling never executes the removed work.
+
+The corrected admission/registry/QUIC set is **17 tests in five suites** and
+passed three complete focused runs. A fresh full-suite attempt reached every
+admission test but was blocked by 11 unrelated CA fixtures: Foundation refused
+every `.completeFileProtection` write with `NSCocoaErrorDomain 513` / POSIX
+`EPERM`. A standalone probe reproduced the same failure in both the Darwin
+user temporary directory and `/private/tmp`, establishing a host protection
+or keybag fault rather than an admission regression. The prior 79/79 ReachKit
+and 218/218 reachd repetitions remain the last complete-suite baseline; this
+follow-up does not pretend the blocked audit passed.
+
+The fresh warnings-as-errors release is arm64, ad-hoc linker-signed, retains
+exactly seven adjacent bundles, and has SHA-256
+`b3db694d8069bd81357fa41d2cc2558c22d97457cb5900ec28a95e93a4f69cd5`.
+Founder-authorized guarded replacement installed those exact bytes with the
+prior eight-item unit recoverable at
+`/private/tmp/reach-slot-followup-install-backup.v0XdaT`. The supervised daemon
+returned as PID 29122/run 1 with both UDP listeners. The gated five-client
+acceptance then completed four generations and refused one full-room request
+in 25.669 seconds. An unsandboxed authenticated `doctor --dial` opened over
+loopback in 38 ms with **15 pass, 3 expected mapping/pin warnings, 0 waiting
+and 0 fail**. Two preceding sandboxed attempts reproduced
+`SecPKCS12Import -25291`; the immediate unsandboxed success identifies that
+instance as the diagnostic process boundary rather than an installed-daemon
+failure. All four CA/server hashes, the device registry, mesh intent and
+WireGuard host keypair remained byte-identical to the pre-install manifest;
+the CA-creation count remained zero.
+
+The closeout remains deliberately phone-free. First- and middle-waiter
+cancellation under real weights, active and queued reattachment over every
+physical road, and repeated cold-load trials were proposals in the exploratory
+draft, not acceptance work that was performed. The founder ruled the measured
+fake/real provider matrix plus deterministic transport-independent lease tests
+sufficient; this record claims exactly that boundary and no larger matrix.

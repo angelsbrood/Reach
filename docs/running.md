@@ -80,6 +80,31 @@ still require a manually reachable endpoint or the future relay described in
 [relay.md](relay.md). A client already away when an endpoint moves keeps its
 stale road until it can authenticate on another one and receive a fresh hello.
 
+## When the model slot is busy
+
+The current MLX filling executes one public generation at a time. Three more
+generations may wait globally in FIFO order, with at most one waiter from a
+given session. Waiting is resident work: it can lose its QUIC stream and
+re-attach without taking another place, and every schema or tool pass stays
+inside the one lease held by that public generation.
+
+A fourth accepted generation occupies the last waiting place. A fifth is
+refused immediately with `cluster-busy`; so is a second waiter from one
+session. Those refusals mean the authenticated cluster answered and its road
+is healthy. A waiter that spends 120 seconds without reaching the model slot
+ends with a generation error rather than running late or masquerading as a
+network failure.
+
+The daemon logs only privacy-safe admission transitions: startup policy,
+active/waiting counts, FIFO promotion time, release outcome, refusals,
+cancellation and timeout. It logs no prompt, output, endpoint, identity or
+token count. `provider admission queued` followed by `promoted the oldest
+waiter` is normal load; `waiting room is full` calls for retrying after current
+work finishes; `timed out queued work` says the road stayed healthy but demand
+outlived the two-minute bound. Live queue state is intentionally absent from
+`doctor` and `service status`: v0 has no management channel from which either
+command could read an authoritative remote snapshot.
+
 ## As a service
 
 ⚠️ **`reachd` is not a single file.** SwiftPM emits resource bundles beside the

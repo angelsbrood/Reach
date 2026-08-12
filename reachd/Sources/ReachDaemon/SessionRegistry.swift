@@ -63,13 +63,12 @@ package typealias GenerationReceiptSink = @Sendable (GenerationReceipt) -> Void
 /// the generation running inside its residency window, and a re-attach
 /// replays the un-acked buffer then continues live.
 ///
-/// Generations are keyed by genID and nothing caps how many a session holds.
-/// A `generationAlreadyRunning` case was declared here and never thrown, so
-/// "one in-flight generation per session" was a convention no code kept;
-/// enforcing it would have been worse than dropping it, because
-/// `begin-rejected` is precisely the client's cue to discard its session and
-/// open a fresh one — a well-behaved app would have answered the refusal by
-/// silently splitting itself in two.
+/// Generations are keyed by genID. Provider admission is deliberately not a
+/// property of this table: the daemon's package-only `begin` overload binds a
+/// resident generation to one volatile provider reservation, while the public
+/// registry API remains a pure residency primitive for alternate fillings and
+/// tests. A session may own several active generations, but only one of its
+/// generations may occupy the global waiting room at a time.
 ///
 /// Nothing here survives the process. That is deliberate and it is the whole
 /// of what a restart costs: the transcript rides the wire on every
@@ -313,6 +312,95 @@ public actor SessionRegistry {
         return (stream, record.epoch, sessions[sessionID]!.version)
     }
 
+    /// Daemon-only admitted form. The reservation is acquired before the
+    /// filling closure is evaluated, so one lease covers every model pass the
+    /// filling performs. The resident record and accepted receipt are created
+    /// while the work is queued; a full-room refusal creates neither.
+    package func begin(
+        sessionID: UUID,
+        genID: UUID,
+        receiptSource: GenerationReceipt.Source,
+        admission: SlotAdmission,
+        events: @escaping @Sendable () -> AsyncThrowingStream<WireEvent, Error>
+    ) async throws -> (stream: AsyncStream<Ev>, epoch: UInt64, version: UInt8) {
+        guard sessions[sessionID] != nil else { throw RegistryError.unknownSession }
+        if sessions[sessionID]!.generations[genID] != nil {
+            return try attach(sessionID: sessionID, genID: genID, fromSeq: nil)
+        }
+
+        let reservation = try await admission.reserve(.init(
+            sessionID: sessionID,
+            generationID: genID
+        ))
+
+        // `await reserve` is an actor-reentrancy point. A retransmitted begin
+        // may have won the race using the same idempotent reservation.
+        if sessions[sessionID]?.generations[genID] != nil {
+            return try attach(sessionID: sessionID, genID: genID, fromSeq: nil)
+        }
+        guard sessions[sessionID] != nil else {
+            await admission.abandon(reservation)
+            throw RegistryError.unknownSession
+        }
+
+        var record = GenerationRecord()
+        let (stream, continuation) = AsyncStream<Ev>.makeStream()
+        record.live = continuation
+        sessions[sessionID]!.generations[genID] = record
+        receiptSink(.accepted(sessionID: sessionID, genID: genID, source: receiptSource))
+
+        let task = Task { [weak self] in
+            do {
+                let lease = try await admission.acquire(reservation)
+                if Task.isCancelled {
+                    await admission.release(lease, outcome: .cancelled)
+                    return
+                }
+                var outcome = SlotAdmission.ReleaseOutcome.complete
+                if let self {
+                    for await event in Self.terminating(events()) {
+                        if case .finished(let reason) = event {
+                            outcome = switch reason {
+                            case .complete: .complete
+                            case .cancelled: .cancelled
+                            case .error: .error
+                            }
+                        }
+                        let finished = await self.ingest(
+                            sessionID: sessionID,
+                            genID: genID,
+                            event: event
+                        )
+                        if finished { break }
+                    }
+                } else {
+                    outcome = .error
+                }
+                if Task.isCancelled { outcome = .cancelled }
+                await admission.release(lease, outcome: outcome)
+            } catch is CancellationError {
+                // `cancel` writes the wire terminal synchronously. The
+                // acquisition cancellation only removes a queued reservation.
+            } catch let error as SlotAdmission.AdmissionError {
+                guard let self else { return }
+                _ = await self.ingest(
+                    sessionID: sessionID,
+                    genID: genID,
+                    event: .finished(.error(error.description))
+                )
+            } catch {
+                guard let self else { return }
+                _ = await self.ingest(
+                    sessionID: sessionID,
+                    genID: genID,
+                    event: .finished(.error("\(error)"))
+                )
+            }
+        }
+        sessions[sessionID]!.generations[genID]!.task = task
+        return (stream, record.epoch, sessions[sessionID]!.version)
+    }
+
     /// Re-attach a live or buffered generation, replaying from `fromSeq`
     /// (exclusive); nil replays everything still buffered.
     ///
@@ -401,6 +489,42 @@ public actor SessionRegistry {
         _ = ingest(sessionID: sessionID, genID: genID, event: .finished(.cancelled))
     }
 
+    /// Daemon-only cancellation for generations governed by provider
+    /// admission. A queued reservation is removed synchronously at the
+    /// admission actor before the wire terminal becomes observable. The
+    /// public residency-only cancellation surface remains unchanged.
+    package func cancel(
+        sessionID: UUID,
+        genID: UUID,
+        epoch: UInt64,
+        admission: SlotAdmission
+    ) async {
+        guard let session = sessions[sessionID],
+              let record = session.generations[genID],
+              record.epoch == epoch,
+              record.state == .streaming
+        else { return }
+
+        let queuedCancellationCommitted = await admission.cancelQueued(.init(
+            sessionID: sessionID,
+            generationID: genID
+        ))
+
+        // The await above permits actor re-entry. Revalidate before ending
+        // an active generation so a stale connection cannot overwrite a newer
+        // attachment. A removed queued reservation is different: cancellation
+        // is already irreversible and its acquisition task can no longer
+        // finish the generation, so an intervening reattach inherits that
+        // committed cancellation rather than orphaning a streaming record.
+        guard let refreshedSession = sessions[sessionID],
+              let refreshed = refreshedSession.generations[genID],
+              refreshed.state == .streaming,
+              queuedCancellationCommitted || refreshed.epoch == epoch
+        else { return }
+        refreshed.task?.cancel()
+        _ = ingest(sessionID: sessionID, genID: genID, event: .finished(.cancelled))
+    }
+
     /// Expiry sweep; call periodically. Returns how many generations were
     /// reaped (for tests and logs).
     @discardableResult
@@ -484,8 +608,7 @@ public actor SessionRegistry {
             record.droppedThrough = oldest.seq
             record.buffer.removeFirst()
         }
-        record.live?.yield(stamped)
-
+        let live = record.live
         var finished = false
         var receiptEnding: GenerationReceipt.Ending?
         if case .finished(let reason) = event {
@@ -499,7 +622,6 @@ public actor SessionRegistry {
             case .cancelled: .cancelled
             case .error: .error
             }
-            record.live?.finish()
             record.live = nil
             record.detachedAt = clock.now
             finished = true
@@ -513,6 +635,13 @@ public actor SessionRegistry {
                 finalSequence: stamped.seq,
                 ending: receiptEnding
             ))
+        }
+        // A client may resume immediately when `yield` wakes it. Publish the
+        // state and its privacy-safe receipt first so a visible terminal event
+        // can never outrun the daemon evidence that names the same sequence.
+        live?.yield(stamped)
+        if finished {
+            live?.finish()
         }
         return finished
     }

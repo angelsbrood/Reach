@@ -217,6 +217,46 @@ A `GenerateBegin` carrying a genID the daemon already knows is treated as a
 re-attach from sequence 0 — which makes losing the very first frame
 recoverable instead of fatal.
 
+### Provider admission
+
+Residency and model execution are deliberately separate. The current MLX
+filling declares capacity for one **public generation**. One generation may be
+executing and three more may be resident in one global FIFO waiting room, with
+at most one waiter from any session. The lease belongs to the generation, not
+to its QUIC stream: duplicate begin, detach and re-attach neither enqueue nor
+execute it again. Response-schema compilation, tool probing, constrained tool
+replay and required calls are internal passes under that same lease.
+
+The observable states are:
+
+- **queued** — resident, receipt emitted and re-attachable, but model
+  preparation has not begun;
+- **executing** — the generation owns the provider lease, including all of its
+  internal model passes;
+- **resident-detached** — queued or executing work whose current transport is
+  gone; it retains the same reservation during the residency window;
+- **replay-only** — terminal work retained for replay, with no provider lease;
+- **completed** — terminal and retained for the ordinary completed window; and
+- **reachable-but-busy** — no generation record was created because the three
+  waiting places were occupied, or that session already had a waiter.
+
+The last state uses the existing v0 `ErrorFrame` with code `cluster-busy`.
+Because it is an authenticated service refusal, ReachKit surfaces its sentence
+without dirtying the road, reopening the session or retrying the request. A
+queued generation that has not acquired the lease after 120 seconds instead
+finishes as an ordinary generation error saying that the cluster stayed
+reachable; its filling is never invoked. No queue survives daemon restart and
+no queue state is added to the wire.
+
+The full-room refusal is: “the cluster is reachable, but its model slot and
+three-place waiting room are full — ask again when current work finishes”. A
+second waiter from one session is refused with: “the cluster is reachable,
+but this session already has a generation waiting for its model slot — let it
+finish or cancel it before asking again”. A queued timeout ends its resident
+generation with: “the cluster stayed reachable, but this generation waited
+120 seconds without reaching its model slot — ask again when current work
+finishes”. These are service outcomes, not evidence about road health.
+
 ### Active-road liveness
 
 ReachKit arms a two-second silence watchdog only after `GenerateBegin` or
@@ -227,10 +267,13 @@ that road's authenticated probe channel. The same two seconds bound its
 matching `Pong`.
 
 A pong with the exact nonce proves the daemon is alive on that road, so the
-client keeps waiting however long the model is queued or preparing its first
-token. A stale, wrong, late, closed or errored pong proves nothing. One bounded
-missing pong makes the current road dirty only if no generation event arrived
-during the probe; an event is stronger evidence than a failed control stream.
+client keeps waiting while the model is queued or preparing its first token.
+Provider admission separately caps a queued generation at 120 seconds and
+then sends a terminal generation error; that reachable ending is not a road
+failure. A stale, wrong, late, closed or errored pong proves nothing. One
+bounded missing pong makes the current road dirty only if no generation event
+arrived during the probe; an event is stronger evidence than a failed control
+stream.
 The existing road race then reattaches from the last received sequence. Before
 the first event it resends the same idempotent `GenerateBegin` and receives a
 fresh ten-second cold-open budget. Once any `Ev` has arrived, the attempt has a
@@ -249,9 +292,10 @@ baseline-v0 `Ping`/`Pong` vocabulary and change no compatibility boundary.
 `GenerateCancel` ends it early; the client's own task cancellation is what
 sends it, and the generation finishes `.cancelled` rather than vanishing.
 
-A session holds any number of generations, keyed by generation id, and nothing
-caps them. One in flight at a time is what every client does and what the tests
-cover — it is a convention, not an invariant the daemon keeps.
+A session may own several generations keyed by generation id, including one
+executing and one queued, but it may contribute only one generation to the
+global waiting room. Provider capacity is therefore enforced without reviving
+the old and incorrect “one generation per session” convention.
 
 ### What a daemon restart does
 

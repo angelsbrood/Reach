@@ -11,11 +11,23 @@ public protocol SlotFilling: Sendable {
     var displayName: String { get }
     var capabilities: [String] { get }
 
+    /// How many public generations this provider can execute at once.
+    ///
+    /// This is deliberately about the whole generation, not a prefill,
+    /// decode loop, or guided/tool pass inside one. A filling that can safely
+    /// host more work may opt in; existing fillings inherit the conservative
+    /// one-generation capacity.
+    var maximumConcurrentGenerations: Int { get }
+
     /// Prepare whatever the filling needs (weights, caches) before serving.
     func prewarm() async throws
 
     /// Serve one generation. The stream finishes after `.finished`.
     func generate(_ request: WireGenerationRequest) -> AsyncThrowingStream<WireEvent, Error>
+}
+
+public extension SlotFilling {
+    var maximumConcurrentGenerations: Int { 1 }
 }
 
 /// Transcript → (role, text) mapping shared by fillings (spike S4c).
