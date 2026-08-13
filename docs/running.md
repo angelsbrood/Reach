@@ -140,7 +140,40 @@ generation record keeps any remaining unacknowledged replay for the existing
 ten-minute window, detached work keeps the existing two-minute residency, and
 daemon shutdown clears all replay immediately. There is no spill file or
 transcript database to inspect or clean up; process durability is a separate
-design pass.
+design boundary.
+
+## When the daemon process dies
+
+Do not confuse four healthy but different mechanisms:
+
+- launchd restarts the service and preserves the cluster's on-disk identity,
+  grants, mesh intent and configuration;
+- the in-memory replay store preserves exact frames only while the same daemon
+  process is alive;
+- the pinned MLX stack can save raw KV tensors, but not the complete iterator,
+  sampler, detokenizer, grammar/tool-parser, usage and event-cursor state of a
+  public generation; and
+- the adopting app, not the daemon, owns any effect caused by a delivered tool
+  call.
+
+S27 killed the installed daemon after four clients had established one active
+and three queued residents. Approval latency let the first active generation
+finish and promoted the oldest waiter before the signal arrived, so the actual
+kill caught one active and two queued. The promoted generation, which had
+started producing work, ended with the existing legible lost-answer sentence.
+The two unseen waiters reopened fresh sessions and were accepted at sequence 0
+by the empty replacement daemon, meaning they executed as new work rather than
+recovering queue state. This is why the startup admission/replay counters return
+to zero after a restart.
+
+Operationally, a visible in-flight answer is not resumable after process death.
+The app says that it stopped and that asking again starts a new one. Work that
+had not delivered an event may be resent idempotently by the client, but it is
+not a restored provider task and must be treated as re-execution. The pinned
+stack's raw KV-cache files do not change that conclusion: S27 found no complete
+checkpoint for ordinary, guided, allowed-tool or required-tool routes, and its
+loader accepted both a truncated and a bit-flipped probe file. No durable
+generation journal or generated content exists to inspect, rotate or erase.
 
 ## As a service
 
@@ -447,7 +480,10 @@ Identity, grants, the CA and the mesh are on disk and survive. Sessions are
 not, and do not need to be: the transcript rides the wire on every request, so
 a client whose session the daemon has forgotten opens a fresh one and asks
 again without anyone seeing it. The one real casualty is a generation actually
-in flight, which ends saying so. `wire.md` has the detail.
+in flight, which ends saying so. Queued work that had emitted nothing may be
+resent and executed by the replacement daemon; that is fresh execution, not a
+durable queue. `wire.md` has the protocol detail and the five recovery
+boundaries.
 
 The first generation after a restart is slower — the weights are paged in on
 use rather than at load — and no supervisor shortens that.

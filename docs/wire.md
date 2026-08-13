@@ -351,6 +351,35 @@ seconds after the process died; with nothing restarting the daemon, the client
 spends its full residency window first, because from its side an absent cluster
 and a walk out of range are the same thing.
 
+### Five different kinds of recovery
+
+S27 measured the process boundary rather than treating every saved byte as
+durability:
+
+- **Volatile transport replay** is shipped. Exact framed events survive a road
+  or stream change while the same daemon process and generation record live.
+- **Launchd service recovery** is shipped. It starts a coherent daemon with the
+  same cluster identity, grants, roads and model configuration; its session,
+  admission and replay tables begin empty.
+- **KV-cache serialization** exists in the pinned MLX dependency. It stores
+  model tensors, but not one versioned checkpoint containing the iterator
+  token, sampler/RNG, logit processor, detokenizer, usage, event cursor,
+  grammar matcher, tool parser or call identity. S27 also found truncated and
+  bit-flipped cache files that the loader accepted, so this surface is not an
+  execution-integrity contract.
+- **Exact public-generation durability** is not shipped. Ordinary, guided,
+  allowed-tool and required-tool routes all lack complete serializable state.
+  Persisting only one route, or only completed output, would not satisfy the
+  public generation's identity and no-duplicate-output promise.
+- **Tool effects are client-owned.** Once a call crosses the wire, the daemon
+  cannot know whether the adopting app executed it. Exactly-once recovery would
+  require an explicit acknowledgement or idempotency contract; restarting the
+  model and minting another call is not recovery.
+
+The measured stop deliberately adds no transcript database, worker, frame,
+dialect or partial checkpoint. A client that had already observed the lost
+generation still receives the sentence above and must explicitly ask again.
+
 ## The event vocabulary
 
 ```swift
@@ -491,8 +520,8 @@ does not cross.
 - **Structured partial snapshots do not cross the wire.** The daemon streams
   accepted JSON text deltas and FoundationModels derives its current typed
   snapshots locally; the wire has no structured patch or partial-value event.
-  Making those snapshots explicit is named M3 follow-on work, not part of
-  response-schema enforcement.
+  `PLAN-structured-partials.md` now owns the explicit-event design; it remains
+  future M3 work and is not part of response-schema enforcement.
 - **Tool arguments arrive whole, not streamed.** Response text still streams
   token by token; a call's arguments cross in one `toolCallAppendArguments`.
   Arguments are grammar-constrained before that event, but the pinned native

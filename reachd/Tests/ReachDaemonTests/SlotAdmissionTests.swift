@@ -412,7 +412,8 @@ private struct HoldingSlotFilling: SlotFilling {
         )
         #expect(status.isEmpty)
         #expect(recorder.receipts.count == 4)
-        #expect(probe.snapshot.executions == 1)
+        let activeBegan = await slotEventually { probe.snapshot.executions == 1 }
+        #expect(activeBegan)
 
         for index in 0 ..< 4 {
             let began = await slotEventually { probe.snapshot.executions == index + 1 }

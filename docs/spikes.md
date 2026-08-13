@@ -2203,3 +2203,114 @@ CA creation remained zero.
 **Verdict: PASS.** Exact bounded replay is now baseline M3 capacity; it is not
 generation durability. A resident generation still dies with the daemon, so
 process durability is the next separate design pass.
+
+## S27 — exact public-generation durability, 13 August 2026
+
+**Question and stop rule.** S27 asked whether the pinned MLX stack could
+restore one public generation exactly across process death on all four shipped
+routes: ordinary, guided response, allowed-tool proposal/replay, and required
+tool call. A raw KV cache, completed replay alone, or recovery of only the
+ordinary route did not qualify. The required state was the same generation
+identity and committed event prefix, the same sampler and usage trajectory,
+the same grammar or tool-call identity, and no repeated visible output or tool
+effect. The source and installed baseline was clean `16e47df`; the installed
+coverage-clean daemon remained SHA-256 `da7f3cf9…3fd8`, and the dependency was
+the pinned `mlx-swift-lm` revision `83f3ef6…`.
+
+**Provider-state inventory.** The dependency can save and load the model's
+`[KVCache]`, but that is only part of an executing generation:
+
+| route | serializable part | state that is not a restorable public checkpoint |
+|---|---|---|
+| ordinary | caller-owned raw KV tensors | Reach uses the convenience iterator without owning a checkpoint; iterator token, sampler/RNG, logit processor, detokenizer, `LMOutput.State`, usage and event cursor are not one serializable unit |
+| guided | raw model KV could be saved separately | opaque grammar matcher position, model state, detokenizer, accepted-token count, closing/whitespace policy and usage remain local to `GuidedGenerationLoop` |
+| `.allowed` | no exact multipass checkpoint | incremental proposal parser, buffered prose, selected calls, candidate arguments, generated call IDs, replay grammar state and accumulated probe/replay usage are separate local values |
+| `.required` | no exact structural checkpoint | all-tools structural matcher, sampler state, accepted envelope, generated call identity, detokenizer and usage are local and non-Codable |
+
+An external compile probe confirmed that `TokenIterator.cache` is not public;
+`LMOutput.State` contains private heterogeneous state and is not Codable;
+`GrammarConstraint` exposes an in-process clone, not an encoded matcher; and
+`ToolCallProcessor` owns private parser buffers and completed-call queues.
+These gaps exist before the first event, after visible output, around a tool
+call, and after terminal publication before acknowledgement. The selected stop
+therefore fired for every route without attempting to invent a second Reach
+schema compiler, persistent transcript, worker, or wire protocol.
+
+**Raw-cache measurement.** A disposable real Gemma cache probe produced 24
+cache layers and a 2,930,234-byte safetensors file after 64 tokens. The retained
+raw rerun loaded the model in 2.710 seconds. Three save plus `F_FULLFSYNC`
+trials were 8.978, 6.267 and 7.008 ms; three loads were 0.961, 0.856 and
+0.854 ms. The saved metadata was
+empty, so the file did not bind itself to the model revision. More importantly,
+both a half-truncated file and a middle-bit-flipped file were accepted by the
+loader and each produced a further token. That is useful cache machinery, not
+a durable execution or integrity contract. Stale writers, revision mismatch,
+rollback, duplicate begin, cancellation and expiry consequently have no
+provider-owned transaction authority to reconcile.
+
+**Synthetic encrypted-storage envelope.** Private synthetic bytes and an
+ephemeral AES-GCM key measured storage cost only; all payload files were
+deleted after the run. Values below are three trials in milliseconds:
+
+| plaintext | encrypted bytes | seal | exclusive write + `F_FULLFSYNC` | read + decrypt |
+|---|---:|---|---|---|
+| 65,536-byte request | 65,564 | 2.042 / 0.017 / 0.024 | 4.798 / 5.081 / 4.664 | 0.171 / 0.120 / 0.080 |
+| 16,777,220-byte replay window | 16,777,248 | 3.850 / 2.775 / 2.937 | 10.871 / 11.684 / 11.207 | 6.571 / 6.942 / 7.482 |
+| 67,108,864-byte synthetic checkpoint | 67,108,892 | 14.986 / 11.843 / 11.891 | 34.946 / 32.262 / 32.072 | 28.136 / 30.417 / 31.886 |
+
+Storage latency is not the blocking fact. The missing boundary is a complete,
+versioned, integrity-checked provider state plus an explicit privacy and
+retention contract for content that Reach intentionally does not persist.
+
+**Tool-effect probe.** A harmless synthetic client-owned tool used a
+`flock`-serialized private counter. Synthetic loss before delivery left it at
+0; executing the delivered call before returning synthetic generation loss made
+it 1; explicitly asking again executed the effect again and made it 2. The
+daemon cannot infer whether an already delivered call ran, and call identity is
+generated inside the lost process. Exactly-once tool effects would need a
+client acknowledgement/idempotency contract, not a KV-cache file.
+
+**Installed launchd crash.** Four authenticated clients first established the
+required one-active/three-waiter state. While the explicit kill checkpoint was
+being confirmed, the original active generation completed at sequence 1558
+and the oldest waiter was promoted. The single authorized `SIGKILL` therefore
+actually struck one active plus two queued generations; this timing is retained
+rather than rewritten as the intended shape. Launchd replaced PID 6118/run 1
+with PID 29485/run 2. The promoted active generation ended with the existing
+legible lost-answer sentence. The two clients that had seen no generation
+event resent their unchanged IDs after opening fresh sessions; the empty new
+daemon accepted each at sequence 0 and re-executed them to sequences 2225 and
+2320. The already completed generation remained complete. Admission and replay
+state restarted empty, proving that launchd service recovery is not public-
+generation durability.
+
+A fresh authenticated generation then completed against the restarted daemon.
+The CLI diagnostic reproduced the known `SecPKCS12Import -25291` process fault
+three times across this pass, with no other doctor failure; the private scratch
+client supplied the actual authenticated-session proof. Installed bytes, CA
+and server certificates, device registry, and WireGuard host public key remained
+byte-identical, and the CA-creation count remained zero.
+
+**Verification.** The restart/admission/replay/tool/error focused set ran 49
+tests in seven suites. Its one immediate fake-execution assertion was a real
+test race, not a product failure: it now waits for the asynchronously scheduled
+execution exactly as the subsequent assertions already did. The repaired exact
+test passed **3/3** in 24, 24 and 22–23 ms. After that repair, the complete
+reachd tree passed **240/240 in 36 suites**; the pre-repair complete ReachKit
+tree remains **80/80** because no ReachKit source changed. The private evidence
+pack retains the raw cache/storage/tool transcripts, probe and test source
+snapshots, a self-contained patch-record reconstruction of the overwritten
+executed crash harness, the immutable crash-log slice, launchctl state,
+installed/identity hashes, and both verification transcripts. The client and
+daemon records independently prove the four-client crash behavior; the
+reconstruction is not described as a contemporaneous snapshot. No product,
+dependency, persistence, wire, service, Example, Keeper, or installed byte
+changed.
+
+**Verdict: EVIDENCED STOP.** The pinned provider cannot serialize the exact
+execution state of any shipped route, and the client-owned tool boundary makes
+partial durability actively misleading. Reach retains the existing sentence:
+“the answer stopped partway and cannot be picked up again … Asking again
+starts a new one.” Future durability is Held behind a resumable-provider and
+at-rest privacy ruling; volatile transport replay and launchd recovery remain
+the honest shipped mechanisms.
