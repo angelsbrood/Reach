@@ -41,6 +41,21 @@ private func roundTrip<F: WireFrame>(_ frame: F) throws -> F {
         #expect(throws: WireError.self) { _ = try reassembler.feed(header) }
     }
 
+    @Test func oversizeFrameRefusedBeforeSending() {
+        let oversized = ErrorFrame(
+            code: "oversized",
+            message: String(repeating: "x", count: Int(FrameCodec.maxFrameLength))
+        )
+        do {
+            _ = try FrameCodec.encode(oversized)
+            Issue.record("an over-limit outgoing frame was encoded")
+        } catch let WireError.frameTooLarge(length) {
+            #expect(length > FrameCodec.maxFrameLength)
+        } catch {
+            Issue.record("unexpected outgoing-frame error: \(error)")
+        }
+    }
+
     @Test func unknownFrameTypeRejected() {
         var reassembler = FrameReassembler()
         var blob = Data()

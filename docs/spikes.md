@@ -28,6 +28,8 @@ the decision. Kill criteria come from the pre-filing plan.
 | S22 | Why does one installed `reachd` find MLX resources by its canonical path but not through a symlink or bare `PATH` command? | **PASS / CANONICAL RE-EXEC** (2026-08-10) — the loaded image and `dladdr` already resolve to the canonical binary, while `Bundle.main` remains beside the launch alias; one early `execv` of the resolved executable makes every invocation use the canonical adjacent bundle set |
 | S23 | Which authority owns the host across lock, logout and reboot? | **PASS / LOGIN CLUSTER, ROOT ROAD** (2026-08-10) — one lock, two logout/login and two reboot/pre-login/login trials selected login-owned serving, proved late roads need no daemon restart, and isolated automatic privileged mesh activation as a separate pass |
 | S24 | What least-privileged installed component can restore the host mesh without owning the cluster? | **PASS / ROOT-OWNED HEADLESS MESH OWNER** (2026-08-11) — a scriptless helper with strict data-only state survived the physical lifecycle matrix; final-byte crash recovery restored interface plus connected route, and a strict building-network cold open arrived from `10.86.0.2` and streamed to `done` |
+| S25 | Can one model-neutral provider slot bound concurrent public generations without changing single-request correctness? | **PASS / ONE ACTIVE, THREE FIFO WAITERS** (2026-08-12) — fake and real-weight probes found accidental overlap but no model-path failure; the shipped lease covers one complete public generation, admits three bounded waiters and refuses overload as reachable-busy |
+| S26 | What exact volatile replay capacity preserves whole-or-refuse reattachment without limiting live generation? | **PASS / FOUR PHYSICALLY EXACT MEMORY WINDOWS** (2026-08-13) — deterministic framed bytes replaced the 4 MiB estimate; one generation retains 16,777,220 bytes, the process retains four such windows, popped payloads are destroyed immediately, and live delivery continues while an unavailable replay refuses |
 
 ## Upstream checkpoint — nested tool grammar schema test (2026-08-11)
 
@@ -2078,3 +2080,126 @@ physical road, and repeated cold-load trials were proposals in the exploratory
 draft, not acceptance work that was performed. The founder ruled the measured
 fake/real provider matrix plus deterministic transport-independent lease tests
 sufficient; this record claims exactly that boundary and no larger matrix.
+
+## S26 — exact volatile replay capacity, 13 August 2026
+
+**Before.** The old store estimated payloads and advertised a 4 MiB
+per-generation bound. Disposable encoding probes showed why that was not a
+storage contract: an empty text event encoded to 87 bytes, 1 KiB text to
+1,111, a 1 MiB structured delta to 1,048,664, a 1 MiB tool-argument event to
+1,048,699, usage to 86 and terminal events to 77–181 bytes. Crossing the old
+bound discarded sequences 0–3 and retained only a later suffix; re-attach from
+inside that hole correctly refused. Four old-style resident windows raised RSS
+by approximately 4.90, 10.11, 15.30 and 20.50 MiB. Replay lookup itself was
+about 0.1 ms. Nothing crashed or corrupted typed output, so S26 licensed a
+memory-only capacity correction rather than persistence or a wire change.
+
+**Selected contract.** `ReplayStore` retains the deterministic complete
+encoded `Ev` frame plus a sequence index. One generation may retain exactly
+one maximum v0 frame including its four-byte prefix: **16,777,220 bytes**.
+The process budget is exactly four windows: **67,108,880 bytes**. Cumulative
+acks release exact bytes. Per-generation or process pressure may reclaim only
+the appending generation's prefix; no generation can evict another. Live
+delivery continues after pressure, while a re-attach that asks inside a lost
+prefix receives the existing refusal. Stored frames are decoded and checked
+against their indexed sequence before serving; corruption clears and refuses
+that window. Queued work has emitted nothing and consumes zero replay.
+
+The store is deliberately volatile. It writes no prompt, output or tool
+argument to disk; shutdown clears all windows, and daemon restart retains the
+existing legible lost-generation behavior. Detached residency remains 120
+seconds and completed replay remains 600 seconds. An individual event larger
+than the wire's 16 MiB envelope limit is replaced at the same sequence by a
+small terminal error, never reported as successful incomplete output.
+
+**After.** Real Gemma 4 E4B runs detached, completed, and replayed ordinary,
+guided, allowed-tool and required-tool generations whole. Prewarm was 3.397 s
+at 4,646,174,720 bytes RSS. Their exact retained replay totals were:
+
+| route | elapsed | events | exact replay bytes | outcome |
+|---|---:|---:|---:|---|
+| ordinary | 0.755 s | 33 | 2,381 | complete and whole |
+| guided response | 1.661 s | 22 | 1,543 | typed, complete and whole |
+| allowed tool | 1.541 s | 3 | 356 | constrained call, complete and whole |
+| required tool | 1.108 s | 3 | 354 | required call, complete and whole |
+
+Every registry returned to zero replay bytes on shutdown. Repeating S25 on
+the new store preserved one filling call, three FIFO waiters, immediate fifth
+refusal and cancellation promotion across ordinary, guided, allowed, required
+and long-prefill shapes. Process RSS moved from about 4.63 to 4.67 GiB and MLX
+peaked at 5.351 GiB; single-generation performance remained within the
+measured run-to-run range.
+
+Final exact store coverage is **16/16 at 3/3**. The replay/registry/QUIC matrix
+passed 34 tests at 3/3 before the final counter-reporting correction; the
+correction added a simultaneous per-generation/process crossing test and the
+complete exact-tree suite exercised it. ReachKit passed **80/80 at 8/8**.
+The final exact reachd tree passed **238/238 in 36 suites at 7/8**. The eighth
+run's only issue was the existing cold-open timing sentinel at 41.36 s; in
+isolation it then passed at 10.85 and 11.07 s and reproduced at 42.63 s. Its
+10-second budget and 20-second defect threshold were not weakened. No replay,
+registry, admission, framing or MLX test failed.
+
+Warnings-as-errors release, generic-Simulator Example and generic-iOS Keeper
+builds passed. The installed release SHA-256 is
+`89080e0168262ec7e3e831d9ce897022716b06ccd03a47aa113ba21610ed1b2d`
+with exactly seven adjacent bundles. Guarded replacement preserved all four
+CA/server hashes, the registry, mesh intent, WireGuard host keypair, helper
+hash and zero CA creation. Launchd returned as PID 72852/run 1. Five installed
+clients completed four generations and refused one full room in 25.506 s.
+The canonical installed self-test passed ordinary MLX, unconstrained sampling
+3/3 and guided schemas 15/15. Authenticated `doctor --dial` opened in 43 ms
+with **15 pass, 3 expected mapping/pin warnings, 0 waiting and 0 fail**. The
+complete prior eight-item unit and state remain recoverable at
+`/private/tmp/reach-replay-install-backup.MnEnnN`.
+
+### S26 post-review correction
+
+Post-install review found that the exact counter was not yet an exact physical
+bound. `Window.popFirst()` advanced an array head but left each removed
+frame's `Data` owned by the backing array until metadata compaction after at
+least 256 removals. A matching probe could therefore retain 64 MiB while the
+counter reported 1 MiB; maximum frames made the gap much larger. Popping now
+replaces the frame payload with empty `Data` before advancing the head. A
+backing-storage invariant test turns over 64 approximately-1-MiB frames below
+the compaction threshold and compares physically owned payload bytes with
+`currentBytes` after every capacity drop and acknowledgement.
+
+The same review found a release-classification mismatch: an admitted event
+larger than the wire limit was replaced by `.finished(.error)`, but admission
+still derived its outcome from the original event. `ingest` now returns the
+ending of the event it actually stamped and published. The admitted oversized
+regression observes both the client error terminal and the privacy-safe
+`released ... after error` transition, with no completion transition.
+
+The corrected ReplayStore suite passed **18/18 at 3/3**. Fresh complete suites
+then passed ReachKit **80/80** and reachd **240/240 in 36 suites**. The first
+post-review artifact, SHA-256 `6f01b9fb…d85c`, passed behavioral checks but was
+rejected as a release: its Xcode request synthesized
+`CLANG_COVERAGE_MAPPING=YES`, its Mach-O carried `__llvm_*` profiling and
+coverage sections, and running it wrote a 7,527,000-byte `default.profraw`.
+That generated file was removed and is not part of the repository.
+
+A fresh-DerivedData Release rebuild disabled coverage mapping, test coverage
+files and flow-arc instrumentation explicitly. The accepted warnings-as-errors
+binary has SHA-256
+`da7f3cf93b398e51192b23cd68eae7533cee65c364e46d43399b5388b84f3fd8`,
+no `__llvm_*` or coverage sections, and exactly seven adjacent resource
+bundles. Direct execution and the installed checks created no `.profraw`.
+Founder-authorized guarded replacement installed those exact bytes. The
+rejected artifact, state and guard material are recoverable at
+`/private/tmp/reach-replay-clean-install-backup-20260813`; the pre-replay
+complete unit remains recoverable at
+`/private/tmp/reach-replay-install-backup.MnEnnN`. Launchd returned as PID
+6118/run 1 with both listeners and a prewarmed model. The first five-client
+run completed all four admitted generations daemon-side but one client lost
+its generation stream during transport reattachment; one clean rerun completed
+four and refused one full waiting room in 25.393 seconds. Authenticated
+`doctor --dial` opened over loopback in 38 ms with **15 pass, 3 expected
+warnings, 0 waiting and 0 fail**. The four CA/server hashes, device registry,
+mesh intent, WireGuard host keypair, helper and plist remained byte-identical;
+CA creation remained zero.
+
+**Verdict: PASS.** Exact bounded replay is now baseline M3 capacity; it is not
+generation durability. A resident generation still dies with the daemon, so
+process durability is the next separate design pass.

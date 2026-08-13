@@ -181,17 +181,33 @@ One bidirectional stream per generation, opened by the client.
 
 Sequences start at 0 and are per-generation. `EvAck` is **cumulative** —
 everything at or below that sequence is received — and it trims the daemon's
-replay buffer, which is capped at 4 MiB per generation.
+replay store. The store retains the deterministic encoded `Ev` frame, not an
+estimate of its Swift value: one generation may hold exactly one maximum v0
+frame including its length prefix (**16,777,220 bytes**), and the process may
+hold four such windows (**67,108,880 bytes**). Acknowledgement releases those
+exact bytes and destroys the popped frame payload immediately; queue metadata
+may compact later, but it retains no acknowledged or capacity-dropped `Data`.
 
-**The cap is a bound on replay, not on the answer.** A generation that outruns
-it while nobody is acking loses its oldest un-acked events, and a re-attach
-asking for a sequence inside that loss is **refused** — `reattach-rejected`,
-carrying a sentence about what happened — rather than served the far side of
-the gap. Serving it would hand back a shorter answer than the one that was
-generated, with nothing in the stream to say so. Reaching the cap needs 4 MiB
-in flight faster than acks return, which is past text scale; what happens to
-the cap itself at image or audio scale is residency-depth work and is not
-settled here.
+**The bounds are on volatile replay, not on the answer or live delivery.** If
+an append crosses either bound, the store may reclaim only older events from
+that same generation. It never evicts another generation to make room. The
+current stream continues, but the lost cursor is remembered; a re-attach
+asking inside that loss is **refused** with the existing
+`reattach-rejected`/`replayOutgrewTheBuffer` outcome rather than served the far
+side of a gap. A request after the loss may still replay when its cumulative
+cursor proves it already received everything discarded. Every replayed frame
+is decoded and checked against its indexed sequence before it is served;
+corruption invalidates that window and refuses rather than inventing a hole.
+
+One event whose encoded envelope itself exceeds the wire's 16 MiB frame limit
+cannot be delivered to any peer. The daemon replaces it at the same sequence
+with a small `.finished(.error)` explaining that one event exceeded the frame
+limit; admission is released as an error derived from that actual stamped
+terminal, and it never reports incomplete output as success. Queued
+generations have no events and consume zero replay bytes. The store is
+memory-only and is
+cleared on daemon shutdown, so none of these capacities imply transcript or
+generation durability across process death.
 
 The generation is owned by the session registry, not by the connection that
 started it. When the transport dies the generation **keeps running** for a 120 s
@@ -230,7 +246,7 @@ replay and required calls are internal passes under that same lease.
 The observable states are:
 
 - **queued** — resident, receipt emitted and re-attachable, but model
-  preparation has not begun;
+  preparation has not begun and no replay bytes exist yet;
 - **executing** — the generation owns the provider lease, including all of its
   internal model passes;
 - **resident-detached** — queued or executing work whose current transport is
@@ -310,8 +326,8 @@ restart therefore costs a round trip, not a conversation.
   knows is refused `begin-rejected`, and the client opens a fresh session and
   begins again. Nothing reaches the person. This is also the ordinary path when
   a session simply ages out, which it does after 900 s idle.
-- **A generation in flight is lost, and cannot be resumed.** Its buffer went
-  with the process. The re-attach is refused `reattach-rejected`, and because a
+- **A generation in flight is lost, and cannot be resumed.** Its exact replay
+  frames went with the process. The re-attach is refused `reattach-rejected`, and because a
   re-attach is only ever sent for a generation the client has already taken
   tokens from, that refusal is terminal: **the transport never silently
   re-begins an answer a person may have read, or one whose tool already ran in

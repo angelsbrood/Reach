@@ -203,6 +203,7 @@ public final class Daemon: Sendable {
         // daemon meets most.
         try await listener.waitUntilReady()
         Log.info(await admission.startupMessage)
+        Log.info(await registry.replayStartupMessage)
         // The system request is deliberately long-lived: it renews mappings
         // and follows primary-network changes, calling us again whenever the
         // assigned address or port moves.
@@ -249,6 +250,7 @@ public final class Daemon: Sendable {
     public func stop() async {
         reachability?.stop()
         await admission.shutdown()
+        await registry.shutdown()
         await state.stop()
     }
 

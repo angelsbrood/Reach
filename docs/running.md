@@ -105,6 +105,43 @@ outlived the two-minute bound. Live queue state is intentionally absent from
 `doctor` and `service status`: v0 has no management channel from which either
 command could read an authoritative remote snapshot.
 
+## When replay capacity is exhausted
+
+The daemon keeps unacknowledged generation events in memory as their exact
+encoded v0 frames. One generation has a 16,777,220-byte window (one maximum
+wire frame including its length prefix), and the process has four windows, or
+67,108,880 bytes. These are replay limits, not answer-length or token limits:
+an attached client continues receiving live events when storage pressure
+starts.
+
+Startup records the policy without reporting live usage:
+
+```
+[reachd] replay store ready: exact framed bytes, one maximum-frame window per generation, four-window process budget, volatile across daemon restart
+```
+
+Capacity and integrity notices are deliberately privacy-safe. A
+`replay capacity exhausted for one generation` or `replay process budget
+unavailable to the appending generation` line means live delivery continued,
+but a later re-attach may be refused if it asks inside the discarded prefix.
+The process budget never reclaims another generation's window. A
+`generation event exceeded the wire frame limit` line instead means one event
+could not fit any v0 envelope; that generation receives a legible terminal
+error rather than a false success. An integrity failure likewise discards the
+affected window and refuses future replay; its count remains package-internal
+rather than becoming a live operator metric. None of the replay logs contains
+a prompt, output, endpoint, identity, byte total, cursor or token count.
+
+Acknowledgements release exact framed bytes. The popped frame's backing
+`Data` is destroyed in that same operation rather than waiting for queue
+metadata compaction, so physical payload ownership follows the byte counter.
+Queued generations have emitted no events and consume none. A completed
+generation record keeps any remaining unacknowledged replay for the existing
+ten-minute window, detached work keeps the existing two-minute residency, and
+daemon shutdown clears all replay immediately. There is no spill file or
+transcript database to inspect or clean up; process durability is a separate
+design pass.
+
 ## As a service
 
 ⚠️ **`reachd` is not a single file.** SwiftPM emits resource bundles beside the

@@ -57,6 +57,7 @@ package enum GenerationReceipt: Sendable, Equatable {
 }
 
 package typealias GenerationReceiptSink = @Sendable (GenerationReceipt) -> Void
+package typealias ReplayEventSink = @Sendable (String) -> Void
 
 /// Session residency, minimal per the named stub: generations are owned by
 /// the registry and decoupled from connections — a transport death leaves
@@ -86,7 +87,10 @@ public actor SessionRegistry {
         /// `begin-rejected` when nothing has streamed yet, which is exactly
         /// the state an idle session is in.
         public var idleSessionRetention: Duration = .seconds(900)
-        public var bufferCapBytes: Int = 4 * 1024 * 1024
+        /// Exact framed bytes retained for one generation's unacknowledged
+        /// replay. The default is one maximum-size v0 frame, including its
+        /// four-byte length prefix.
+        public var bufferCapBytes: Int = Int(FrameCodec.maxFrameLength) + 4
 
         public init() {}
     }
@@ -142,17 +146,6 @@ public actor SessionRegistry {
         /// the continuation the mesh has been streaming through since.
         /// Monotonic, so an epoch is never reused.
         var epoch: UInt64 = 0
-        var buffer: [Ev] = []
-        var bufferBytes = 0
-        /// The highest seq the buffer cap discarded, or nil if it never has.
-        ///
-        /// The floor of `buffer` cannot answer this. An ack trims from the
-        /// bottom too, and after either one `buffer.first!.seq` reads the
-        /// same — but an acked event is one the client already holds, and a
-        /// dropped one is a hole. Only the drop site knows which happened, so
-        /// only the drop site can record it. Never cleared: a generation that
-        /// has lost events has lost them for as long as it exists.
-        var droppedThrough: UInt64?
         var nextSeq: UInt64 = 0
         var state: WireGenerationState = .streaming
         var task: Task<Void, Never>?
@@ -173,11 +166,18 @@ public actor SessionRegistry {
     private var sessions: [UUID: SessionRecord] = [:]
     private let limits: Limits
     private let receiptSink: GenerationReceiptSink
+    private let replayEventSink: ReplayEventSink
+    private var replayStore: ReplayStore
     private let clock = ContinuousClock()
 
     public init(limits: Limits = Limits()) {
         self.limits = limits
         receiptSink = { receipt in Log.info(receipt.message) }
+        replayEventSink = { message in Log.info(message) }
+        replayStore = ReplayStore(policy: Self.replayPolicy(
+            perGenerationBytes: limits.bufferCapBytes,
+            processBytes: nil
+        ))
     }
 
     /// Test/package seam for observing receipts without intercepting stdout.
@@ -185,10 +185,17 @@ public actor SessionRegistry {
     /// generation control flow.
     package init(
         limits: Limits = Limits(),
-        receiptSink: @escaping GenerationReceiptSink
+        replayProcessCapBytes: Int? = nil,
+        receiptSink: @escaping GenerationReceiptSink,
+        replayEventSink: @escaping ReplayEventSink = { message in Log.info(message) }
     ) {
         self.limits = limits
         self.receiptSink = receiptSink
+        self.replayEventSink = replayEventSink
+        replayStore = ReplayStore(policy: Self.replayPolicy(
+            perGenerationBytes: limits.bufferCapBytes,
+            processBytes: replayProcessCapBytes
+        ))
     }
 
     // MARK: Sessions
@@ -304,8 +311,8 @@ public actor SessionRegistry {
         let task = Task { [weak self] in
             for await event in Self.terminating(events()) {
                 guard let self else { return }
-                let finished = await self.ingest(sessionID: sessionID, genID: genID, event: event)
-                if finished { break }
+                let ending = await self.ingest(sessionID: sessionID, genID: genID, event: event)
+                if ending != nil { break }
             }
         }
         sessions[sessionID]!.generations[genID]!.task = task
@@ -356,25 +363,23 @@ public actor SessionRegistry {
                     await admission.release(lease, outcome: .cancelled)
                     return
                 }
-                var outcome = SlotAdmission.ReleaseOutcome.complete
+                var outcome = SlotAdmission.ReleaseOutcome.error
                 if let self {
                     for await event in Self.terminating(events()) {
-                        if case .finished(let reason) = event {
-                            outcome = switch reason {
-                            case .complete: .complete
-                            case .cancelled: .cancelled
-                            case .error: .error
-                            }
-                        }
-                        let finished = await self.ingest(
+                        let ending = await self.ingest(
                             sessionID: sessionID,
                             genID: genID,
                             event: event
                         )
-                        if finished { break }
+                        if let ending {
+                            outcome = switch ending {
+                            case .complete: .complete
+                            case .cancelled: .cancelled
+                            case .error: .error
+                            }
+                            break
+                        }
                     }
-                } else {
-                    outcome = .error
                 }
                 if Task.isCancelled { outcome = .cancelled }
                 await admission.release(lease, outcome: outcome)
@@ -413,25 +418,23 @@ public actor SessionRegistry {
     ) throws -> (stream: AsyncStream<Ev>, epoch: UInt64, version: UInt8) {
         guard var session = sessions[sessionID] else { throw RegistryError.unknownSession }
         guard var record = session.generations[genID] else { throw RegistryError.unknownGeneration }
-        // A client holding through `fromSeq` needs `fromSeq + 1` onward, and
-        // the lowest seq that survived the cap is `droppedThrough + 1`. So the
-        // replay is whole exactly when `fromSeq >= droppedThrough`. `nil` is
-        // `begin`'s idempotency path asking for everything from 0, which is
-        // whole only if nothing was ever dropped.
-        //
-        // ⚠️ Ahead of the epoch bump on purpose. A refusal must leave the
-        // record untouched: bumping and then throwing would lock the serving
-        // connection's own `detach` out of its epoch guard, so `detachedAt`
-        // would never be set and the residency sweep would never reap the
-        // generation this call just declined to serve.
-        let whole = fromSeq.map { seq in record.droppedThrough.map { seq >= $0 } ?? true }
-            ?? (record.droppedThrough == nil)
-        guard whole else { throw RegistryError.replayOutgrewTheBuffer }
+        // Decode and validate the exact stored frames before touching the
+        // attachment epoch. A refusal must leave the serving connection's
+        // epoch intact so its later detach can still start residency.
+        let replay: [Ev]
+        do {
+            replay = try replayStore.replay(
+                for: Self.replayKey(sessionID: sessionID, genID: genID),
+                after: fromSeq
+            )
+        } catch {
+            throw RegistryError.replayOutgrewTheBuffer
+        }
 
         record.epoch += 1
         record.live?.finish()
         let (stream, continuation) = AsyncStream<Ev>.makeStream()
-        for buffered in record.buffer where fromSeq.map({ buffered.seq > $0 }) ?? true {
+        for buffered in replay {
             continuation.yield(buffered)
         }
         if record.state == .streaming {
@@ -448,13 +451,13 @@ public actor SessionRegistry {
 
     /// Cumulative ack: trim the buffer at and below `seq`.
     public func ack(sessionID: UUID, genID: UUID, seq: UInt64, epoch: UInt64) {
-        guard var session = sessions[sessionID],
-              var record = session.generations[genID],
+        guard let session = sessions[sessionID],
+              let record = session.generations[genID],
               record.epoch == epoch else { return }
-        record.buffer.removeAll { $0.seq <= seq }
-        record.bufferBytes = record.buffer.reduce(0) { $0 + $1.approximateSize }
-        session.generations[genID] = record
-        sessions[sessionID] = session
+        replayStore.acknowledge(
+            for: Self.replayKey(sessionID: sessionID, genID: genID),
+            through: seq
+        )
     }
 
     /// The serving connection died: keep the generation running, start the
@@ -542,6 +545,7 @@ public actor SessionRegistry {
                 }
                 if expired {
                     session.generations.removeValue(forKey: genID)
+                    replayStore.remove(Self.replayKey(sessionID: sessionID, genID: genID))
                     reaped += 1
                 }
             }
@@ -564,54 +568,104 @@ public actor SessionRegistry {
     /// it exists so a test can watch the table not grow.
     var residentSessions: Int { sessions.count }
 
+    /// Privacy-safe operator copy: policy only, never live usage.
+    package var replayStartupMessage: String {
+        let expected = Int(FrameCodec.maxFrameLength) + 4
+        if replayStore.policy.perGenerationBytes == expected,
+           replayStore.policy.processBytes == expected * 4 {
+            return "replay store ready: exact framed bytes, one maximum-frame window per generation, four-window process budget, volatile across daemon restart"
+        }
+        return "replay store ready: exact framed bytes with configured per-generation and process budgets, volatile across daemon restart"
+    }
+
+    package var replayCounters: ReplayStore.Counters { replayStore.counters }
+
+    /// Process shutdown owns the final cleanup edge. No terminal is invented:
+    /// clients already name daemon restart separately from a wire completion.
+    package func shutdown() {
+        for session in sessions.values {
+            for record in session.generations.values {
+                record.task?.cancel()
+                record.live?.finish()
+            }
+        }
+        sessions.removeAll(keepingCapacity: false)
+        replayStore.removeAll()
+    }
+
     // MARK: Internals
 
-    private func ingest(sessionID: UUID, genID: UUID, event: WireEvent) -> Bool {
+    /// Stamps and publishes one filling event. The returned ending is derived
+    /// from the event actually put on the wire, including a synthesized error
+    /// terminal when the original event could not be encoded.
+    private func ingest(
+        sessionID: UUID,
+        genID: UUID,
+        event: WireEvent
+    ) -> GenerationReceipt.Ending? {
         guard var session = sessions[sessionID],
-              var record = session.generations[genID] else { return true }
+              var record = session.generations[genID] else { return .error }
         // Nothing follows the ending. `cancel` writes a `.finished` while the
         // filling may still have one of its own in flight, and two endings on
         // one generation would hand a re-attaching client two different final
         // sequences for the same answer.
-        guard record.state == .streaming else { return true }
+        guard record.state == .streaming else {
+            return switch record.state {
+            case .streaming: nil
+            case .complete: .complete
+            case .cancelled: .cancelled
+            case .failed: .error
+            }
+        }
 
-        let stamped = Ev(seq: record.nextSeq, event: event)
+        let key = Self.replayKey(sessionID: sessionID, genID: genID)
+        var stamped = Ev(seq: record.nextSeq, event: event)
+        let append: ReplayStore.AppendResult
+        do {
+            append = try replayStore.append(stamped, for: key)
+        } catch let error as WireError {
+            // A peer would reject an over-limit envelope before it could read
+            // the event. Replace it at the same sequence with a small terminal
+            // so the stream ends legibly instead of becoming malformed.
+            replayEventSink("generation event exceeded the wire frame limit; ending generation")
+            let copy = switch error {
+            case .frameTooLarge:
+                "the cluster produced a generation event larger than the wire's 16 MiB frame limit"
+            default:
+                "the cluster could not encode one generation event for the wire"
+            }
+            stamped = Ev(seq: record.nextSeq, event: .finished(.error(copy)))
+            do {
+                append = try replayStore.append(stamped, for: key)
+            } catch {
+                replayStore.recordLiveOnly(sequence: stamped.seq, for: key)
+                append = .init(stored: false, newlyExhausted: [])
+            }
+        } catch {
+            replayEventSink("generation event could not be encoded; ending generation")
+            stamped = Ev(
+                seq: record.nextSeq,
+                event: .finished(.error("the cluster could not encode one generation event for the wire"))
+            )
+            do {
+                append = try replayStore.append(stamped, for: key)
+            } catch {
+                replayStore.recordLiveOnly(sequence: stamped.seq, for: key)
+                append = .init(stored: false, newlyExhausted: [])
+            }
+        }
         record.nextSeq += 1
-        record.buffer.append(stamped)
-        record.bufferBytes += stamped.approximateSize
-        // Beyond text-demo scale; drop the oldest un-acked rather than grow
-        // without bound, and write down how far the loss reaches so `attach`
-        // can refuse a replay that would begin inside it.
-        //
-        // ⚠️ This was an `if` that did not decrement `bufferBytes`, which made
-        // the cap two things it is not. The counter kept every dropped event's
-        // size forever, so past the first overflow it only ever overstated and
-        // "4 MiB" was maintained by accident — one drop per append, whatever
-        // the sizes. And a single append larger than the overflow could not
-        // bring the buffer back under. A `while` that pays down the counter is
-        // the bound the constant has always claimed.
-        //
-        // What the loss costs is not "a re-attach past this point restarts" —
-        // nothing implements a restart, and sequence 0 is precisely what goes
-        // first. Before `droppedThrough`, a client re-attaching from `fromSeq`
-        // got the replay resuming *after* the hole; its dedupe only skips seqs
-        // at or below what it already has (`ReachLanguageModel.swift`), so it
-        // accepted the far side without noticing one and rendered a silently
-        // truncated answer. Now the re-attach is refused and says so.
-        //
-        // Un-acked is the operative word, and the client acks in batches of
-        // sixteen rather than one at a time — so this needs 4 MiB in flight
-        // faster than acks return, which is past text scale and inside image
-        // or audio scale.
-        while record.bufferBytes > limits.bufferCapBytes, let oldest = record.buffer.first {
-            record.bufferBytes -= oldest.approximateSize
-            record.droppedThrough = oldest.seq
-            record.buffer.removeFirst()
+        for exhaustion in append.newlyExhausted {
+            switch exhaustion {
+            case .perGeneration:
+                replayEventSink("replay capacity exhausted for one generation; live delivery continues and future replay may refuse")
+            case .processWide:
+                replayEventSink("replay process budget unavailable to the appending generation; live delivery continues and future replay may refuse")
+            }
         }
         let live = record.live
-        var finished = false
         var receiptEnding: GenerationReceipt.Ending?
-        if case .finished(let reason) = event {
+        if case .finished(let reason) = stamped.event {
             record.state = switch reason {
             case .complete: .complete
             case .cancelled: .cancelled
@@ -624,7 +678,6 @@ public actor SessionRegistry {
             }
             record.live = nil
             record.detachedAt = clock.now
-            finished = true
         }
         session.generations[genID] = record
         sessions[sessionID] = session
@@ -640,10 +693,31 @@ public actor SessionRegistry {
         // state and its privacy-safe receipt first so a visible terminal event
         // can never outrun the daemon evidence that names the same sequence.
         live?.yield(stamped)
-        if finished {
+        if receiptEnding != nil {
             live?.finish()
         }
-        return finished
+        return receiptEnding
+    }
+
+    private static func replayKey(sessionID: UUID, genID: UUID) -> ReplayStore.Key {
+        ReplayStore.Key(sessionID: sessionID, generationID: genID)
+    }
+
+    private static func replayPolicy(
+        perGenerationBytes: Int,
+        processBytes configuredProcessBytes: Int?
+    ) -> ReplayStore.Policy {
+        let processBytes: Int
+        if let configured = configuredProcessBytes {
+            processBytes = configured
+        } else {
+            let (fourWindows, overflow) = perGenerationBytes.multipliedReportingOverflow(by: 4)
+            processBytes = overflow ? Int.max : fourWindows
+        }
+        return ReplayStore.Policy(
+            perGenerationBytes: perGenerationBytes,
+            processBytes: processBytes
+        )
     }
 
     /// Guarantees a `.finished` event even if the filling's stream throws
@@ -669,21 +743,6 @@ public actor SessionRegistry {
                 continuation.finish()
             }
             continuation.onTermination = { _ in task.cancel() }
-        }
-    }
-}
-
-extension Ev {
-    var approximateSize: Int {
-        switch event {
-        case .responseAppend(_, let text, _, _),
-             .responseReplace(_, let text, _, _),
-             .reasoningAppend(_, let text, _, _):
-            return 64 + text.utf8.count
-        case .toolCallAppendArguments(_, _, _, let content, _):
-            return 96 + content.utf8.count
-        case .usage, .finished:
-            return 64
         }
     }
 }

@@ -164,8 +164,12 @@ public enum FrameCodec {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         let body = try encoder.encode(frame)
-        var out = Data(capacity: 5 + body.count)
-        var length = UInt32(1 + body.count).bigEndian
+        let (frameLength, overflow) = body.count.addingReportingOverflow(1)
+        guard !overflow, frameLength <= Int(maxFrameLength) else {
+            throw WireError.frameTooLarge(overflow ? .max : UInt32(clamping: frameLength))
+        }
+        var out = Data(capacity: 4 + frameLength)
+        var length = UInt32(frameLength).bigEndian
         withUnsafeBytes(of: &length) { out.append(contentsOf: $0) }
         out.append(type(of: frame).frameType.rawValue)
         out.append(body)
