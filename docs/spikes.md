@@ -30,6 +30,8 @@ the decision. Kill criteria come from the pre-filing plan.
 | S24 | What least-privileged installed component can restore the host mesh without owning the cluster? | **PASS / ROOT-OWNED HEADLESS MESH OWNER** (2026-08-11) — a scriptless helper with strict data-only state survived the physical lifecycle matrix; final-byte crash recovery restored interface plus connected route, and a strict building-network cold open arrived from `10.86.0.2` and streamed to `done` |
 | S25 | Can one model-neutral provider slot bound concurrent public generations without changing single-request correctness? | **PASS / ONE ACTIVE, THREE FIFO WAITERS** (2026-08-12) — fake and real-weight probes found accidental overlap but no model-path failure; the shipped lease covers one complete public generation, admits three bounded waiters and refuses overload as reachable-busy |
 | S26 | What exact volatile replay capacity preserves whole-or-refuse reattachment without limiting live generation? | **PASS / FOUR PHYSICALLY EXACT MEMORY WINDOWS** (2026-08-13) — deterministic framed bytes replaced the 4 MiB estimate; one generation retains 16,777,220 bytes, the process retains four such windows, popped payloads are destroyed immediately, and live delivery continues while an unavailable replay refuses |
+| S27 | Can the pinned provider restore one exact public generation across process death on every shipped route? | **EVIDENCED STOP / RAW KV IS NOT A GENERATION** (2026-08-13) — ordinary, guided, allowed-tool and required-tool execution all lack complete serializable provider state; corrupted cache files were accepted, and client-owned tool effects require acknowledgement/idempotency rather than inferred recovery |
+| S28 | Would explicit structured-partial wire events add a capability beyond Foundation Models' locally derived typed snapshots? | **EVIDENCED STOP / THE TYPED VALUE WAS ALREADY ON THE CLIENT** (2026-08-13) — 21/21 real TLS/wire/daemon/guided executions plus synthetic typed probes found no structured information absent from the text-derived surface; candidate payload models added overhead and the public executor exposes no structured injection action |
 
 ## Upstream checkpoint — nested tool grammar schema test (2026-08-11)
 
@@ -2314,3 +2316,90 @@ partial durability actively misleading. Reach retains the existing sentence:
 starts a new one.” Future durability is Held behind a resumable-provider and
 at-rest privacy ruling; volatile transport replay and launchd recovery remain
 the honest shipped mechanisms.
+
+## S28 — locally derived structured snapshots, 13 August 2026
+
+**Question and boundary.** S28 asked whether an explicit structured-partial
+wire event would add a current product capability beyond the typed snapshots
+Foundation Models already derives from streamed grammar-constrained JSON. The
+selected boundary prohibited a second parser, side API, persistence, frame or
+dialect change. Source began synchronized at `8135c93`; installed reachd stayed
+at SHA-256 `da7f3cf9…3fd8` and the root helper at `61d04eeb…4542` throughout.
+
+**Public SDK surface.** The retained Swift-interface excerpts show that a
+response snapshot already exposes both typed `content` and `rawContent`, while
+`GeneratedContent(json:)` accepts incomplete JSON. The executor channel can
+append/replace text, emit custom segments, attachments, metadata, usage and
+tool-call actions. It has no public action that accepts a server-authored
+`GeneratedContent`. A wire partial would therefore coexist with the text stream
+and introduce a second cadence and authority rather than replace an unavailable
+local surface.
+
+**Synthetic matrix.** A disposable executor streamed every Unicode scalar of
+deterministic two-field, nested, enum, fixed-array, optional-present,
+optional-omitted and adversarial JSON, three times each. Every fragment and
+typed/raw snapshot retained field visibility, completion, generation id,
+ordering and duplicate/coalescing behavior. Snapshot counts varied for
+equivalent final values: two-field 10/10/11, nested 11/11/12, enum 5/5/5,
+fixed-array 8/8/7, optional-present 18/14/14, optional-omitted 10/11/12, and
+adversarial 29/33/34. The framework's snapshot cadence is useful application
+state, not a stable protocol clock.
+
+**Real-weight matrix.** Cached `gemma-4-e2b`, ephemeral identities and the
+shipped TLS/QUIC/wire/daemon/guided path completed **21/21
+TLS/wire/daemon/guided executions** in 24.487 seconds. This describes the
+transport and guided execution, not semantic success of every named arm. All
+three original optional-present prompts omitted the optional property. The
+real adversarial output described a closing brace and quote without emitting
+the literal characters. Synthetic typed evidence covers both missing local
+surfaces; no unavailable structured information was revealed.
+
+A separate correction made the optional property required through a custom
+schema, streamed `GeneratedContent`, observed `"optional":"later"`, and
+decoded the final value into the optional type **3/3** in 7.103 seconds. This is
+the narrower claim: it does not demonstrate real-weight
+`OptionalValue.PartiallyGenerated` streaming under the original optional
+schema.
+
+**Candidate payload lower bounds.** The authoritative population is 18 primary
+semantic runs plus the three corrected optional runs; the original three
+optional omissions are explicitly excluded. Whole-value and JSON-Pointer
+set/remove candidates replaced arrays whole where identity was unavailable.
+The values below are **candidate structured payload bytes at observed snapshot
+cadence**, compared with 690 bytes of compact canonical final JSON:
+
+| candidate | bytes | ratio |
+|---|---:|---:|
+| whole value at every observed snapshot | 7,398 | 10.722x |
+| duplicate-suppressed whole values | 3,426 | 4.965x |
+| JSON-Pointer set/remove patches | 4,437 | 6.430x |
+| duplicate-suppressed patches | 4,251 | 6.161x |
+
+These are modeled payload lower bounds, **not measured wire traffic**. They
+exclude envelope framing, event and generation ids, sequence metadata and all
+other protocol overhead. Patch operations and byte counts were modeled but not
+implemented, reapplied or verified; S28 makes no replay-codec correctness
+claim. Old peers already retain the exact text-only behavior.
+
+**Verification and retained authority.** Response guidance passed **5/5 at
+3/3**. Fresh complete suites passed ReachKit **80/80** and reachd **240/240 in
+36 suites**. A first full reachd attempt inside the managed sandbox reproduced
+the known keychain `SecPKCS12Import -25291` fault; the same already-built suite
+passed with normal keychain access. Installed and identity hashes remained
+unchanged, CA creation remained zero, and launchd remained PID 29485/run 2.
+Final authenticated `doctor --dial` opened over loopback in 36 ms with **15
+pass, 3 expected mapping/pin warnings, 0 waiting and 0 fail**.
+
+The private pack `/private/tmp/reach-s28.5FB49W` was reduced from approximately
+3.9 GiB to 908 KiB by removing reproducible builds, checkouts, module caches,
+duplicate metallibs and the interrupted focused product. It retains exact
+sources, successful transcripts, SDK excerpts, authoritative analysis,
+explicitly labeled failures/exclusions, runtime hashes, a README and a verified
+manifest. `SHA256SUMS` has SHA-256
+`01c8076fb372588e6214346c57af549a963dfd4d344a6ef9e18b7a491369363f`.
+
+**Verdict: EVIDENCED STOP.** Foundation Models' locally derived snapshots are
+the current authoritative structured surface. Explicit wire partials remain
+Held until either a real non-Foundation-Models consumer needs them or the
+framework exposes a public structured executor action. No product or installed
+byte changed, and nothing is promoted to Now without a separate founder ruling.

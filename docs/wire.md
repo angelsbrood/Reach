@@ -517,11 +517,19 @@ does not cross.
   separate follow-ons; none is described as on-device equivalence.
 - **Request `metadata` is dropped.** Its values are existential
   `Sendable & Codable & Equatable`, which JSON coding cannot carry generically.
-- **Structured partial snapshots do not cross the wire.** The daemon streams
-  accepted JSON text deltas and FoundationModels derives its current typed
-  snapshots locally; the wire has no structured patch or partial-value event.
-  `PLAN-structured-partials.md` now owns the explicit-event design; it remains
-  future M3 work and is not part of response-schema enforcement.
+- **Foundation Models' locally derived snapshots are the current authoritative
+  structured surface.** The daemon streams accepted grammar-constrained JSON
+  text deltas; Foundation Models turns that same incomplete JSON into
+  `Snapshot.content` and `rawContent` on the client. S28 completed 21/21 real
+  TLS/wire/daemon/guided executions and found no structured information absent
+  from that text-derived surface. The framework executor exposes no public
+  action for injecting a server-authored `GeneratedContent`, so a wire partial
+  would add a second cadence and authority rather than replace the text stream.
+  Whole-value and JSON-Pointer candidates were payload models only, not codecs
+  or replay proofs. An explicit structured event is Held behind either a real
+  non-Foundation-Models consumer or a public structured executor action; it
+  would still require negotiated vocabulary and a fresh ordering/authority
+  ruling. Dialect v0 retains no structured patch or partial-value event.
 - **Tool arguments arrive whole, not streamed.** Response text still streams
   token by token; a call's arguments cross in one `toolCallAppendArguments`.
   Arguments are grammar-constrained before that event, but the pinned native
