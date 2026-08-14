@@ -2403,3 +2403,95 @@ the current authoritative structured surface. Explicit wire partials remain
 Held until either a real non-Foundation-Models consumer needs them or the
 framework exposes a public structured executor action. No product or installed
 byte changed, and nothing is promoted to Now without a separate founder ruling.
+
+## S29 — portable reference-hub forwarding core, 13 August 2026
+
+**Question and boundary.** S29 asked whether the selected single-cluster relay
+hub could enforce host/device ownership and forward actual WireGuard-encrypted
+traffic entirely in userspace, without root, a host TUN, a VM, a Linux runner,
+Reach credentials, product integration or an external endpoint. Source began
+synchronized at `50ae87e`; installed reachd remained SHA-256
+`da7f3cf9…3fd8` and the root mesh helper remained `61d04eeb…4542` throughout.
+
+**Offline graph ruling.** The new module uses Go 1.23.1 and the mesh helper's
+existing `wireguard-go` revision `f333402bd9cb`. Isolated caches began with the
+already verified graph. Four exact missing transitive objects—`wintun`,
+`google/btree`, `x/time`, and gVisor—were downloaded to scratch only after
+founder authorization; every returned module and `go.mod` checksum matched the
+existing `mesh-helper/go.sum`. Full `go list -m all` would have required a large
+unused Kubernetes/container tooling closure declared by gVisor. The founder
+therefore narrowed the gate to the actual imported build/test graph. With
+`GOPROXY=off` and `GOSUMDB=off`, `go list -deps -test ./...`, `go mod verify`,
+all tests, vet and both builds then completed wholly offline.
+
+**Encrypted proof.** A disposable topology created independent synthetic host,
+hub and device WireGuard instances. The hub used the proposed custom bounded
+TUN router; standard `wireguard-go` bound wildcard UDP sockets on unused high
+ports. Three runs completed device-to-host delivery and the host reply, observed
+handshakes and directional counters, found neither inner payload in captured
+outer datagrams, rejected spoofed, device-to-device, unknown, fragmented,
+over-MTU and over-capacity packets, and returned from one goroutine to one with
+all sockets and queued payloads released. One retained timed 3-run execution
+completed in **1.59 s real / 0.09 s user / 0.20 s system**. This was synthetic
+private traffic, not a Reach session or public relay.
+
+**Implemented core.** The isolated `relay-hub/` module now contains:
+
+- strict version-1 configuration, exact key agreement, canonical ordinal
+  ownership, route-overlap checks, generation ordering and frozen hub instance
+  fields;
+- a 256-packet/256-KiB router with exact IPv4 ownership, independent count and
+  byte bounds, immediate payload release, quiescence and an in-flight
+  barrier;
+- one standard-bind WireGuard backend whose complete desired manifest becomes
+  an exact peer diff: unchanged peers are untouched, while an address-changing
+  peer is removed, verified absent and re-added so staged traffic cannot cross
+  ownership;
+- a serialized last-known-good manager that closes forwarding through peer
+  mutation, verification, active-file promotion and router-snapshot install;
+  only the durably promoted active specification survives a crash, while
+  crash-left pending bytes are discarded, and a same-generation readiness
+  retry revalidates the complete peer manifest plus matching open router gate;
+- privacy-safe status with role/ordinal handshake age and byte counters but no
+  keys, addresses, endpoints, identities or packet content; and
+- a scriptless systemd/sysusers/tmpfiles/payload definition that remains
+  uninstalled and unproved on Linux.
+
+The real-backend update test additionally preserved an unchanged peer's live
+endpoint/handshake/counter trajectory, changed another peer's `/32`, proved a
+pre-change staged packet did not escape after remove/re-add, and then forwarded
+fresh traffic under the new ownership. Transaction hooks injected packets at
+every manager stage; only pre-quiescence and post-reopen snapshots admitted
+them. Rollback restored configuration authority while explicitly not claiming
+lost runtime state for recreated peers.
+
+**Verification.** The complete hub suite, including the real encrypted backend
+test, passed **3/3**. A review-found same-generation readiness gap was repaired:
+focused manager/router tests passed 3/3 while directly drifting and restoring
+the backend manifest, closed router gate and mismatched ownership snapshot.
+The final package timings for the complete three repetitions were command
+0.091 s, backend 1.655 s, config 0.166 s, manager 2.897 s, router 0.406 s,
+status 0.157 s and package-manifest checks 0.093 s. The final
+race-detector run passed every package; `go vet` was clean and `go mod verify`
+reported every module verified. Fresh
+Reach regressions passed ReachKit **80/80** and reachd **240/240 in 36 suites**;
+the initial sandboxed ReachKit keychain failures were attributed to denied
+Keychain access and the already-built suite passed with normal access. Final
+authenticated `doctor --dial` opened over loopback in 59 ms with **15 pass, 3
+expected mapping/pin warnings, 0 waiting and 0 fail**; installed hashes, PIDs,
+run counts and the direct mesh remained unchanged.
+
+Two clean static cross-builds per architecture were byte-identical. The final
+Linux amd64 SHA-256 is
+`fe99fa7585c07c10084c219880adc607c476014e026868987bf41223e8600571`;
+the final Linux arm64 SHA-256 is
+`cbd0cdd1fa0d29340234893bdd53e377f2bfdb3a18f928c131ea63e7800d76c4`.
+Both are static ELF executables and contain no local `/Users` path. These hashes
+describe cross-build artifacts, not an installed Linux service.
+
+**Verdict: PASS FOR THE PORTABLE CORE.** The hub can forward encrypted traffic
+and own only its bounded relay role. No operational relay, Reach road, dialect,
+host state, Keeper provisioning, Linux installation, firewall, namespace,
+restart, update, teardown, external service or public-uplink claim follows from
+that result. The next slice remains gated on an existing Linux runner or
+separate founder authority; absent either, the roadmap has no active Now item.

@@ -1,0 +1,7 @@
+/usr/lib/reach-relay-hub/reach-relay-hub root:root 0555
+/usr/lib/systemd/system/reach-relay-hub.service root:root 0644
+/usr/lib/sysusers.d/reach-relay-hub.conf root:root 0644
+/usr/lib/tmpfiles.d/reach-relay-hub.conf root:root 0644
+/usr/share/licenses/reach-relay-hub/LICENSE root:root 0444
+/usr/share/doc/reach-relay-hub/NOTICE.md root:root 0444
+/usr/share/doc/reach-relay-hub/THIRD_PARTY_LICENSES.md root:root 0444

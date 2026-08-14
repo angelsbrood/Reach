@@ -1,8 +1,10 @@
 # Relay overlay contract
 
-Reach does not currently ship a relay. This note fixes the contract a future
-implementation must satisfy so that an inbound wall becomes an additive road,
-not a new trust system disguised as transport.
+Reach does not currently ship an operational relay. The repository contains a
+portable reference-hub core, proved with synthetic encrypted traffic and left
+uninstalled; this note fixes the larger contract that core and every future
+endpoint integration must satisfy so that an inbound wall becomes an additive
+road, not a new trust system disguised as transport.
 
 ## Selected topology
 
@@ -52,7 +54,7 @@ selected prefix. Updating hub peers remains an explicit local administrator
 operation in the reference design. There is no remote Reach administration
 protocol hidden inside the relay.
 
-The planned reference core treats a peer update as a bounded forwarding
+The portable reference core treats a peer update as a bounded forwarding
 transaction, not merely a status change. It closes router admission, crosses
 an in-flight barrier and releases the router queue before changing WireGuard
 peers. Unchanged peers retain their runtime state. A peer whose relay `/32`
@@ -63,6 +65,14 @@ snapshot is installed before the gate reopens. A packet already handed to an
 unchanged peer may complete only under ownership common to both snapshots.
 Rollback restores the prior configuration authority but cannot recreate
 runtime state deliberately discarded from a removed peer.
+
+Only the last durably promoted active specification is startup authority.
+Crash-left pending bytes are discarded rather than replayed. Generation 1
+fixes the hub keypair, port, MTU, relay prefix and host assignment; later
+generations can change only the ordered device manifest.
+Retrying readiness for that same generation does not trust the digest alone:
+the core re-reads the complete peer manifest and requires the matching router
+ownership snapshot with its forwarding gate open before publishing ready.
 
 Future authenticated calling cards keep direct roads and relay roads separate.
 The planned minimal wire shape is a `HelloAck.relayRoads` array under negotiated
@@ -125,7 +135,7 @@ ReachKit and reachd, so the hub cannot read or authenticate a Reach session.
 This is narrower than “the relay sees nothing”: it sees network metadata and
 mTLS ciphertext, but it is not a Reach trust participant.
 
-The planned reference service exposes only local operator diagnostics. Each
+The portable reference core exposes only local operator diagnostics. Each
 configured peer is named by role and ordinal (`host/1` or `device/N`) and has
 its own handshake age plus receive/transmit counters, so later acceptance can
 attribute traffic to one peer rather than an aggregate. Keys, overlay
@@ -134,11 +144,21 @@ status and logs. No diagnostic surface is remotely administered.
 
 ## Deployment boundary
 
+A separate Go module now implements the strict configuration, bounded router,
+exact peer-diff transaction, durable last-known-good state and privacy-safe
+status surface. A disposable three-peer topology proved actual WireGuard
+encryption and host-to-device/device-to-host forwarding on macOS, and the same
+source cross-builds reproducibly as static Linux amd64 and arm64 executables.
+Those are core-mechanism results, not Linux deployment evidence.
+
 A user's VPS, a community host, or a vendor service can fill the same role. No
 operator name appears in the protocol. The reference service is single-cluster
 and explicitly configured; multi-tenant allocation, remote management, DNS
 mobility, provisioning UI, package installation, abuse policy, and a real
-public deployment remain follow-on work.
+public deployment remain follow-on work. The included systemd, sysusers,
+tmpfiles and payload manifests are definitions only: root ownership, firewall
+confinement, network-namespace forwarding, crash recovery, upgrade and removal
+have not been exercised on Linux.
 
-No relay implementation, wire dialect v1, host relay state, or device relay
+No operational relay, wire dialect v1, host relay state, or device relay
 provisioning ships today.
