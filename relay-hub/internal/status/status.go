@@ -110,7 +110,7 @@ func Write(path string, value Status) error {
 	if err != nil {
 		return err
 	}
-	if err = temp.Chmod(0o644); err != nil {
+	if err = temp.Chmod(0o600); err != nil {
 		_ = temp.Close()
 		_ = os.Remove(temp.Name())
 		return err

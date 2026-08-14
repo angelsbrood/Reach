@@ -1,5 +1,37 @@
 # Running the daemon
 
+## The reference relay hub is accepted substrate, not a running Reach service
+
+`relay-hub/` has a measured scriptless package boundary on native Ubuntu 26.04
+arm64, but Reach does not install or operate it. The package is inert: it
+contains only the static binary, systemd unit, sysusers/tmpfiles declarations,
+licenses/notices and route-inventory documentation. An administrator must
+supply strict operator files and a local firewall, then explicitly enable the
+unit. The service runs as `reach-relay` with zero capabilities; its wildcard
+WireGuard UDP listener is safe only behind the mandatory terminal port-drop
+policy described in [`relay-hub/README.md`](../relay-hub/README.md).
+
+The accepted operator paths are `/etc/reach-relay-hub/config.json` and
+`routes.json`; live status is `/run/reach-relay-hub/status.json`. `systemctl
+reload reach-relay-hub` performs the serialized local reread. `SIGUSR1`
+revalidates live backend/router authority and refreshes status. Package removal
+does not destroy operator-owned configuration or state; retirement requires an
+explicit stop/disable, purge, operator-state removal, firewall removal, and
+account removal only after confirming nothing else owns it.
+
+This is Linux arm64 runtime/package acceptance, not an operational relay, a
+public endpoint, a Reach road, amd64 runtime acceptance, or permission to
+provision one. The complete bounded evidence is recorded as S30 in
+[`spikes.md`](spikes.md).
+
+The accepted unit also started at the schema maximum—253 devices plus the
+host—without approaching its fixed cgroup, task or file-descriptor limits.
+The service identity could not create a link, route, network namespace or
+nftables table. The same PID then returned to the three-peer encrypted fixture
+and forwarded 3/3 before the package, account, firewall, fixture and VM were
+removed. This is a capacity/privilege acceptance fact, not sizing guidance for
+an operational public hub.
+
 `reachd serve` in a terminal is a legitimate way to work and is how every
 demo has been shot. What it is not is a service: when the process dies —
 a crash, an update, a Mac that rebooted — nothing brings it back, and every

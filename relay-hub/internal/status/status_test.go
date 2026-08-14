@@ -45,7 +45,7 @@ func TestStatusBoundedErrorAndAtomicWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	info, err := os.Stat(path)
-	if err != nil || info.Mode().Perm() != 0o644 {
+	if err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatal(info, err)
 	}
 	data, _ := os.ReadFile(path)

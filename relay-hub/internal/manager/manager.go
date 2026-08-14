@@ -22,6 +22,7 @@ type Paths struct {
 	Status  string
 }
 type StatusWriter func(string, statuspkg.Status) error
+type Decoder func([]byte) (config.Specification, error)
 
 type transactionHooks struct {
 	afterReadyFalse      func()
@@ -37,7 +38,7 @@ type Manager struct {
 	mu          sync.Mutex
 	paths       Paths
 	owner       *uint32
-	routes      config.RouteInventory
+	decode      Decoder
 	backend     backend.Backend
 	router      *router.Router
 	active      *config.Specification
@@ -50,8 +51,14 @@ type Manager struct {
 }
 
 func New(paths Paths, owner *uint32, routes config.RouteInventory, b backend.Backend, r *router.Router) *Manager {
+	return NewWithDecoder(paths, owner, func(data []byte) (config.Specification, error) {
+		return config.Decode(data, routes)
+	}, b, r)
+}
+
+func NewWithDecoder(paths Paths, owner *uint32, decode Decoder, b backend.Backend, r *router.Router) *Manager {
 	return &Manager{
-		paths: paths, owner: owner, routes: routes, backend: b, router: r,
+		paths: paths, owner: owner, decode: decode, backend: b, router: r,
 		writeStatus: statuspkg.Write, now: time.Now,
 		writeSpec: writeAtomically, promoteSpec: promote, removeSpec: removeAndSync,
 	}
@@ -70,7 +77,7 @@ func (m *Manager) Start() error {
 	}
 	activeData, activeErr := config.ReadSecureFile(m.paths.Active, config.FileRule{Owner: m.owner, Mode: 0o600, Limit: config.MaximumBytes})
 	if activeErr == nil {
-		spec, err := config.Decode(activeData, m.routes)
+		spec, err := m.decode(activeData)
 		if err != nil {
 			return errors.Join(err, m.publish(nil, false, "configuration rejected"))
 		}
@@ -101,7 +108,9 @@ func (m *Manager) Start() error {
 }
 
 func (m *Manager) Apply(data []byte) error {
-	spec, err := config.Decode(data, m.routes)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	spec, err := m.decode(data)
 	if err != nil {
 		return err
 	}
@@ -109,9 +118,35 @@ func (m *Manager) Apply(data []byte) error {
 	if err != nil {
 		return err
 	}
+	return m.applyLocked(canonical, spec)
+}
+
+// RefuseUpdate leaves the durable and live authority untouched while making
+// the bounded refusal observable. A healthy active generation remains ready.
+func (m *Manager) RefuseUpdate() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.applyLocked(canonical, spec)
+	if m.active == nil {
+		return m.publish(nil, false, "configuration rejected")
+	}
+	return m.refreshLocked("update refused")
+}
+
+// RefreshStatus revalidates the complete backend and router authority before
+// publishing readiness. It never repairs or mutates either authority.
+func (m *Manager) RefreshStatus() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.active == nil {
+		return m.publish(nil, false, "unconfigured")
+	}
+	return m.refreshLocked("")
+}
+
+func (m *Manager) HasActive() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.active != nil
 }
 
 func (m *Manager) applyLocked(data []byte, candidate config.Specification) error {
@@ -152,20 +187,8 @@ func (m *Manager) applyLocked(data []byte, candidate config.Specification) error
 		if candidate.PublicDigest() != previous.PublicDigest() {
 			return errors.New("generation reused with different configuration")
 		}
-		manifest, manifestErr := m.backend.Manifest()
-		snapshot, snapshotErr := router.SnapshotFor(previous)
-		authorityErr := manifestErr
-		if authorityErr == nil && !manifestMatches(manifest, previous.Peers()) {
-			authorityErr = errors.New("active peer manifest mismatch")
-		}
-		if authorityErr == nil && snapshotErr != nil {
-			authorityErr = snapshotErr
-		}
-		if authorityErr == nil && !m.router.Ready(snapshot) {
-			authorityErr = errors.New("active router authority mismatch")
-		}
-		if authorityErr != nil {
-			return errors.Join(authorityErr, m.publish(&previous, false, "backend unavailable"))
+		if err := m.verifyAuthorityLocked(previous); err != nil {
+			return errors.Join(err, m.publish(&previous, false, "backend unavailable"))
 		}
 		if err := m.removeSpec(m.paths.Pending); err != nil {
 			return err
@@ -221,6 +244,31 @@ func (m *Manager) applyLocked(data []byte, candidate config.Specification) error
 	m.active = &candidate
 	// A ready publication failure does not roll back durable authority.
 	return m.publish(&candidate, true, "")
+}
+
+func (m *Manager) refreshLocked(readyReason string) error {
+	if err := m.verifyAuthorityLocked(*m.active); err != nil {
+		return errors.Join(err, m.publish(m.active, false, "backend unavailable"))
+	}
+	return m.publish(m.active, true, readyReason)
+}
+
+func (m *Manager) verifyAuthorityLocked(spec config.Specification) error {
+	manifest, err := m.backend.Manifest()
+	if err != nil {
+		return err
+	}
+	if !manifestMatches(manifest, spec.Peers()) {
+		return errors.New("active peer manifest mismatch")
+	}
+	snapshot, err := router.SnapshotFor(spec)
+	if err != nil {
+		return err
+	}
+	if !m.router.Ready(snapshot) {
+		return errors.New("active router authority mismatch")
+	}
+	return nil
 }
 
 func (m *Manager) rollback(previous config.Specification, snapshot router.Snapshot, cause error) error {

@@ -1,8 +1,9 @@
 # Relay overlay contract
 
 Reach does not currently ship an operational relay. The repository contains a
-portable reference-hub core, proved with synthetic encrypted traffic and left
-uninstalled; this note fixes the larger contract that core and every future
+reference-hub core and a scriptless Linux package, proved with synthetic
+encrypted traffic in a disposable native-arm64 Ubuntu VM and removed after
+acceptance. This note fixes the larger contract that core and every future
 endpoint integration must satisfy so that an inbound wall becomes an additive
 road, not a new trust system disguised as transport.
 
@@ -146,19 +147,37 @@ status and logs. No diagnostic surface is remotely administered.
 
 A separate Go module now implements the strict configuration, bounded router,
 exact peer-diff transaction, durable last-known-good state and privacy-safe
-status surface. A disposable three-peer topology proved actual WireGuard
-encryption and host-to-device/device-to-host forwarding on macOS, and the same
-source cross-builds reproducibly as static Linux amd64 and arm64 executables.
-Those are core-mechanism results, not Linux deployment evidence.
+status surface. A disposable native-arm64 Ubuntu 26.04 VM then proved the
+scriptless package under real systemd: the service ran as its dedicated user
+with zero capabilities; kernel WireGuard peers exchanged attributable
+encrypted traffic through the userspace hub; nftables confined the wildcard
+listener with an unconditional port drop independently exercised from allowed
+ingress, another interface, loopback IPv4 and IPv6, and injected real-interface
+ingress; live reload, refused updates, three crash restarts, two guest reboots,
+B→A→B package compatibility, removal and VM deletion all passed.
+The exact hardened unit also became ready with the maximum 253-device manifest
+plus the host while remaining below its fixed memory, task and FD limits. Its
+unprivileged identity could not create links, routes, namespaces or firewall
+state; the same PID then restored the small encrypted topology and forwarded
+3/3 before teardown.
+The package is inert until an operator supplies strict configuration and
+firewall policy and explicitly enables it. Route authority fails closed unless
+Linux returns one complete, kernel-originated, sequence-matched netlink dump;
+truncation, interruption, overrun or malformed completion refuses the update.
+
+That is Linux **arm64** runtime/package acceptance. The static amd64 binary
+reproduced twice but has not executed on an amd64 kernel. The accepted VM,
+mutable disk, package, account, state, firewall and namespaces were removed;
+only Lima and the exact pinned image cache remain as declared developer
+tooling. No public endpoint or Reach participant entered the matrix.
 
 A user's VPS, a community host, or a vendor service can fill the same role. No
 operator name appears in the protocol. The reference service is single-cluster
 and explicitly configured; multi-tenant allocation, remote management, DNS
-mobility, provisioning UI, package installation, abuse policy, and a real
-public deployment remain follow-on work. The included systemd, sysusers,
-tmpfiles and payload manifests are definitions only: root ownership, firewall
-confinement, network-namespace forwarding, crash recovery, upgrade and removal
-have not been exercised on Linux.
+mobility, provisioning UI, public package distribution, abuse policy, and a
+real public deployment remain follow-on work. Linux acceptance proves the
+private deployment substrate; it does not choose, provision, expose, or
+operate an endpoint.
 
 No operational relay, wire dialect v1, host relay state, or device relay
 provisioning ships today.

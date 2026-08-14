@@ -2495,3 +2495,134 @@ host state, Keeper provisioning, Linux installation, firewall, namespace,
 restart, update, teardown, external service or public-uplink claim follows from
 that result. The next slice remains gated on an existing Linux runner or
 separate founder authority; absent either, the roadmap has no active Now item.
+
+## S30 — the unprivileged hub forwarded on native Linux arm64, 13–14 August 2026
+
+**Question and boundary.** S30 asked whether the committed portable hub could
+become a truthful Linux service without becoming a privileged network
+appliance. Source began synchronized at `912a4f0`; ReachKit, reachd, the macOS
+mesh helper, Keeper, the phone, router, wire and installed runtime were outside
+the pass. The founder authorized one disposable VM, not a public endpoint.
+
+**Pinned runner.** Lima 2.2.0 ran one native-VZ `aarch64` Ubuntu Server 26.04
+LTS guest from release image `20260731`, SHA-256
+`3e113fdd41f39e13729375173bb2ae793f87dc6db4294e5251ff2476971788ba`.
+The plain VM had two CPUs, 4 GiB RAM and a 30 GiB disk, with no mounts,
+containerd, Rosetta, GUI, dynamic forwarding or host-home exposure. It used
+only the declared networking, WireGuard, nftables, JSON and package tools;
+accepted builds and runtime cells ran after guest egress was blocked.
+
+**Pre-edit gate.** The exact committed arm64 binary
+`cbd0cdd1…76c4` passed S30.0 **3/3** under real systemd as the dedicated
+unprivileged account. In each run Linux kernel WireGuard peers established
+handshakes and exchanged traffic in both directions through the userspace hub;
+the service held zero effective or ambient capabilities, used the wildcard
+IPv4/IPv6 bind, and cleaned up completely. The original pre-edit transcripts
+were lost with a later guest reboot, so the same exact committed hash was run
+3/3 again after teardown solely to retain raw transcripts. That retention run
+does not substitute a different implementation for the pre-edit gate.
+
+**Linux additions.** The candidate adds:
+
+- strict root/`reach-relay` ownership and mode-`0640` checks for both operator
+  files, including no-follow, regular-file, single-link and exact GID rules;
+- a versioned route inventory unioned with read-only netlink routes from every
+  IPv4 table, with kernel-sender, socket-port, sequence, multipart-completion,
+  truncation, interruption and overrun validation, plus privileged-port refusal
+  before backend mutation;
+- a package-internal decode policy applied at startup and every reload;
+- serialized `SIGHUP`, `SIGUSR1`, TERM and INT handling, bounded refusal that
+  preserves a healthy generation, live-authority status refresh, and removal
+  of the historical state-directory status file;
+- volatile mode-`0600` status at `/run/reach-relay-hub/status.json`;
+- a hardened systemd unit for the dedicated account with shell-free
+  `ExecReload`, exact mode-`0700` state/runtime directories, zero capabilities,
+  fixed memory/task/FD/core bounds and the syscall filter proved by the real
+  matrix; and
+- a deterministic maintainer-script-free Debian package containing only the
+  binary, unit, sysusers/tmpfiles declarations, licenses/notices and route
+  documentation. Its actual data/control archives are checked against the
+  manifest, including a mode-`0755` archive root and mandatory route document.
+  It installs inertly and authors no configuration, key, firewall, fixture or
+  state.
+
+**Accepted L0–L12 matrix.** The final linear run produced these outcomes:
+
+| cells | result |
+|---|---|
+| L0–L3 | pinned native runner and offline provenance; byte-reproducible A/B packages; inert install; unsafe owner, group, mode, hard-link, symlink, malformed/oversized data, privileged port and route conflicts all refused; hardened non-root start was ready with PID 3009 and zero capabilities; `systemctl reload` and exact state/runtime modes were verified |
+| L4 | host↔device forwarding completed **3/3**, with matching Linux-kernel handshakes/counters and privacy-safe per-peer hub counters |
+| L5 | device isolation, spoofed source and unknown destination were refused; the unconditional wildcard-port drop advanced independently for a denied source on allowed ingress, a genuinely separate interface, loopback IPv4, loopback IPv6 and injected real-`eth0` ingress while every hub peer counter remained byte-identical; valid forwarding remained available |
+| L6 | generation 2 moved device 3 from relay ordinal/address 3 to 4 without changing PID; unchanged-peer runtime stayed monotonic, the recreated peer re-established, the old route stopped and status named the exact promoted generation/digest |
+| L7 | seven invalid reload classes reported `update refused`, retained PID and forwarding, restored both operator files, and survived a controlled restart from the restored disk authority |
+| L8–L9 | three `SIGKILL` recoveries and two distinct guest reboots returned only the promoted generation, firewall and both forwarding directions under systemd |
+| L10 | B→A→B ran the exact intended executable/unit hashes, preserved compatible active authority, re-established forwarding after each controlled restart and finished on B |
+| L11–L12 | service/package, operator state, firewall, namespaces, account, listener and payload were removed; the VM and mutable disk were deleted |
+
+**Maximum-capacity addendum.** Review found that L3 had recorded the fixed
+resource policy without starting the real service at the schema maximum. A
+bounded addendum therefore recreated the same pinned VM, rebuilt the exact B
+package twice at `252c490a…3775`, and started the installed hardened unit with
+253 devices plus the host. Status reported generation 1 ready with **254/254**
+peers. At the accepted snapshot the unit used 12,070,912 of 268,435,456 cgroup
+memory bytes, 8 of 128 tasks and 10 of 1,024 file descriptors;
+`LimitCORE=0`, every capability set was empty, `NoNewPrivileges=1`, and
+seccomp mode 2 was active. The service identity was refused when it attempted
+link, route, network-namespace and nftables mutation; none of the four objects
+appeared and readiness remained true.
+
+The same PID then applied generation 2's host-plus-two-device manifest. The
+real Linux-kernel peers re-established handshakes and forwarded in both
+directions **3/3**, with every per-peer receive/transmit counter increasing.
+Package, unit, listener, fixtures, firewall, offline policy, account and
+operator/runtime state were again absent before VM deletion. Lima's graceful
+host-agent stop later hung on its own UDP-proxy cleanup; because guest teardown
+and extraction had already passed, a targeted forced deletion removed only the
+disposable VM and mutable disk. This was infrastructure teardown, not a service
+or forwarding failure.
+
+The accepted B arm64 executable is
+`e5060d14…06a6`; two B package builds matched at
+`252c490a…3775`. The compatibility A packages matched at
+`3abbafdb…cf89`. A static amd64 binary reproduced twice at
+`4b10c7d4…e8cc`, but it did not execute on an amd64 kernel and is not runtime
+acceptance.
+
+**Correction and evidence honesty.** Review invalidated the first pack's
+firewall, unit, netlink and package-manifest claims, so it is superseded rather
+than reused. The corrected attempt ledger retains six bounded harness failures:
+an overlong interface name, an over-strict netlink-header sender assumption, a
+frame that Linux classified `PACKET_OTHERHOST`, one stale peer-counter baseline,
+and a reboot that removed the disposable `/tmp` runner before the host began
+restoring and hash-checking it. Only run 7 is authoritative. No failed run was
+rewritten into the accepted matrix.
+
+The corrected private pack
+`/private/tmp/reach-relay-linux-evidence-authoritative` contains **188 files**
+and 22.9 MB; its complete manifest validates. Its artifacts are exactly five
+unique byte sets retained once each: A arm64 binary/package and B arm64
+binary/package plus the cross-build-only B amd64 binary. The exact corrected B
+package is present. It retains sanitized manifests, command records, hashes,
+bounded logs, status/counters, excluded-attempt labels, capacity receipts and
+exact source snapshots. It contains no raw operator configuration, generated
+key, UAPI key output, packet capture/payload, Reach identity, prompt, generated
+content or external endpoint. Earlier material is classified beneath the one
+top-level superseded pack; no stale third evidence authority remains.
+
+**Post-teardown verification.** Focused Linux packages passed **3/3**; the
+complete hub suite passed **3/3**; race, vet and offline module verification
+passed. Linux arm64 and amd64 static cross-builds reproduced twice. Fresh
+complete regressions passed ReachKit **80/80** and reachd **240/240 in 36
+suites** after attributing one sandbox-only Keychain refusal. Installed reachd
+remained `da7f3cf9…3fd8` at PID 29485/run 2 and the root helper remained
+`61d04eeb…4542` at PID 4622/run 3. Final authenticated `doctor --dial`
+reported **15 pass, 3 expected mapping warnings, 0 waiting and 0 fail** in
+32 ms. No installed Reach byte or identity changed.
+
+**Verdict: PASS FOR LINUX ARM64 RUNTIME/PACKAGING.** The private reference
+substrate now has measured systemd, ownership, routing, firewall, reload,
+recovery, rollback and teardown truth. No operational relay ships: a host relay
+intent/helper integration, negotiated relay roads, Keeper-held device
+provisioning, endpoint refresh, public operations and physical multi-NAT
+acceptance all remain ahead. Lima and the exact pinned image cache remain only
+as declared developer tooling; the VM does not.

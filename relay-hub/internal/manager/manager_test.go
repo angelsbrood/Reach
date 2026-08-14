@@ -7,7 +7,9 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"systems.reach/relay-hub/internal/backend"
 	"systems.reach/relay-hub/internal/config"
@@ -556,5 +558,78 @@ func TestConcurrentGenerationsSerializeAndStaleGenerationCannotMutate(t *testing
 	}
 	if f.Calls != calls {
 		t.Fatal("stale generation mutated backend")
+	}
+}
+
+func TestDynamicDecoderRunsInsideSerializedApply(t *testing.T) {
+	dir := t.TempDir()
+	paths := Paths{Active: filepath.Join(dir, "private", "active.json"), Pending: filepath.Join(dir, "private", "pending.json"), Status: filepath.Join(dir, "public", "status.json")}
+	f := &backend.Fake{}
+	r := router.New()
+	uid := uint32(os.Getuid())
+	var concurrent, maximum atomic.Int32
+	decode := func(data []byte) (config.Specification, error) {
+		value := concurrent.Add(1)
+		defer concurrent.Add(-1)
+		time.Sleep(10 * time.Millisecond)
+		for {
+			observed := maximum.Load()
+			if value <= observed || maximum.CompareAndSwap(observed, value) {
+				break
+			}
+		}
+		return config.Decode(data, nil)
+	}
+	m := NewWithDecoder(paths, &uid, decode, f, r)
+	if err := applySpec(t, m, testutil.Spec(1, 1)); err != nil {
+		t.Fatal(err)
+	}
+	errorsByGeneration := make(chan error, 2)
+	go func() { errorsByGeneration <- applySpec(t, m, testutil.Spec(2, 2)) }()
+	go func() { errorsByGeneration <- applySpec(t, m, testutil.Spec(2, 2)) }()
+	for range 2 {
+		if err := <-errorsByGeneration; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if maximum.Load() != 1 {
+		t.Fatalf("concurrent decoders = %d", maximum.Load())
+	}
+}
+
+func TestRefusalAndRefreshRevalidateAuthority(t *testing.T) {
+	m, f, _, paths := setup(t)
+	spec := testutil.Spec(1, 1)
+	if err := applySpec(t, m, spec); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.RefuseUpdate(); err != nil {
+		t.Fatal(err)
+	}
+	if status := readStatus(t, paths.Status); !status.Ready || status.Error != "update refused" {
+		t.Fatalf("refusal status %+v", status)
+	}
+	f.Mu.Lock()
+	delete(f.Current, spec.Host.PublicKey)
+	f.Mu.Unlock()
+	if err := m.RefreshStatus(); err == nil {
+		t.Fatal("refresh hid backend drift")
+	}
+	if status := readStatus(t, paths.Status); status.Ready || status.Error != "backend unavailable" {
+		t.Fatalf("refresh status %+v", status)
+	}
+}
+
+func TestMaximumDeviceManifestStartsReady(t *testing.T) {
+	m, f, r, paths := setup(t)
+	if err := applySpec(t, m, testutil.Spec(1, config.MaximumDevices)); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.Current) != 1+config.MaximumDevices || !r.Metrics().Open {
+		t.Fatalf("peers=%d router=%+v", len(f.Current), r.Metrics())
+	}
+	status := readStatus(t, paths.Status)
+	if !status.Ready || status.Generation != 1 || status.PeerCount != 1+config.MaximumDevices || len(status.Peers) != 1+config.MaximumDevices {
+		t.Fatalf("maximum status ready=%v generation=%d peerCount=%d attributed=%d", status.Ready, status.Generation, status.PeerCount, len(status.Peers))
 	}
 }

@@ -5,3 +5,4 @@
 /usr/share/licenses/reach-relay-hub/LICENSE root:root 0444
 /usr/share/doc/reach-relay-hub/NOTICE.md root:root 0444
 /usr/share/doc/reach-relay-hub/THIRD_PARTY_LICENSES.md root:root 0444
+/usr/share/doc/reach-relay-hub/route-inventory.md root:root 0444

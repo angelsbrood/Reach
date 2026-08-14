@@ -101,8 +101,17 @@ func TestSecureFilePolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 	uid := uint32(os.Getuid())
-	if _, err := config.ReadSecureFile(path, config.FileRule{Owner: &uid, Mode: 0o600, Limit: config.MaximumBytes}); err != nil {
+	info, err := os.Stat(path)
+	if err != nil {
 		t.Fatal(err)
+	}
+	gid := info.Sys().(*syscall.Stat_t).Gid
+	if _, err := config.ReadSecureFile(path, config.FileRule{Owner: &uid, Group: &gid, Mode: 0o600, Limit: config.MaximumBytes}); err != nil {
+		t.Fatal(err)
+	}
+	wrongGID := gid + 1
+	if _, err := config.ReadSecureFile(path, config.FileRule{Owner: &uid, Group: &wrongGID, Mode: 0o600, Limit: config.MaximumBytes}); err == nil {
+		t.Fatal("wrong group accepted")
 	}
 	if err := os.Chmod(path, 0o644); err != nil {
 		t.Fatal(err)
@@ -125,8 +134,8 @@ func TestSecureFilePolicy(t *testing.T) {
 	if _, err := config.ReadSecureFile(path, config.FileRule{Owner: &uid, Mode: 0o600, Limit: config.MaximumBytes}); err == nil {
 		t.Fatal("hard link accepted")
 	}
-	info, _ := os.Lstat(path)
-	if info.Sys().(*syscall.Stat_t).Nlink < 2 {
+	linkedInfo, _ := os.Lstat(path)
+	if linkedInfo.Sys().(*syscall.Stat_t).Nlink < 2 {
 		t.Fatal("fixture")
 	}
 }

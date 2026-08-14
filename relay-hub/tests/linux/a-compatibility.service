@@ -1,0 +1,32 @@
+[Unit]
+Description=Reach reference relay hub A compatibility fixture
+After=network-online.target nftables.service
+Wants=network-online.target nftables.service
+
+[Service]
+Type=simple
+User=reach-relay
+Group=reach-relay
+ExecStart=/usr/lib/reach-relay-hub/reach-relay-hub --config /etc/reach-relay-hub/config.json --state /var/lib/reach-relay-hub
+Restart=on-failure
+RestartSec=10
+StateDirectory=reach-relay-hub
+RuntimeDirectory=reach-relay-hub
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadOnlyPaths=/etc/reach-relay-hub/config.json
+
+[Install]
+WantedBy=multi-user.target

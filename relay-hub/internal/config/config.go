@@ -270,6 +270,7 @@ func requireEOF(d *json.Decoder) error {
 
 type FileRule struct {
 	Owner *uint32
+	Group *uint32
 	Mode  os.FileMode
 	Limit int64
 }
@@ -293,6 +294,9 @@ func ReadSecureFile(path string, rule FileRule) ([]byte, error) {
 	}
 	if rule.Owner != nil && stat.Uid != *rule.Owner {
 		return nil, errors.New("configuration owner rejected")
+	}
+	if rule.Group != nil && stat.Gid != *rule.Group {
+		return nil, errors.New("configuration group rejected")
 	}
 	if info.Size() < 1 || info.Size() > rule.Limit {
 		return nil, errors.New("configuration size rejected")

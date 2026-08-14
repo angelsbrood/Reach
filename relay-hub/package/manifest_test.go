@@ -26,6 +26,7 @@ func TestPayloadManifestIsScriptlessAndComplete(t *testing.T) {
 		"/usr/share/licenses/reach-relay-hub/LICENSE root:root 0444",
 		"/usr/share/doc/reach-relay-hub/NOTICE.md root:root 0444",
 		"/usr/share/doc/reach-relay-hub/THIRD_PARTY_LICENSES.md root:root 0444",
+		"/usr/share/doc/reach-relay-hub/route-inventory.md root:root 0444",
 		"",
 	}, "\n")
 	if got := read(t, "manifest.txt"); got != want {
@@ -47,15 +48,35 @@ func TestServiceManifestPreservesSelectedBoundary(t *testing.T) {
 	for _, required := range []string{
 		"User=reach-relay",
 		"Group=reach-relay",
-		"Restart=always",
+		"After=network-online.target nftables.service",
+		"Wants=network-online.target nftables.service",
+		"Restart=on-failure",
 		"RestartSec=10",
+		"StartLimitIntervalSec=60",
+		"StartLimitBurst=3",
+		"TimeoutStopSec=15",
+		"ExecReload=/usr/bin/kill -HUP $MAINPID",
 		"StateDirectory=reach-relay-hub",
+		"StateDirectoryMode=0700",
 		"RuntimeDirectory=reach-relay-hub",
+		"RuntimeDirectoryMode=0700",
 		"UMask=0077",
 		"NoNewPrivileges=yes",
+		"PrivateDevices=yes",
 		"ProtectSystem=strict",
 		"CapabilityBoundingSet=",
-		"RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
+		"RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK",
+		"RestrictNamespaces=yes",
+		"RestrictSUIDSGID=yes",
+		"SystemCallArchitectures=native",
+		"SystemCallFilter=@system-service",
+		"SystemCallErrorNumber=EPERM",
+		"MemoryMax=256M",
+		"TasksMax=128",
+		"LimitNOFILE=1024",
+		"LimitCORE=0",
+		"--routes /etc/reach-relay-hub/routes.json",
+		"--status /run/reach-relay-hub/status.json",
 	} {
 		if !strings.Contains(service, required) {
 			t.Errorf("service omitted %q", required)
@@ -66,7 +87,12 @@ func TestServiceManifestPreservesSelectedBoundary(t *testing.T) {
 			t.Errorf("service contains forbidden %q", forbidden)
 		}
 	}
-	if strings.Contains(read(t, "reach-relay-hub.tmpfiles"), "config.json") {
-		t.Fatal("tmpfiles must not create operator configuration")
+	for _, name := range []string{"config.json", "routes.json"} {
+		if strings.Contains(read(t, "reach-relay-hub.tmpfiles"), name) {
+			t.Fatalf("tmpfiles must not create operator file %s", name)
+		}
+	}
+	if !strings.Contains(read(t, "route-inventory.md"), "every current Linux IPv4 routing table") {
+		t.Fatal("route inventory contract missing")
 	}
 }
