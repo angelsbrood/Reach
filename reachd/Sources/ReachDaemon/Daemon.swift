@@ -156,7 +156,7 @@ public final class Daemon: Sendable {
         self.tls = identity
         self.grants = grants
         self.reachability = reachability
-        self.currentAddresses = LocalAddresses.ipv4
+        self.currentAddresses = { DirectAddressSelector.current() }
     }
 
     /// Test-only/package seam for the fact authenticated hellos read the

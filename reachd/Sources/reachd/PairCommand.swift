@@ -51,7 +51,7 @@ struct Pair: AsyncParsableCommand {
             try ca.save(to: caDirectory)
         }
 
-        let addrs = LocalAddresses.ipv4()
+        let addrs = DirectAddressSelector.current()
             .map { $0.map(String.init).joined(separator: ".") }
             .filter { $0 != "127.0.0.1" }
         let token = TokenStore().mint()

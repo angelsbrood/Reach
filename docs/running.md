@@ -466,6 +466,70 @@ bounded local install/acceptance session, the package install, first apply,
 crash check and rollback can be grouped behind one native administrator
 authorization instead of prompting for each operation.
 
+### Optional host relay intent
+
+One existing interface and host key can also own one optional relay overlay.
+Changing that intent is unprivileged and never applies it automatically:
+
+```text
+reachd mesh relay set \
+  --network 10.87.0.0/24 \
+  --hub-public-key <base64-public-key> \
+  --endpoint <numeric-ip:port>
+reachd mesh apply
+
+reachd mesh relay remove
+reachd mesh apply
+```
+
+`relay set` accepts one canonical RFC1918 `/24`, derives host `.1/32` and each
+device's matching relay `/32`, requires a numeric IPv4 or bracketed IPv6
+endpoint on port `1024...65535`, and fixes keepalive at 25 seconds. It refuses
+overlap with the direct mesh and active non-default IPv4 routes. That CLI check
+is only early feedback: the privileged owner rereads the Darwin route table
+immediately before mutation and is authoritative. Existing exact helper-owned
+relay routes are exempt only for an idempotent update.
+
+The commands do not print the hub key or endpoint. They print generation plus
+complete, direct and relay public digests and instruct the operator to run the
+separate apply ceremony. Enrollment and relay edits use one secure intent lock;
+when a direct peer is added while relay is configured, its relay `/32` is
+rederived in the same generation. Removing relay returns the intent to
+canonical version 1 while preserving every direct field except generation.
+
+Helper status version 2 exposes independent direct and relay components. Read
+them separately: direct can remain PASS while desired relay is WAIT for apply,
+or while a refused update leaves the last-known-good direct road live. Overall
+ready requires exact direct authority plus either exact configured relay state
+or verified relay absence. A relay-only change does not restart `reachd` and
+does not restart the WireGuard interface; unchanged direct peers retain their
+runtime state. A removed/recreated hub peer may not.
+
+This host-side state is not a v0 road. Pairing and authenticated v0 hellos
+exclude every relay alias and every non-direct IPv4 on the interface owning
+`10.86.0.1`. Do not interpret a relay alias in `ifconfig` as a client-visible
+road. Relay advertisement, persistence and direct-first hedging require the
+separate negotiated-wire pass.
+
+The installed S31 acceptance deliberately added, updated, refused, crash-
+recovered, and removed a local synthetic relay while the daemon PID and direct
+authority stayed fixed. Its final exact-byte interruption test also held
+claimed generation 12 apart from newer pending generation 13 across a helper
+crash. The complete rerun ends at intent generation 18 in canonical version 1,
+helper status version 2 with
+`direct.ready: true`, `relay.configured: false`, and `relay.ready: true`, and
+no relay alias, route, hub peer, pending specification, or claimed
+specification. A normal operator should therefore treat
+`relay configured false; verified absent` as a healthy direct-only ending, not
+as a missing mesh. The exact accepted reachd and helper hashes are recorded in
+`docs/spikes.md`; a real authenticated `doctor --dial` passed after the rerun.
+The final acknowledgement correction binds `mesh apply` to the staged
+generation and public digest: completing an older surviving claim can no
+longer make a newer invocation report success. Its installed regression proved
+that ordering directly, then repeated the full matrix and restored canonical
+direct-only generation 25 with helper `a784f257…b28ca8`. Reachd remained PID
+86352 throughout, and the final authenticated dial passed on attempt 1.
+
 `reachd service status` and `reachd doctor` report the login daemon and mesh
 owner separately, using the same mesh-owner verdict. An absent or
 not-yet-configured helper is `WAIT`; a legacy manually raised interface is

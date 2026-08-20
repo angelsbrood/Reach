@@ -69,7 +69,11 @@ struct Serve: AsyncParsableCommand {
             try ca.save(to: caDirectory)
             print("[reachd] cluster CA created")
         }
+        // Listener certificates continue to cover every local address. Wire
+        // v0 road vocabulary does not: a relay alias on the mesh interface
+        // is quarantined from direct-road derivation and advertisement.
         let addresses = LocalAddresses.ipv4()
+        let directAddresses = DirectAddressSelector.current()
         let server = try ca.serverLeaf(
             in: caDirectory,
             commonName: "reachd",
@@ -100,7 +104,7 @@ struct Serve: AsyncParsableCommand {
         let mesh = MeshEndpoint.resolve(
             config: config,
             mapped: reachability.meshEndpoint,
-            addresses: addresses
+            addresses: directAddresses
         )
         // The startup line reports what the endpoint is now; the grant reads
         // it again when it grants. Re-pinning meshEndpoint — which is what
@@ -112,7 +116,7 @@ struct Serve: AsyncParsableCommand {
             MeshEndpoint.resolve(
                 config: try DaemonConfig.load(),
                 mapped: reachability.meshEndpoint,
-                addresses: LocalAddresses.ipv4()
+                addresses: DirectAddressSelector.current()
             ).endpoint
         }
         let enrollment = EnrollmentService(

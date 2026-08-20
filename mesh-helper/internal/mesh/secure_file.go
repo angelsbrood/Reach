@@ -152,9 +152,12 @@ func WriteRootFileAtomically(path string, data []byte, mode os.FileMode) error {
 	}
 	clean = true
 	directory, err := os.Open(filepath.Dir(path))
-	if err == nil {
-		defer directory.Close()
-		_ = directory.Sync()
+	if err != nil {
+		return err
+	}
+	defer directory.Close()
+	if err := directory.Sync(); err != nil {
+		return err
 	}
 	return nil
 }

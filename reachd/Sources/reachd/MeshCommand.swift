@@ -6,8 +6,69 @@ struct Mesh: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "mesh",
         abstract: "Compile and visibly apply the login-owned mesh intent.",
-        subcommands: [Stage.self, Apply.self]
+        subcommands: [Stage.self, Apply.self, Relay.self]
     )
+
+    struct Relay: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            commandName: "relay",
+            abstract: "Change login-owned relay intent without invoking privilege.",
+            subcommands: [Set.self, Remove.self]
+        )
+
+        struct Set: AsyncParsableCommand {
+            static let configuration = CommandConfiguration(
+                abstract: "Configure one relay overlay; run `reachd mesh apply` separately."
+            )
+
+            @Option(name: .long, help: "Canonical private /24 for the relay overlay.")
+            var network: String
+
+            @Option(name: .long, help: "Canonical base64 WireGuard public key for the hub.")
+            var hubPublicKey: String
+
+            @Option(name: .long, help: "Stable numeric IPv4:port or [IPv6]:port hub endpoint.")
+            var endpoint: String
+
+            @Option(name: .long, help: "State directory to update. Defaults to the current Reach state.")
+            var state: String?
+
+            func run() async throws {
+                let directory = state.map { URL(fileURLWithPath: $0, isDirectory: true) } ?? DaemonInfo.stateDirectory
+                let result = try MeshIntentStore.setRelay(
+                    in: directory,
+                    network: network,
+                    hubPublicKey: hubPublicKey,
+                    endpoint: endpoint
+                )
+                print("[reachd] mesh relay intent \(result.changed ? "updated" : "unchanged") at generation \(result.intent.generation)")
+                print("[reachd] public digest \(result.intent.publicDigest)")
+                print("[reachd] direct digest \(result.intent.directDigest)")
+                if let digest = result.intent.relayDigest {
+                    print("[reachd] relay digest \(digest)")
+                }
+                print("[reachd] run `reachd mesh apply` to ask the privileged owner to apply this intent")
+            }
+        }
+
+        struct Remove: AsyncParsableCommand {
+            static let configuration = CommandConfiguration(
+                abstract: "Remove relay intent and return to canonical direct-only v1."
+            )
+
+            @Option(name: .long, help: "State directory to update. Defaults to the current Reach state.")
+            var state: String?
+
+            func run() async throws {
+                let directory = state.map { URL(fileURLWithPath: $0, isDirectory: true) } ?? DaemonInfo.stateDirectory
+                let result = try MeshIntentStore.removeRelay(in: directory)
+                print("[reachd] mesh relay intent \(result.changed ? "removed" : "already absent") at generation \(result.intent.generation)")
+                print("[reachd] public digest \(result.intent.publicDigest)")
+                print("[reachd] direct digest \(result.intent.directDigest)")
+                print("[reachd] run `reachd mesh apply` to ask the privileged owner to apply this intent")
+            }
+        }
+    }
 
     struct Stage: AsyncParsableCommand {
         static let configuration = CommandConfiguration(

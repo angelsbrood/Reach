@@ -12,7 +12,11 @@ import (
 
 func main() {
 	if err := run(os.Args); err != nil {
-		fmt.Fprintln(os.Stderr, "reach-meshd: operation failed")
+		message := "operation failed"
+		if outcome, ok := mesh.PublicApplyOutcome(err); ok {
+			message = outcome
+		}
+		fmt.Fprintf(os.Stderr, "reach-meshd: %s\n", message)
 		os.Exit(1)
 	}
 }

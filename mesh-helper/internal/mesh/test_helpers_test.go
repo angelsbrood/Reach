@@ -42,6 +42,22 @@ func testSpecification(t *testing.T, generation uint64) Specification {
 	}
 }
 
+func testRelaySpecification(t *testing.T, generation uint64) Specification {
+	t.Helper()
+	spec := testSpecification(t, generation)
+	_, hubPublic := testKeypair(t)
+	spec.Version = RelaySpecificationVersion
+	spec.Relay = &Relay{
+		Network:      "10.87.0.0/24",
+		Address:      "10.87.0.1/32",
+		HubPublicKey: hubPublic,
+		Endpoint:     "192.0.2.10:51821",
+		Keepalive:    RelayKeepalive,
+		Routes:       []string{"10.87.0.2/32"},
+	}
+	return spec
+}
+
 func encodedSpecification(t *testing.T, spec Specification) []byte {
 	t.Helper()
 	data, err := json.MarshalIndent(spec, "", "  ")
@@ -59,6 +75,7 @@ func testPaths(t *testing.T) Paths {
 		State: state, Private: private,
 		Active:  filepath.Join(private, "active.json"),
 		Pending: filepath.Join(private, "pending.json"),
+		Claimed: filepath.Join(private, "applying.json"),
 		Lock:    filepath.Join(private, "apply.lock"),
 		Status:  filepath.Join(state, "status.json"),
 		Control: filepath.Join("/private/tmp", fmt.Sprintf("reach-mesh-%d-%d.sock", os.Getpid(), socketSequence.Add(1))),

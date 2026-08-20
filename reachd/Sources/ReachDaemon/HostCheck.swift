@@ -139,6 +139,7 @@ public enum HostCheck {
         supervisionHome: URL? = nil,
         canonicalState: URL = DaemonInfo.canonicalLoginStateDirectory,
         meshOwnerEvidence: MeshOwner.Evidence? = nil,
+        directAddresses: [[UInt8]]? = nil,
         portIsHeld: @Sendable (UInt16) -> Bool = HostCheck.probePort,
         dial: Dial? = nil
     ) async -> Report {
@@ -177,7 +178,11 @@ public enum HostCheck {
         let portFindings = checkPorts(config: config, isHeld: portIsHeld)
         let daemonUp = portFindings.contains { $0.level == .pass }
 
-        findings.append(contentsOf: checkMeshEndpoint(config: config, configExists: configExists, addresses: addresses))
+        findings.append(contentsOf: checkMeshEndpoint(
+            config: config,
+            configExists: configExists,
+            addresses: directAddresses ?? addresses
+        ))
         findings.append(checkMeshInterface(addresses, daemonUp: daemonUp))
         findings.append(checkClusterCA(in: stateDirectory, config: config))
         let wireGuard = checkMeshIntent(in: stateDirectory)

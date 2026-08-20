@@ -821,25 +821,30 @@ public actor WireGuardHost {
         guard MeshIntent.peerOrdinal(route) != nil else {
             throw MeshIntentError.refused("peer route is outside 10.86.0.2...254/32")
         }
-        var intent = try MeshIntentStore.load(in: stateDirectory)
-        guard intent.publicKey == serverPublicKey.base64EncodedString() else {
-            throw MeshIntentError.refused("mesh intent host key no longer matches this host")
+        let update = try MeshIntentStore.update(in: stateDirectory) { intent in
+            guard intent.publicKey == serverPublicKey.base64EncodedString() else {
+                throw MeshIntentError.refused("mesh intent host key no longer matches this host")
+            }
+            if intent.peers.contains(where: { $0.publicKey == base64 && $0.allowedIP == route }) {
+                return false
+            }
+            intent.peers.removeAll {
+                $0.allowedIP == route || $0.publicKey == base64
+            }
+            intent.peers.append(.init(publicKey: base64, allowedIP: route))
+            intent.peers.sort {
+                MeshIntent.peerOrdinal($0.allowedIP)! < MeshIntent.peerOrdinal($1.allowedIP)!
+            }
+            if let relay = intent.relay {
+                intent.relay = try relay.rederived(for: intent.peers)
+            }
+            guard intent.generation < UInt64.max else {
+                throw MeshIntentError.refused("mesh intent generation is exhausted")
+            }
+            intent.generation += 1
+            return true
         }
-        if intent.peers.contains(where: { $0.publicKey == base64 && $0.allowedIP == route }) {
-            return false
-        }
-        intent.peers.removeAll {
-            $0.allowedIP == route || $0.publicKey == base64
-        }
-        intent.peers.append(.init(publicKey: base64, allowedIP: route))
-        intent.peers.sort {
-            MeshIntent.peerOrdinal($0.allowedIP)! < MeshIntent.peerOrdinal($1.allowedIP)!
-        }
-        guard intent.generation < UInt64.max else {
-            throw MeshIntentError.refused("mesh intent generation is exhausted")
-        }
-        intent.generation += 1
-        try MeshIntentStore.save(intent, in: stateDirectory)
+        guard update.changed else { return false }
         Log.info("mesh intent updated — apply with: \(Self.applyCommand)")
         return true
     }

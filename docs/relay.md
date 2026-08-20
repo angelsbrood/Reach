@@ -122,6 +122,77 @@ hub peer, relay routes, relay declaration, and relay-road record. It never
 rewrites or removes the direct peer, direct mesh, mapped roads, or user-tailnet
 roads.
 
+## Host ownership boundary
+
+The host side of this topology is a backward-readable extension of the existing
+mesh owner, not a second VPN service. Login-owned `mesh-intent.json` remains
+canonical version 1 while it is direct-only. Configuring a relay produces strict
+version 2 with one optional relay block; removing it increments the generation
+and writes canonical version 1 again. The host private key is never copied into
+intent.
+
+The operator edits intent without invoking privilege:
+
+```text
+reachd mesh relay set --network 10.87.0.0/24 \
+  --hub-public-key <base64-public-key> \
+  --endpoint <numeric-host:port>
+reachd mesh relay remove
+```
+
+Both commands print only generation and domain-separated public digests. The
+separate `reachd mesh apply` ceremony still compiles one mode-`0600`
+specification and visibly invokes the installed root owner through
+`/usr/bin/sudo`. Enrollment and operator edits share one process-wide intent
+lock, so a newly enrolled direct peer and its derived relay `/32` cannot be
+lost to a concurrent relay edit.
+
+The helper's strict version-2 specification retains the existing interface,
+key, UDP port, MTU, direct address, direct connected route and direct peers. It
+adds only the relay `.1/32`, exact device relay `/32` routes, and one
+endpoint-bearing hub peer. The Darwin backend removes relay routes and the
+relay alias before mutating that hub peer, computes an exact UAPI diff, and
+preserves unchanged direct peers including their learned runtime state. An
+endpoint-only hub change is in place; a key or AllowedIPs change removes and
+re-adds the hub so staged traffic cannot cross ownership. Full peer, address,
+route and MTU authority is reverified before the specification is atomically
+promoted and fsynced, and readiness is published only afterward.
+
+Status version 2 reports independent `direct` and `relay` component digests,
+counts and readiness. A configured but unapplied relay is WAIT while verified
+direct state remains PASS. A refused candidate retains the last-known-good
+authority and a bounded outcome. False readiness, a leaked removed path,
+generation rollback, or any peer/address/route/digest disagreement is FAIL.
+Version-1 helper status remains readable during upgrade.
+
+Wire v0 remains deliberately direct-only. Listener certificates and local
+diagnostics still see every local address, but pairing and `HelloAck.roads`
+exclude the relay address and conservatively exclude every non-`10.86.0.1`
+IPv4 address on the interface that owns the direct mesh. Desired intent and
+helper status add a second quarantine source. A stale or misplaced relay alias
+therefore cannot leak into a v0 calling card.
+
+S31 installed and exercised this host boundary on 19 August 2026. One local
+reference hub proved add, idempotent reapply, endpoint-only update, relay-prefix
+and AllowedIPs replacement, overlap refusal, helper crash recovery, and complete
+removal without restarting reachd or changing direct identity. The exact-byte
+review repair reran the same installed matrix on 20 August after making route
+inspection fail closed and route deletion interface-owned. A final correction
+then bound every transaction to an atomically claimed specification and made
+teardown refuse any foreign route owner appearing after deletion. Installed
+interruption/restart acceptance proved claimed generation 12 could not promote
+newer pending generation 13; the complete matrix then restored canonical
+direct-only intent generation 18 on `utun0`, with one direct peer and verified
+absence of every relay alias, route, hub peer, pending artifact, and claimed
+artifact. The final acknowledgement repair additionally binds each apply
+request and response to the exact expected generation and public digest. Its
+installed regression retained generation 19, staged 20, and acknowledged 20
+only after 20 was active; the same bytes then restored canonical direct-only
+generation 25. The accepted helper is `a784f257…b28ca8`, with relay configured
+false/ready true and no residual relay or transaction artifact.
+This is host ownership only: no operational relay ships until negotiated relay
+roads and Keeper-held device provisioning exist.
+
 ## Security and observation boundary
 
 The hub terminates both WireGuard hops. It can observe relay overlay addresses,
@@ -179,5 +250,6 @@ real public deployment remain follow-on work. Linux acceptance proves the
 private deployment substrate; it does not choose, provision, expose, or
 operate an endpoint.
 
-No operational relay, wire dialect v1, host relay state, or device relay
-provisioning ships today.
+Host relay ownership is only one endpoint half. No operational relay, wire
+dialect v1, relay-road advertisement or persistence, device provisioning,
+public endpoint, or Keeper relay behavior ships from this slice.

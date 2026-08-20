@@ -19,11 +19,13 @@ package enum MeshIntentError: Error, Sendable, CustomStringConvertible, Localize
 /// `wg/server.key` and in the one mode-0600 staging file compiled on demand.
 package struct MeshIntent: Sendable, Equatable {
     package static let version = 1
+    package static let relayVersion = 2
     package static let address = "10.86.0.1/24"
     package static let port = 51_820
     package static let mtu = 1_280
     package static let maximumPeers = 253
     package static let maximumKeepalive = 3_600
+    package static let relayKeepalive = 25
     package static let fileName = "mesh-intent.json"
     package static let stagingDirectoryName = "mesh-stage"
 
@@ -39,14 +41,70 @@ package struct MeshIntent: Sendable, Equatable {
         }
     }
 
+    package struct Relay: Sendable, Equatable {
+        package var network: String
+        package var address: String
+        package var hubPublicKey: String
+        package var endpoint: String
+        package var keepalive: Int
+        package var routes: [String]
+
+        package init(
+            network: String,
+            hubPublicKey: String,
+            endpoint: String,
+            directPeers: [Peer]
+        ) throws {
+            let prefix = try MeshIntent.relayPrefix(network)
+            self.network = network
+            address = "\(prefix.0).\(prefix.1).\(prefix.2).1/32"
+            self.hubPublicKey = hubPublicKey
+            self.endpoint = try MeshIntent.canonicalRelayEndpoint(endpoint, relayPrefix: prefix)
+            keepalive = MeshIntent.relayKeepalive
+            routes = try directPeers.map { peer in
+                guard let ordinal = MeshIntent.peerOrdinal(peer.allowedIP) else {
+                    throw MeshIntentError.refused("relay routes require canonical direct peer ordinals")
+                }
+                return "\(prefix.0).\(prefix.1).\(prefix.2).\(ordinal)/32"
+            }
+        }
+
+        package init(
+            network: String,
+            address: String,
+            hubPublicKey: String,
+            endpoint: String,
+            keepalive: Int,
+            routes: [String]
+        ) {
+            self.network = network
+            self.address = address
+            self.hubPublicKey = hubPublicKey
+            self.endpoint = endpoint
+            self.keepalive = keepalive
+            self.routes = routes
+        }
+
+        package func rederived(for directPeers: [Peer]) throws -> Relay {
+            try Relay(
+                network: network,
+                hubPublicKey: hubPublicKey,
+                endpoint: endpoint,
+                directPeers: directPeers
+            )
+        }
+    }
+
     package var generation: UInt64
     package var publicKey: String
     package var peers: [Peer]
+    package var relay: Relay?
 
-    package init(generation: UInt64, publicKey: String, peers: [Peer]) throws {
+    package init(generation: UInt64, publicKey: String, peers: [Peer], relay: Relay? = nil) throws {
         self.generation = generation
         self.publicKey = publicKey
         self.peers = peers
+        self.relay = relay
         try validate(allowEmpty: true)
     }
 
@@ -78,14 +136,56 @@ package struct MeshIntent: Sendable, Equatable {
                 throw MeshIntentError.refused("mesh peer keepalive is outside 0...\(Self.maximumKeepalive)")
             }
         }
+        if let relay {
+            guard !peers.isEmpty else {
+                throw MeshIntentError.refused("relay intent requires 1...\(Self.maximumPeers) direct peers")
+            }
+            let prefix = try Self.relayPrefix(relay.network)
+            guard relay.address == "\(prefix.0).\(prefix.1).\(prefix.2).1/32" else {
+                throw MeshIntentError.refused("relay host address is not the selected network's .1/32")
+            }
+            _ = try Self.decodeKey(relay.hubPublicKey, role: "relay hub public key")
+            guard relay.hubPublicKey != publicKey,
+                  !peers.contains(where: { $0.publicKey == relay.hubPublicKey })
+            else {
+                throw MeshIntentError.refused("relay hub key is reused by the host or a device")
+            }
+            guard relay.endpoint == (try Self.canonicalRelayEndpoint(relay.endpoint, relayPrefix: prefix)) else {
+                throw MeshIntentError.refused("relay endpoint is not canonical")
+            }
+            guard relay.keepalive == Self.relayKeepalive else {
+                throw MeshIntentError.refused("relay keepalive must be \(Self.relayKeepalive)")
+            }
+            let expectedRoutes = try peers.map { peer -> String in
+                guard let ordinal = Self.peerOrdinal(peer.allowedIP) else {
+                    throw MeshIntentError.refused("relay routes require canonical direct peer ordinals")
+                }
+                return "\(prefix.0).\(prefix.1).\(prefix.2).\(ordinal)/32"
+            }
+            guard relay.routes == expectedRoutes else {
+                throw MeshIntentError.refused("relay routes do not match the ordered direct peer ordinals")
+            }
+        }
     }
 
     package static func decode(_ data: Data) throws -> MeshIntent {
         let root = try StrictJSON.parse(data)
-        let object = try root.object(exactly: [
-            "version", "generation", "publicKey", "address", "port", "mtu", "peers",
-        ])
-        guard try object.integer("version") == version else {
+        guard case .object(let raw) = root else {
+            throw MeshIntentError.refused("mesh JSON object expected")
+        }
+        let decodedVersion = try raw.integer("version")
+        let keys = Set(["version", "generation", "publicKey", "address", "port", "mtu", "peers"])
+        let object: [String: StrictJSONValue]
+        switch decodedVersion {
+        case version:
+            object = try root.object(exactly: keys)
+        case relayVersion:
+            let actual = Set(raw.keys)
+            guard actual == keys || actual == keys.union(["relay"]) else {
+                throw MeshIntentError.refused("mesh JSON has missing or unknown fields")
+            }
+            object = raw
+        default:
             throw MeshIntentError.refused("unsupported mesh intent version")
         }
         guard try object.string("address") == address,
@@ -104,7 +204,28 @@ package struct MeshIntent: Sendable, Equatable {
                 keepalive: try peer.integer("keepalive")
             )
         }
-        return try MeshIntent(generation: generation, publicKey: publicKey, peers: peers)
+        let relay: Relay?
+        if decodedVersion == relayVersion, object["relay"] != nil {
+            let value = try object.value("relay").object(exactly: [
+                "network", "address", "hubPublicKey", "endpoint", "keepalive", "routes",
+            ])
+            relay = Relay(
+                network: try value.string("network"),
+                address: try value.string("address"),
+                hubPublicKey: try value.string("hubPublicKey"),
+                endpoint: try value.string("endpoint"),
+                keepalive: try value.integer("keepalive"),
+                routes: try value.array("routes").map { route in
+                    guard case .string(let text) = route else {
+                        throw MeshIntentError.refused("mesh JSON relay route must be a string")
+                    }
+                    return text
+                }
+            )
+        } else {
+            relay = nil
+        }
+        return try MeshIntent(generation: generation, publicKey: publicKey, peers: peers, relay: relay)
     }
 
     package func encoded() throws -> Data {
@@ -118,9 +239,26 @@ package struct MeshIntent: Sendable, Equatable {
                 }
             """
         }.joined(separator: ",\n")
+        guard let relay else {
+            return Data("""
+                {
+                  "version": \(Self.version),
+                  "generation": \(generation),
+                  "publicKey": \(try Self.jsonString(publicKey)),
+                  "address": \(try Self.jsonString(Self.address)),
+                  "port": \(Self.port),
+                  "mtu": \(Self.mtu),
+                  "peers": [
+                \(peersJSON)
+                  ]
+                }
+
+                """.utf8)
+        }
+        let routesJSON = try relay.routes.map(Self.jsonString).joined(separator: ", ")
         return Data("""
             {
-              "version": \(Self.version),
+              "version": \(Self.relayVersion),
               "generation": \(generation),
               "publicKey": \(try Self.jsonString(publicKey)),
               "address": \(try Self.jsonString(Self.address)),
@@ -128,13 +266,50 @@ package struct MeshIntent: Sendable, Equatable {
               "mtu": \(Self.mtu),
               "peers": [
             \(peersJSON)
-              ]
+              ],
+              "relay": {
+                "network": \(try Self.jsonString(relay.network)),
+                "address": \(try Self.jsonString(relay.address)),
+                "hubPublicKey": \(try Self.jsonString(relay.hubPublicKey)),
+                "endpoint": \(try Self.jsonString(relay.endpoint)),
+                "keepalive": \(relay.keepalive),
+                "routes": [\(routesJSON)]
+              }
             }
 
             """.utf8)
     }
 
     package var publicDigest: String {
+        guard let relay else { return Self.digest(v1PublicSource) }
+        var source = "reach-mesh-public-v2\n"
+        source += "version=\(Self.relayVersion)\n"
+        source += "generation=\(generation)\n"
+        source += "directDigest=\(directDigest)\n"
+        source += "relayDigest=\(Self.relayDigest(relay))\n"
+        return Self.digest(source)
+    }
+
+    package var directDigest: String {
+        var source = "reach-mesh-direct-v1\n"
+        source += "publicKey=\(publicKey)\n"
+        source += "address=\(Self.address)\n"
+        source += "port=\(Self.port)\n"
+        source += "mtu=\(Self.mtu)\n"
+        source += "peerCount=\(peers.count)\n"
+        for (index, peer) in peers.enumerated() {
+            source += "peer.\(index).publicKey=\(peer.publicKey)\n"
+            source += "peer.\(index).allowedIP=\(peer.allowedIP)\n"
+            source += "peer.\(index).keepalive=\(peer.keepalive)\n"
+        }
+        return Self.digest(source)
+    }
+
+    package var relayDigest: String? {
+        relay.map(Self.relayDigest)
+    }
+
+    private var v1PublicSource: String {
         var source = "reach-mesh-public-v1\n"
         source += "version=\(Self.version)\n"
         source += "generation=\(generation)\n"
@@ -148,7 +323,25 @@ package struct MeshIntent: Sendable, Equatable {
             source += "peer.\(index).allowedIP=\(peer.allowedIP)\n"
             source += "peer.\(index).keepalive=\(peer.keepalive)\n"
         }
-        return SHA256.hash(data: Data(source.utf8)).map { String(format: "%02x", $0) }.joined()
+        return source
+    }
+
+    private static func relayDigest(_ relay: Relay) -> String {
+        var source = "reach-mesh-relay-v1\n"
+        source += "network=\(relay.network)\n"
+        source += "address=\(relay.address)\n"
+        source += "hubPublicKey=\(relay.hubPublicKey)\n"
+        source += "endpoint=\(relay.endpoint)\n"
+        source += "keepalive=\(relay.keepalive)\n"
+        source += "routeCount=\(relay.routes.count)\n"
+        for (index, route) in relay.routes.enumerated() {
+            source += "route.\(index)=\(route)\n"
+        }
+        return digest(source)
+    }
+
+    private static func digest(_ source: String) -> String {
+        SHA256.hash(data: Data(source.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 
     package static func importLegacy(
@@ -246,6 +439,105 @@ package struct MeshIntent: Sendable, Equatable {
         return value
     }
 
+    package static func relayPrefix(_ network: String) throws -> (UInt8, UInt8, UInt8) {
+        guard network.hasSuffix("/24") else {
+            throw MeshIntentError.refused("relay network must be a canonical private /24")
+        }
+        let host = String(network.dropLast(3))
+        guard let octets = ipv4(host), octets[3] == 0, network == "\(host)/24" else {
+            throw MeshIntentError.refused("relay network must be a canonical private /24")
+        }
+        let isPrivate = octets[0] == 10
+            || (octets[0] == 172 && (16...31).contains(octets[1]))
+            || (octets[0] == 192 && octets[1] == 168)
+        guard isPrivate, Array(octets.prefix(3)) != [10, 86, 0] else {
+            throw MeshIntentError.refused("relay network must be private and must not overlap 10.86.0.0/24")
+        }
+        return (octets[0], octets[1], octets[2])
+    }
+
+    package static func canonicalRelayEndpoint(
+        _ endpoint: String,
+        relayPrefix: (UInt8, UInt8, UInt8)
+    ) throws -> String {
+        let host: String
+        let portText: String
+        let renderedHost: String
+        if endpoint.hasPrefix("[") {
+            guard let close = endpoint.firstIndex(of: "]"),
+                  endpoint.index(after: close) < endpoint.endIndex,
+                  endpoint[endpoint.index(after: close)] == ":"
+            else {
+                throw MeshIntentError.refused("relay endpoint must be a stable numeric host:port")
+            }
+            host = String(endpoint[endpoint.index(after: endpoint.startIndex)..<close])
+            portText = String(endpoint[endpoint.index(close, offsetBy: 2)...])
+            var address = in6_addr()
+            guard !host.isEmpty, host.withCString({ inet_pton(AF_INET6, $0, &address) }) == 1 else {
+                throw MeshIntentError.refused("relay endpoint must be numeric IPv4 or bracketed IPv6")
+            }
+            let bytes = withUnsafeBytes(of: &address) { Array($0) }
+            let isLoopback = bytes.dropLast().allSatisfy { $0 == 0 } && bytes.last == 1
+            let isLinkLocal = bytes[0] == 0xFE && bytes[1] & 0xC0 == 0x80
+            let isIPv4Mapped = bytes.prefix(10).allSatisfy { $0 == 0 }
+                && bytes[10] == 0xFF && bytes[11] == 0xFF
+            guard !bytes.allSatisfy({ $0 == 0 }), !isLoopback, !isLinkLocal,
+                  !isIPv4Mapped, bytes.first != 0xFF
+            else {
+                throw MeshIntentError.refused("relay endpoint address is unsafe")
+            }
+            var buffer = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
+            guard inet_ntop(AF_INET6, &address, &buffer, socklen_t(buffer.count)) != nil else {
+                throw MeshIntentError.refused("relay endpoint IPv6 rendering failed")
+            }
+            let terminator = buffer.firstIndex(of: 0) ?? buffer.endIndex
+            let canonical = String(
+                decoding: buffer[..<terminator].map { UInt8(bitPattern: $0) },
+                as: UTF8.self
+            ).lowercased()
+            guard host.lowercased() == canonical else {
+                throw MeshIntentError.refused("relay endpoint IPv6 address is not canonical")
+            }
+            renderedHost = "[\(canonical)]"
+        } else {
+            guard let colon = endpoint.lastIndex(of: ":"),
+                  !endpoint[..<colon].contains(":"), colon > endpoint.startIndex
+            else {
+                throw MeshIntentError.refused("relay endpoint must be numeric IPv4 or bracketed IPv6")
+            }
+            host = String(endpoint[..<colon])
+            portText = String(endpoint[endpoint.index(after: colon)...])
+            guard let octets = ipv4(host), host == octets.map(String.init).joined(separator: ".") else {
+                throw MeshIntentError.refused("relay endpoint IPv4 address is not canonical")
+            }
+            guard octets != [0, 0, 0, 0], octets != [255, 255, 255, 255],
+                  octets[0] != 127,
+                  !(octets[0] == 169 && octets[1] == 254),
+                  !(224...239).contains(octets[0]),
+                  Array(octets.prefix(3)) != [10, 86, 0],
+                  Array(octets.prefix(3)) != [relayPrefix.0, relayPrefix.1, relayPrefix.2]
+            else {
+                throw MeshIntentError.refused("relay endpoint address is unsafe or recursive through an overlay")
+            }
+            renderedHost = host
+        }
+        guard let port = Int(portText), (1_024...65_535).contains(port), String(port) == portText else {
+            throw MeshIntentError.refused("relay endpoint port is outside 1024...65535")
+        }
+        return "\(renderedHost):\(port)"
+    }
+
+    private static func ipv4(_ host: String) -> [UInt8]? {
+        let parts = host.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count == 4 else { return nil }
+        var octets: [UInt8] = []
+        for part in parts {
+            guard let value = UInt8(part), String(value) == part else { return nil }
+            octets.append(value)
+        }
+        return octets
+    }
+
     package static func decodeKey(_ value: String, role: String) throws -> Data {
         guard let data = Data(base64Encoded: value), data.count == 32,
               data.base64EncodedString() == value
@@ -292,9 +584,27 @@ package struct MeshSpecification: Sendable, Equatable {
                 }
             """
         }.joined(separator: ",\n")
+        guard let relay = intent.relay else {
+            return Data("""
+                {
+                  "version": \(MeshIntent.version),
+                  "generation": \(intent.generation),
+                  "privateKey": \(try jsonString(privateKey)),
+                  "publicKey": \(try jsonString(intent.publicKey)),
+                  "address": \(try jsonString(MeshIntent.address)),
+                  "port": \(MeshIntent.port),
+                  "mtu": \(MeshIntent.mtu),
+                  "peers": [
+                \(peersJSON)
+                  ]
+                }
+
+                """.utf8)
+        }
+        let routesJSON = try relay.routes.map(jsonString).joined(separator: ", ")
         return Data("""
             {
-              "version": \(MeshIntent.version),
+              "version": \(MeshIntent.relayVersion),
               "generation": \(intent.generation),
               "privateKey": \(try jsonString(privateKey)),
               "publicKey": \(try jsonString(intent.publicKey)),
@@ -303,7 +613,15 @@ package struct MeshSpecification: Sendable, Equatable {
               "mtu": \(MeshIntent.mtu),
               "peers": [
             \(peersJSON)
-              ]
+              ],
+              "relay": {
+                "network": \(try jsonString(relay.network)),
+                "address": \(try jsonString(relay.address)),
+                "hubPublicKey": \(try jsonString(relay.hubPublicKey)),
+                "endpoint": \(try jsonString(relay.endpoint)),
+                "keepalive": \(relay.keepalive),
+                "routes": [\(routesJSON)]
+              }
             }
 
             """.utf8)
@@ -315,6 +633,8 @@ package struct MeshSpecification: Sendable, Equatable {
 }
 
 package enum MeshIntentStore {
+    package static let lockFileName = "mesh-intent.lock"
+
     package static func intentURL(in stateDirectory: URL) -> URL {
         stateDirectory.appendingPathComponent(MeshIntent.fileName)
     }
@@ -359,6 +679,81 @@ package enum MeshIntentStore {
         // exactly 0700 for the root helper's handoff contract.
         try ensureUserDirectory(stateDirectory, mode: 0o700, exactMode: false)
         try writeUserFileAtomically(intent.encoded(), to: intentURL(in: stateDirectory), mode: 0o600)
+    }
+
+    package static func update(
+        in stateDirectory: URL,
+        _ mutation: (inout MeshIntent) throws -> Bool
+    ) throws -> (intent: MeshIntent, changed: Bool) {
+        try ensureUserDirectory(stateDirectory, mode: 0o700, exactMode: false)
+        let lockURL = stateDirectory.appendingPathComponent(lockFileName)
+        let fd = open(lockURL.path, O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0o600)
+        guard fd >= 0 else { throw MeshIntentError.refused("could not open the mesh intent lock") }
+        defer { close(fd) }
+        var status = stat()
+        guard fstat(fd, &status) == 0,
+              status.st_mode & S_IFMT == S_IFREG,
+              status.st_uid == getuid(), status.st_nlink == 1,
+              status.st_mode & 0o777 == 0o600,
+              flock(fd, LOCK_EX) == 0
+        else {
+            throw MeshIntentError.refused("mesh intent lock has unsafe ownership or mode")
+        }
+        defer { _ = flock(fd, LOCK_UN) }
+        var intent = try load(in: stateDirectory)
+        let changed = try mutation(&intent)
+        try intent.validate(allowEmpty: true)
+        if changed {
+            try save(intent, in: stateDirectory)
+        }
+        return (intent, changed)
+    }
+
+    package static func setRelay(
+        in stateDirectory: URL,
+        network: String,
+        hubPublicKey: String,
+        endpoint: String,
+        activeRoutes: [MeshIPv4Prefix]? = nil
+    ) throws -> (intent: MeshIntent, changed: Bool) {
+        let routes = try activeRoutes ?? MeshRelayRouteInventory.current()
+        return try update(in: stateDirectory) { intent in
+            guard !intent.peers.isEmpty else {
+                throw MeshIntentError.refused("relay intent requires at least one enrolled direct peer")
+            }
+            let candidate = try MeshIntent.Relay(
+                network: network,
+                hubPublicKey: hubPublicKey,
+                endpoint: endpoint,
+                directPeers: intent.peers
+            )
+            try MeshRelayRouteInventory.validate(
+                relayNetwork: candidate.network,
+                currentRelay: intent.relay,
+                routes: routes
+            )
+            guard intent.relay != candidate else { return false }
+            guard intent.generation < UInt64.max else {
+                throw MeshIntentError.refused("mesh intent generation is exhausted")
+            }
+            intent.relay = candidate
+            intent.generation += 1
+            return true
+        }
+    }
+
+    package static func removeRelay(
+        in stateDirectory: URL
+    ) throws -> (intent: MeshIntent, changed: Bool) {
+        try update(in: stateDirectory) { intent in
+            guard intent.relay != nil else { return false }
+            guard intent.generation < UInt64.max else {
+                throw MeshIntentError.refused("mesh intent generation is exhausted")
+            }
+            intent.relay = nil
+            intent.generation += 1
+            return true
+        }
     }
 
     package static func specification(
@@ -487,7 +882,13 @@ package enum MeshIntentStore {
             throw MeshIntentError.refused("could not replace mesh intent")
         }
         let directory = open(url.deletingLastPathComponent().path, O_RDONLY | O_CLOEXEC)
-        if directory >= 0 { _ = fsync(directory); close(directory) }
+        guard directory >= 0 else {
+            throw MeshIntentError.refused("could not open mesh state for durable intent replacement")
+        }
+        defer { close(directory) }
+        guard fsync(directory) == 0 else {
+            throw MeshIntentError.refused("could not make the mesh intent replacement durable")
+        }
     }
 
     private static func createExclusiveUserFile(_ data: Data, at url: URL, mode: mode_t) throws {
@@ -530,6 +931,13 @@ enum StrictJSONValue {
 }
 
 extension Dictionary where Key == String, Value == StrictJSONValue {
+    func value(_ key: String) throws -> StrictJSONValue {
+        guard let value = self[key] else {
+            throw MeshIntentError.refused("mesh JSON field \(key) is missing")
+        }
+        return value
+    }
+
     func string(_ key: String) throws -> String {
         guard case .string(let value) = self[key] else { throw MeshIntentError.refused("mesh JSON field \(key) must be a string") }
         return value

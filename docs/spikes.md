@@ -2626,3 +2626,264 @@ intent/helper integration, negotiated relay roads, Keeper-held device
 provisioning, endpoint refresh, public operations and physical multi-NAT
 acceptance all remain ahead. Lima and the exact pinned image cache remain only
 as declared developer tooling; the VM does not.
+
+## S31 — one Darwin WireGuard interface retained direct traffic while relay authority changed (14, 19, and 20 August 2026)
+
+S31 began from synchronized `a251da8`; the installed daemon and helper remained
+the accepted pre-pass bytes `da7f3cf9…3fd8` and `61d04eeb…4542`. Launchd
+reported one login daemon at PID 1033/run 1 and one root helper at PID 530/run
+1. Intent and helper status were direct-only generation 3 with one peer on
+`utun0`; the interface retained `10.86.0.1/24`, MTU 1280 and no relay block.
+The CA creation count remained zero. A real authenticated loopback session
+passed before tracked implementation.
+
+The disposable root harness used synthetic keys, unused ports and a scratch
+interface only. Two initial 3/3 attempts timed out because the harness first
+recreated its backend and then changed its relay route set without forcing the
+hub peer to re-handshake. Those were harness defects, not accepted product
+evidence. The corrected source hashes to `56b02410…239d`; its test binary hashes
+to `95144703…4bae`; and the authoritative transcript hashes to
+`426525fc…b05`.
+
+The final founder-run matrix passed **3/3** in 10.25, 10.52 and 10.48 seconds.
+Every trial proved, on the same `utun8` interface:
+
+| stage | measured result |
+|---|---|
+| direct baseline | encrypted direct traffic passed and the direct peer's runtime state was retained |
+| relay add | relay alias, exact route set, hub peer handshake and traffic passed |
+| endpoint-only update | hub endpoint changed in place; direct peer remained unchanged |
+| route-set update | hub peer was recreated, re-handshook and carried only the new `/32` ownership |
+| injected failure | prior full authority was restored; direct traffic remained available |
+| relay removal | alias, relay routes and hub peer were absent; direct state still passed |
+
+The implementation keeps intent/specification version 1 byte-compatible and
+adds strict optional relay version 2. Login-owned relay commands change intent
+only; the existing apply command remains the visible administrator boundary.
+The helper computes an exact peer diff, quiesces only relay paths, verifies
+complete peer/address/route state, durably promotes before ready, and reports
+separate direct/relay components. The daemon quarantines relay and other
+same-interface IPv4 addresses from every v0 calling card while continuing to
+use all local addresses for listener certificates and diagnostics.
+
+Focused Swift relay tests passed **23/23 in two suites, 3/3**. Fresh complete
+products then passed ReachKit **80/80** and reachd **249/249 in 36 suites**.
+The complete helper suite, race detector, `go vet`, and isolated offline module
+verification passed. Warnings-as-errors generic-Simulator Example and
+generic-iOS Keeper builds also passed after two semantics-preserving current-
+compiler capture spellings: `[weak self = self]` in Example and the vendored
+WireGuard adapter. These are linkage/compiler corrections, not Keeper behavior.
+
+The final warnings-as-errors daemon release is exactly eight adjacent items.
+Its executable hashes to `f948301a…ca10`, passes strict signature verification,
+and contains no LLVM profiling sections. The final scriptless helper package
+contains only the ad-hoc-signed helper and unchanged LaunchDaemon plist: helper
+`c494ad01…2de0`, plist `6a8ee418…61df`, package `1027ae12…b1`. The earlier
+pre-install daemon/package hashes were superseded by these fresh verified
+artifacts and were never the accepted installed authority.
+
+**Guarded installation and local acceptance.** The founder re-earned the exact
+real-backend transaction **3/3** on `utun7` in 10.45, 10.61, and 10.35 seconds;
+the retained transcript hashes to `961a9d9f…302`. One coherent backup captured
+the prior eight-item daemon layout, helper package/state, canonical intent,
+registry, host key, logs, and four identity hashes before mutation. The daemon
+was replaced first and the scriptless helper second. The installed acceptance
+then passed every stage without restarting reachd:
+
+| installed stage | result |
+|---|---|
+| direct authority baseline | same helper-owned interface, direct digest/count, address and route verified |
+| relay add and idempotent reapply | alias, exact routes and hub peer carried attributable synthetic traffic; repeated apply made no authority change |
+| endpoint-only update | hub endpoint changed in place while direct authority remained exact |
+| prefix / AllowedIPs update | relay path quiesced; hub peer was recreated, re-handshook and carried only the new ownership |
+| overlap refusal | unsafe candidate was refused and direct authority remained ready |
+| helper crash | launchd restarted only the helper and recovered the promoted authority |
+| complete removal | final generation 7 became canonical v1 direct-only; relay alias, route and hub peer were absent |
+
+The installed transcript hashes to `fe28e06f…94c9`. Scripted selftest passed;
+real MLX passed; unconstrained sampling passed **3/3**; guided schemas passed
+**15/15**. The required unsandboxed `doctor --dial` passed on its first attempt,
+opening an authenticated loopback session in 40 ms with **15 pass, 3 expected
+mapping warnings, 0 waiting and 0 fail**.
+
+Several bounded installer attempts remain attributed rather than rewritten as
+success: a pseudo-terminal did not inherit the sudo timestamp; compact v1 JSON
+defeated a whitespace-sensitive harness check; a scratch peer incorrectly
+cloned the live phone key and lost to WireGuard's newer timestamp authority;
+raw JSON key order defeated a final direct-authority comparison; and one final
+diagnostic wrapper called nonexistent `/bin/print`. Each mutated attempt restored
+the complete prior authority. The last two product matrices had already passed
+every relay stage; only their closeout harnesses failed. The final harness uses
+structural intent comparison and fixed-path `printf`, with direct unit coverage.
+
+Final installed reachd is `f948301a…ca10` at PID 44462/run 19. The helper began
+at PID 44498, was deliberately killed by acceptance, and launchd recovered it
+at PID 44630/run 3 on `utun0`. Helper status v2 reports generation 7, direct
+ready with one peer, and relay configured false/ready true (verified absent)
+with zero address, routes, or hub peers. Registry `75d9dbf9…0def`, host public key
+`99526d11…a1d`, CA `03a08c64…c737`, and server certificate
+`15302bb6…d5af` are unchanged; the post-backup daemon-log segment contains no
+CA-creation event. The accepted evidence and recoverable prior authority remain
+under `/private/tmp/reach-s31-authorized-install-20260819` and
+`/private/tmp/reach-s31-installed-backup-20260819`.
+
+**Post-review exact-byte repair, 20 August.** Review found three places where
+the accepted design was not yet the durable/fail-closed implementation. The
+Keeper compiler spelling lived only as dirty vendored bytes; exact helper-v2
+diagnosis discarded route-inspection failure; and Darwin relay removal named
+only a destination, so drift could let it delete another interface's route.
+The vendored capture correction is now commit `6dfd5389…f6797b` on the
+submodule's `origin/reach` branch and the parent gitlink names that commit. A
+fresh recursive candidate checkout built generic-iOS Keeper with warnings as
+errors. Exact v2 diagnosis now fails closed when path evidence is unavailable,
+while the old address-only fallback remains only for helper-status v1. Relay
+teardown takes one ownership snapshot, refuses a route that moved to another
+interface before mutation, deletes with the helper interface named explicitly,
+and verifies absence from a final snapshot.
+
+The apply acknowledgement received the adjacent bounded repair: the five-
+second budget now covers request delivery, not an arbitrarily large completed
+transaction. Once the helper accepts `apply`, the client waits for its
+authoritative terminal response; an explicit `error` is a refusal, whereas a
+lost transport reports unknown outcome and tells the operator to inspect
+status. Per-command Darwin subprocesses remain bounded. A synthetic maximum
+253-route update passed 3/3 in more than the former five-second budget with
+constant route-table inspections, and a moved-route regression proved zero
+mutation. The v2 fail-closed diagnostic regression also passed 3/3. Fresh
+complete products passed ReachKit **80/80** and reachd **249/249 in 36
+suites**; the complete helper suite, race detector, `go vet`, offline module
+verification, generic-Simulator Example WAE build, and the recursive-clean
+Keeper WAE build passed. The submodule working tree is clean.
+
+The first follow-up release is coverage-clean reachd `266e29ec…148e2`, still one
+executable plus seven adjacent bundles. The scriptless helper is
+`90032ba4…35fc7`; its unchanged plist is `6a8ee418…61df`, and package
+`e9c95d57…96206a` contains only those declared two payload files. Guarded
+installation reran the local add/update/refusal/crash/removal matrix on those
+exact bytes and passed every stage, ending at canonical v1 generation 11 with
+all direct fields and the one direct peer byte-for-byte equal to the generation
+7 baseline. One closeout guard initially compared unordered JSON dictionary
+bytes and stopped after that valid matrix. Field-by-field comparison proved
+generation was the sole change; the remaining nonprivileged gates then ran in
+the login context rather than treating key order as authority.
+
+Final installed reachd is `266e29ec…148e2` at PID 86352/run 21. The helper is
+`90032ba4…35fc7` at PID 86534/run 5 after its deliberate acceptance crash.
+Status v2 reports generation 11 on `utun0`, one direct peer, direct ready, and
+relay configured false/ready true with zero address, routes, or hub peers.
+Scripted selftest passed, real MLX passed, guided schemas passed **15/15**, and
+the authenticated dial passed on its first login-context attempt in 36 ms with
+**15 pass, 3 expected mapping warnings, 0 waiting and 0 fail**. Registry, host
+public key, CA and server certificate remain unchanged; the post-backup log
+segment contains zero CA-creation events. The 14-entry follow-up evidence
+manifest hashes to `5c650cf5…0fd8`; evidence and the complete prior authority
+remain under `/private/tmp/reach-s31-followup-installed-evidence-20260819` and
+`/private/tmp/reach-s31-followup-installed-backup-20260819`. A separate
+17-entry source-verification manifest hashes to `38e6db57…1503` and retains
+the fresh focused/full test transcripts, warnings-as-errors linkage builds,
+coverage-clean release receipt, and helper package receipt without caches or
+failed-attempt noise. The top-level manifest-of-manifests, including the
+attributed installer/resume transcripts, hashes to `dfc726d1…92d8`.
+
+**Final claimed-authority and route-owner correction, 20 August.** The last
+review found that the applying client—not the long-lived owner—held
+`apply.lock`. If that client disappeared while a backend transaction was
+blocked, a later client could replace `pending.json`; promotion or rollback
+could then operate on bytes other than the candidate already in memory. The
+owner now atomically renames pending authority to a distinct mode-0600
+`applying.json`, syncs the private directory, and performs every read,
+promotion, rollback and cleanup against only that claimed artifact. Startup
+resumes a claimed generation before considering a newer pending generation.
+The adjacent Darwin teardown correction now refuses any final route owner,
+including a foreign interface that appears after the interface-qualified
+delete; it neither reports absence nor drops its bookkeeping in that case.
+
+Four focused authority/route regressions passed **3/3**: a blocked generation
+with an interrupted client and newer pending generation, rollback isolation,
+claimed-before-pending startup order, and foreign ownership appearing after
+delete. The complete helper suite and race suite passed, as did `go vet` and
+offline module verification. The corrected ad-hoc-signed helper is
+`1963f1d3…233d`; its plist remains `6a8ee418…61df`; and scriptless two-payload
+package `eb6f0f8b…0a33` contains those exact bytes.
+
+The installed interruption test then proved the authority order directly.
+Generation 12 was claimed, its client was killed, generation 13 was staged as
+a separate pending artifact, and the root owner was killed. Launchd recovery
+promoted generation 12—not 13—while preserving 13 for the subsequent apply;
+cleanup returned to canonical v1 direct-only generation 14. The same exact
+helper bytes then repeated the complete add/idempotent/endpoint/route-set/
+refusal/crash/removal matrix and ended at canonical v1 generation 18. Both
+pending and claimed artifacts were proven absent before and after acceptance.
+
+At that review checkpoint, installed reachd remained `266e29ec…148e2` at
+unchanged PID 86352/run 21. The claimed-authority helper was
+`1963f1d3…233d` at PID 7746/run 8 after the two deliberate crash recoveries.
+Status v2 reported generation 18 on `utun0`, one
+direct peer, direct ready, relay configured false/ready true, and zero relay
+address, routes or hub peers. Registry, host public key, CA and server
+certificate remain byte-identical; CA creation remained zero. Authenticated
+`doctor --dial` passed on attempt 1 in 35 ms with **15 pass, 3 attributed
+mapping warnings, 0 waiting and 0 fail**.
+
+The 23-file private evidence pack is
+`/private/tmp/reach-s31-authority-fix-evidence-20260820`; its manifest hashes
+to `5848c851…150f`. It includes exact private harness sources, immutable
+installed transcripts, pre/final runtime evidence and hashes, but no keys,
+identities, prompts or output. The complete prior accepted authority is
+recoverable at `/private/tmp/reach-s31-authority-fix-backup-20260820` and is
+deliberately excluded from the evidence manifest because it contains secrets.
+
+**Final request-bound acknowledgement correction, 20 August.** The last review
+found that the local control request said only `apply`, while startup correctly
+processed a surviving older claim before a newer pending specification. A
+newer invocation could therefore receive `ok` for the older transaction and
+print that its own generation was accepted while its bytes remained pending.
+The request now carries the exact expected generation and public digest. The
+owner may finish one older surviving claim, but returns success only after the
+requested authority itself is active; otherwise that generation remains staged
+and the client reports a bounded non-success. The operator executable exposes
+only that closed set of privacy-safe apply outcomes. Backend, filesystem, key,
+address, endpoint and raw internal errors remain opaque.
+
+Focused protocol/authority tests passed **3/3**, followed by the complete
+helper and race suites, `go vet`, and offline module verification. Three fresh,
+coverage-clean builds reproduced ad-hoc-signed helper
+`a784f257…b28ca8`; CDHash `45797020…529e`. The clean scriptless package
+`b206d993…60d2a` reproduced twice and contains only that helper plus unchanged
+plist `6a8ee418…61df`, with no LLVM profiling sections or installer scripts.
+One first exact-byte installed attempt correctly withheld success for the
+newer generation but revealed that the executable still collapsed the safe
+staged outcome to generic `operation failed`; it rolled the complete authority
+back to generation 18. A later nonprivileged preflight stopped before password
+entry or mutation because `pkgutil` listed the two valid payload directories in
+the opposite literal order. Both are retained as attributed harness/copy-
+boundary evidence rather than product acceptance.
+
+The final installed acknowledgement regression forced generation 19 to remain
+claimed after a pre-backend status-publication failure, staged generation 20,
+and proved the second invocation acknowledged generation 20 only after 20 was
+active; cleanup returned to canonical direct-only generation 21. The same
+exact helper then repeated the full add/idempotent/endpoint/route-set/refusal/
+crash/removal matrix and ended at canonical v1 direct-only generation 25.
+Reachd remained `266e29ec…148e2` at PID 86352/run 21 throughout. Launchd
+recovered the deliberately killed helper as PID 26821/run 3. Status v2 is ready
+on `utun0` with direct digest `10187412…4fa5`, one direct peer, relay configured
+false/ready true, and zero relay address, routes, hub peers, pending or claimed
+artifacts. Registry, host public key, CA and server certificate remain exact;
+CA creation remained zero. Authenticated `doctor --dial` passed on attempt 1
+in 35 ms with **15 pass, 3 attributed mapping warnings, 0 waiting and 0 fail**.
+
+The final private 22-entry top-level evidence manifest hashes to
+`ab7e4f08…ce0f1` under
+`/private/tmp/reach-s31-ack-fix-v3-evidence-20260820`; its `install.log` entry
+was resealed after the script appended its final four success lines, and every
+entry verifies. The complete accepted generation-18 authority remains
+recoverable at `/private/tmp/reach-s31-ack-fix-v3-backup-20260820`; it is
+excluded from the evidence manifest because it contains secrets.
+
+**Verdict: PASS FOR HOST RELAY OWNERSHIP.** Login intent and the root helper can
+now own optional host relay state on the existing interface without turning it
+into a v0 road or disturbing direct ownership. No client can yet learn or dial
+that relay; negotiated relay vocabulary, persistence and hedging remain the
+next bounded pass. Keeper, a public hub, external service, router and phone
+remain outside S31.

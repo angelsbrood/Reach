@@ -277,7 +277,7 @@ final class ExampleModel {
                 session = offersTool
                     ? LanguageModelSession(
                         model: model,
-                        tools: [ClockTool(ran: { [weak self] zone in
+                        tools: [ClockTool(ran: { [weak self = self] zone in
                             Task { @MainActor in self?.toolRan = zone }
                         })],
                         instructions: "Use the tools you are given."

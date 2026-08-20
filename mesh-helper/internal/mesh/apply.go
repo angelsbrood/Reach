@@ -9,10 +9,32 @@ import (
 	"net"
 	"os"
 	"strconv"
-	"strings"
 
 	"golang.org/x/sys/unix"
 )
+
+type publicApplyOutcomeError struct {
+	message string
+}
+
+func (outcome publicApplyOutcomeError) Error() string {
+	return outcome.message
+}
+
+// PublicApplyOutcome returns only the bounded, privacy-safe apply outcome that
+// the privileged helper may show to its invoking operator. Validation,
+// filesystem, backend, and other internal errors remain deliberately opaque.
+func PublicApplyOutcome(err error) (string, bool) {
+	var outcome publicApplyOutcomeError
+	if !errors.As(err, &outcome) {
+		return "", false
+	}
+	return outcome.message, true
+}
+
+func publicApplyOutcome(format string, arguments ...any) error {
+	return publicApplyOutcomeError{message: fmt.Sprintf(format, arguments...)}
+}
 
 func ApplyFromSudo(paths Paths, input string) error {
 	if os.Geteuid() != 0 {
@@ -67,13 +89,41 @@ func ApplyFromSudo(paths Paths, input string) error {
 		return errors.New("mesh owner is not accepting updates; the validated pending generation remains staged")
 	}
 	defer connection.Close()
-	_ = connection.SetDeadline(nowPlusControlBudget())
-	if _, err := connection.Write([]byte("apply\n")); err != nil {
+	_ = connection.SetWriteDeadline(nowPlusControlBudget())
+	expected := authorityIdentity{generation: spec.Generation, digest: spec.PublicDigest()}
+	if _, err := connection.Write([]byte(renderApplyRequest(expected))); err != nil {
 		return err
 	}
-	response, err := bufio.NewReaderSize(connection, 32).ReadString('\n')
-	if err != nil || strings.TrimSpace(response) != "ok" {
-		return fmt.Errorf("mesh owner refused generation %d", spec.Generation)
+	response, err := bufio.NewReaderSize(connection, 128).ReadString('\n')
+	return applyResponse(expected, response, err)
+}
+
+func applyResponse(expected authorityIdentity, response string, readErr error) error {
+	if readErr != nil {
+		return publicApplyOutcome(
+			"mesh owner accepted generation %d but did not report its final outcome; inspect `reachd service status` before retrying",
+			expected.generation,
+		)
+	}
+	if response == "error\n" {
+		return publicApplyOutcome("mesh owner refused generation %d", expected.generation)
+	}
+	outcome, applied, err := parseApplyResponseLine(response)
+	if err != nil {
+		return publicApplyOutcome("mesh owner returned an invalid outcome for generation %d", expected.generation)
+	}
+	if applied != expected {
+		return publicApplyOutcome(
+			"mesh owner reported a different authority at generation %d than requested generation %d; inspect `reachd service status` before retrying",
+			applied.generation,
+			expected.generation,
+		)
+	}
+	if outcome == "staged" {
+		return publicApplyOutcome(
+			"mesh generation %d remains staged because an earlier authority could not finish; inspect `reachd service status` before retrying",
+			expected.generation,
+		)
 	}
 	return nil
 }

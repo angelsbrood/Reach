@@ -5,8 +5,11 @@ package mesh
 import (
 	"bufio"
 	"errors"
+	"fmt"
+	"io"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -77,16 +80,76 @@ func (server *ControlServer) handle(connection *net.UnixConn) {
 		return
 	}
 	_ = connection.SetReadDeadline(nowPlusControlBudget())
-	line, err := bufio.NewReaderSize(connection, 64).ReadString('\n')
-	if err != nil || strings.TrimSpace(line) != "apply" {
+	line, err := bufio.NewReaderSize(io.LimitReader(connection, 129), 128).ReadString('\n')
+	request, parseErr := parseApplyRequest(line)
+	if err != nil || len(line) > 128 || parseErr != nil {
 		_, _ = connection.Write([]byte("error\n"))
 		return
 	}
-	if err := server.manager.ApplyPending(); err != nil {
+	applied, err := server.manager.ApplyExpected(request.generation, request.digest)
+	if err != nil {
+		if errors.Is(err, errRequestedAuthorityStillStaged) {
+			_, _ = connection.Write([]byte(renderApplyResponse("staged", request)))
+			return
+		}
 		_, _ = connection.Write([]byte("error\n"))
 		return
 	}
-	_, _ = connection.Write([]byte("ok\n"))
+	if applied != request {
+		_, _ = connection.Write([]byte("error\n"))
+		return
+	}
+	_, _ = connection.Write([]byte(renderApplyResponse("ok", applied)))
+}
+
+func renderApplyRequest(authority authorityIdentity) string {
+	return fmt.Sprintf("apply %d %s\n", authority.generation, authority.digest)
+}
+
+func parseApplyRequest(line string) (authorityIdentity, error) {
+	if !strings.HasSuffix(line, "\n") {
+		return authorityIdentity{}, errors.New("incomplete control request")
+	}
+	parts := strings.Split(strings.TrimSuffix(line, "\n"), " ")
+	if len(parts) != 3 || parts[0] != "apply" || !validPublicDigest(parts[2]) {
+		return authorityIdentity{}, errors.New("invalid control request")
+	}
+	generation, err := strconv.ParseUint(parts[1], 10, 64)
+	if err != nil || generation == 0 {
+		return authorityIdentity{}, errors.New("invalid control generation")
+	}
+	return authorityIdentity{generation: generation, digest: parts[2]}, nil
+}
+
+func renderApplyResponse(outcome string, authority authorityIdentity) string {
+	return fmt.Sprintf("%s %d %s\n", outcome, authority.generation, authority.digest)
+}
+
+func parseApplyResponseLine(line string) (string, authorityIdentity, error) {
+	if !strings.HasSuffix(line, "\n") {
+		return "", authorityIdentity{}, errors.New("incomplete control response")
+	}
+	parts := strings.Split(strings.TrimSuffix(line, "\n"), " ")
+	if len(parts) != 3 || (parts[0] != "ok" && parts[0] != "staged") || !validPublicDigest(parts[2]) {
+		return "", authorityIdentity{}, errors.New("invalid control response")
+	}
+	generation, err := strconv.ParseUint(parts[1], 10, 64)
+	if err != nil || generation == 0 {
+		return "", authorityIdentity{}, errors.New("invalid control generation")
+	}
+	return parts[0], authorityIdentity{generation: generation, digest: parts[2]}, nil
+}
+
+func validPublicDigest(digest string) bool {
+	if len(digest) != 64 {
+		return false
+	}
+	for _, character := range []byte(digest) {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func (server *ControlServer) Close() error {
