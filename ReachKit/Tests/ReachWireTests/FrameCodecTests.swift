@@ -136,6 +136,78 @@ private func roundTrip<F: WireFrame>(_ frame: F) throws -> F {
         #expect(decoded.addrs == nil)
         #expect(decoded.port == nil)
         #expect(decoded.roads == nil)
+        #expect(decoded.relayRoads == nil)
+    }
+
+    @Test func helloAckV0BytesStayCompatible() throws {
+        let frame = HelloAck(
+            version: 0,
+            cluster: "studio",
+            models: [],
+            addrs: ["192.168.8.104"],
+            port: 47_337,
+            roads: [RoadEndpoint(host: "192.168.8.104", port: 47_337)],
+            // A selected-v0 encoder has no relay vocabulary, even when a new
+            // caller accidentally supplies the additive property.
+            relayRoads: [RoadEndpoint(host: "10.87.0.1", port: 47_337)]
+        )
+        let encoded = try FrameCodec.encode(frame, for: 0)
+        let body = try #require(String(data: encoded.dropFirst(5), encoding: .utf8))
+        #expect(body == #"{"addrs":["192.168.8.104"],"cluster":"studio","models":[],"port":47337,"roads":[{"host":"192.168.8.104","port":47337}],"version":0}"#)
+
+        // Likewise, a newly built v0 decoder treats the key as unknown rather
+        // than letting its spelling alter or invalidate a v0 session.
+        let ignored = try RawFrame(
+            type: .helloAck,
+            body: Data(#"{"cluster":"studio","models":[],"relayRoads":null,"version":0}"#.utf8)
+        ).decode(HelloAck.self)
+        #expect(ignored.relayRoads == nil)
+    }
+
+    @Test func helloAckRelayRoadsHaveThreeAuthorityStates() throws {
+        let omitted = try RawFrame(
+            type: .helloAck,
+            body: Data(#"{"cluster":"studio","models":[],"version":1}"#.utf8)
+        ).decode(HelloAck.self)
+        #expect(omitted.relayRoads == nil)
+
+        let cleared = try RawFrame(
+            type: .helloAck,
+            body: Data(#"{"cluster":"studio","models":[],"relayRoads":[],"version":1}"#.utf8)
+        ).decode(HelloAck.self)
+        #expect(cleared.relayRoads == [])
+
+        let replaced = HelloAck(
+            version: 1,
+            cluster: "studio",
+            models: [],
+            relayRoads: [RoadEndpoint(host: "10.87.0.1", port: 47_337)]
+        )
+        #expect(try roundTrip(replaced) == replaced)
+    }
+
+    @Test func helloAckRelayRoadsRejectNullDuplicatesAndUnsafeEndpoints() throws {
+        let invalidBodies = [
+            #"{"cluster":"studio","models":[],"relayRoads":null,"version":1}"#,
+            #"{"cluster":"studio","models":[],"relayRoads":[{"host":"10.87.0.1","port":47337},{"host":"10.87.0.1","port":47337}],"version":1}"#,
+            #"{"cluster":"studio","models":[],"relayRoads":[{"host":"203.0.113.1","port":47337}],"version":1}"#,
+            #"{"cluster":"studio","models":[],"relayRoads":[{"host":"010.87.0.1","port":47337}],"version":1}"#,
+            #"{"cluster":"studio","models":[],"relayRoads":[{"host":"10.87.0.0","port":47337}],"version":1}"#,
+            #"{"cluster":"studio","models":[],"relayRoads":[{"host":"10.87.0.255","port":47337}],"version":1}"#,
+            #"{"cluster":"studio","models":[],"relayRoads":[{"host":"10.87.0.1","port":0}],"version":1}"#,
+        ]
+        for body in invalidBodies {
+            #expect(throws: WireError.self) {
+                _ = try RawFrame(type: .helloAck, body: Data(body.utf8)).decode(HelloAck.self)
+            }
+        }
+
+        let future = try RawFrame(
+            type: .helloAck,
+            body: Data(#"{"cluster":"studio","futureRelayPolicy":"hedged","models":[],"version":1}"#.utf8)
+        ).decode(HelloAck.self)
+        #expect(future.cluster == "studio")
+        #expect(future.relayRoads == nil)
     }
 
     /// `SessionResume`/`SessionResumed` were round-tripped here and nowhere

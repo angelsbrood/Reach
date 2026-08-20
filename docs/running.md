@@ -108,8 +108,10 @@ The QUIC listener requires a cluster-issued client certificate at TLS even
 when mapped onto a public interface. WireGuard accepts only enrolled peer keys.
 Neither fact makes a private double-NAT address public: single-NAT edges are
 the direct-mapping case, while CGNAT, building routers, and VPN layers may
-still require a manually reachable endpoint or the future relay described in
-[relay.md](relay.md). A client already away when an endpoint moves keeps its
+still require a manually reachable endpoint or a configured and provisioned
+relay as described in [relay.md](relay.md). Negotiated calling-card support is
+installed, but no public endpoint or Keeper-provisioned device exists. A client
+already away when an endpoint moves keeps its
 stale road until it can authenticate on another one and receive a fresh hello.
 
 ## When the model slot is busy
@@ -505,11 +507,12 @@ or verified relay absence. A relay-only change does not restart `reachd` and
 does not restart the WireGuard interface; unchanged direct peers retain their
 runtime state. A removed/recreated hub peer may not.
 
-This host-side state is not a v0 road. Pairing and authenticated v0 hellos
-exclude every relay alias and every non-direct IPv4 on the interface owning
-`10.86.0.1`. Do not interpret a relay alias in `ifconfig` as a client-visible
-road. Relay advertisement, persistence and direct-first hedging require the
-separate negotiated-wire pass.
+This host-side state is never an ordinary direct road. Pairing, legacy
+`addrs`, and authenticated `HelloAck.roads` exclude every relay alias and every
+non-direct IPv4 on the interface owning `10.86.0.1`. Do not interpret a relay
+alias in `ifconfig` as a direct candidate. Selected-v1 sessions may advertise
+it only through the separate authenticated `relayRoads` field; selected-v0
+sessions omit and ignore that vocabulary.
 
 The installed S31 acceptance deliberately added, updated, refused, crash-
 recovered, and removed a local synthetic relay while the daemon PID and direct
@@ -529,6 +532,47 @@ longer make a newer invocation report success. Its installed regression proved
 that ordering directly, then repeated the full matrix and restored canonical
 direct-only generation 25 with helper `a784f257…b28ca8`. Reachd remained PID
 86352 throughout, and the final authenticated dial passed on attempt 1.
+
+### Negotiated relay calling cards
+
+Reachd and ReachKit now support dialect v1 over the unchanged `reach/0`
+envelope. Direct calling cards and relay calling cards remain separate:
+
+- `relayRoads` omitted preserves the authenticated relay store;
+- `relayRoads: []` clears it; and
+- a nonempty list replaces it atomically.
+
+Relay candidates are held in Keychain service
+`systems.reach.cluster-relay-roads`, not the direct-road service. A selected-v0
+session neither reads the field nor mutates that record. Deleting a cluster
+identity deletes both records. Only the current authenticated road epoch may
+commit a declaration, so a delayed probe cannot restore stale relay authority.
+
+The measured hedge is **100 ms**. Direct candidates start immediately; relay
+candidates start 100 ms later unless direct has already won. The positive grace
+is deliberate: a 0 ms race is fastest-authenticated-road behavior and cannot
+promise direct preference. All attempts share the same ten-second deadline and
+all losers are cancelled. A healthy relay session or reattached generation
+stays where it is. Once a session is invalidated, however, its previously
+proven direct road is no longer a direct-only fast path; the next independent
+open returns to the tiered race under that original deadline.
+
+Privacy-safe logs and generation receipts use `relay-overlay` only when the
+raw source falls within the operator-configured relay prefix. Use the private
+transport log, helper routes, and WireGuard counters for exact acceptance
+joins; the privacy-safe category deliberately contains no address or port.
+`service status` and `doctor` diagnose host ownership, not whether a live
+client currently has a relay store.
+
+S32's corrected exact bytes installed reachd `a9660a83…6b790` and left helper
+`a784f257…b28ca8` unchanged. The local matrix authenticated an exact backed-up
+v0 client, exercised v1 replace/preserve/clear, the measured 100 ms direct-first
+and relay-only cold dials, and completed one same-generation transition in each
+direction. Final helper generation 37 is canonical direct-only with relay
+configured false and verified absent; all identities, direct-road stores,
+Keeper, and CA-creation count were unchanged. Installed scripted/MLX selftests
+and an authenticated 36 ms dial passed. This is not a public relay deployment
+and does not provision Keeper.
 
 `reachd service status` and `reachd doctor` report the login daemon and mesh
 owner separately, using the same mesh-owner verdict. An absent or

@@ -137,6 +137,8 @@ public final class Daemon: Sendable {
     private let grants: GrantWiring?
     private let reachability: ReachabilityCoordinator?
     private let currentAddresses: @Sendable () -> [[UInt8]]
+    private let relayRoadDeclaration: @Sendable (UInt8, UInt16) -> RelayRoadDeclaration
+    private let currentRelayNetwork: @Sendable () -> String?
     private let state = StateBox()
 
     public init(
@@ -157,6 +159,12 @@ public final class Daemon: Sendable {
         self.grants = grants
         self.reachability = reachability
         self.currentAddresses = { DirectAddressSelector.current() }
+        self.relayRoadDeclaration = { version, port in
+            RelayRoadDeclarationProvider.current(version: version, port: port)
+        }
+        self.currentRelayNetwork = {
+            try? MeshIntentStore.load(in: DaemonInfo.stateDirectory).relay?.network
+        }
     }
 
     /// Test-only/package seam for the fact authenticated hellos read the
@@ -170,7 +178,13 @@ public final class Daemon: Sendable {
         grants: GrantWiring? = nil,
         reachability: ReachabilityCoordinator? = nil,
         admission: SlotAdmission? = nil,
-        currentAddresses: @escaping @Sendable () -> [[UInt8]]
+        currentAddresses: @escaping @Sendable () -> [[UInt8]],
+        relayRoadDeclaration: @escaping @Sendable (UInt8, UInt16) -> RelayRoadDeclaration = { version, port in
+            RelayRoadDeclarationProvider.current(version: version, port: port)
+        },
+        currentRelayNetwork: @escaping @Sendable () -> String? = {
+            try? MeshIntentStore.load(in: DaemonInfo.stateDirectory).relay?.network
+        }
     ) {
         self.config = config
         self.filling = filling
@@ -182,6 +196,8 @@ public final class Daemon: Sendable {
         self.grants = grants
         self.reachability = reachability
         self.currentAddresses = currentAddresses
+        self.relayRoadDeclaration = relayRoadDeclaration
+        self.currentRelayNetwork = currentRelayNetwork
     }
 
     /// Starts listening (and advertising, unless disabled for tests).
@@ -357,7 +373,8 @@ public final class Daemon: Sendable {
             models: [ModelDescriptor(id: filling.modelID, displayName: filling.displayName, capabilities: filling.capabilities)],
             addrs: advertisement.legacyAddresses,
             port: config.port,
-            roads: advertisement.roads
+            roads: advertisement.roads,
+            relayRoads: relayRoadDeclaration(version, config.port).wireValue
         ), for: version)
         // The admin device, once this stream proves it is one; grant events
         // ride back on this same stream while the loop keeps consuming.
@@ -394,6 +411,11 @@ public final class Daemon: Sendable {
                 // from every other line in this log, and only one of them is
                 // the claim.
                 Log.info(Log.sessionOpened(sessionID, from: stream.remoteEndpointDescription() ?? "an unnamed path"))
+                let source = GenerationReceipt.Source(
+                    remoteEndpointDescription: stream.remoteEndpointDescription(),
+                    relayNetwork: currentRelayNetwork()
+                )
+                Log.info("session \(sessionID) source category \(source.rawValue)")
             case .grantSubscribe:
                 _ = try raw.decode(GrantSubscribe.self)
                 guard let grants, let device = await adminDevice(on: stream, grants: grants) else {
@@ -455,7 +477,8 @@ public final class Daemon: Sendable {
                 sessionID: begin.sessionID,
                 genID: begin.genID,
                 receiptSource: GenerationReceipt.Source(
-                    remoteEndpointDescription: stream.remoteEndpointDescription()
+                    remoteEndpointDescription: stream.remoteEndpointDescription(),
+                    relayNetwork: currentRelayNetwork()
                 ),
                 admission: admission,
                 events: { filling.generate(begin.request) }
@@ -510,7 +533,12 @@ public final class Daemon: Sendable {
         // ever being used — a take that looks perfect while demonstrating
         // nothing. A 10.86.0.x here, on the Mac's terminal and in shot, is
         // the difference between the claim and the evidence for it.
+        let source = GenerationReceipt.Source(
+            remoteEndpointDescription: stream.remoteEndpointDescription(),
+            relayNetwork: currentRelayNetwork()
+        )
         Log.info("generation \(frame.genID) re-attached from \(stream.remoteEndpointDescription() ?? "an unnamed path") at seq \(frame.fromSeq)")
+        Log.info("generation \(frame.genID) re-attachment source category \(source.rawValue) at seq \(frame.fromSeq)")
         try await pump(
             events: events,
             stream: stream,

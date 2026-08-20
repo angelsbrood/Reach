@@ -409,7 +409,13 @@ final class IdentityBin: @unchecked Sendable {
                 identity: fixture.serverIdentity,
                 caCertificate: fixture.caCert
             ),
-            registry: registry
+            registry: registry,
+            currentAddresses: { [[127, 0, 0, 1]] },
+            relayRoadDeclaration: { version, port in
+                version == 1
+                    ? .replace([RoadEndpoint(host: "10.87.0.1", port: port)])
+                    : .preserve
+            }
         )
         try await daemon.start(advertise: false)
         defer { Task { await daemon.stop() } }
@@ -429,7 +435,7 @@ final class IdentityBin: @unchecked Sendable {
         let incompatible = try await dialer.openStream(timeout: 45)
         defer { incompatible.cancel() }
         var refusedFrames = incompatible.frames.makeAsyncIterator()
-        try await incompatible.send(Hello(versions: [1], client: "future-only"))
+        try await incompatible.send(Hello(versions: [2], client: "future-only"))
         let refused = try #require(try await refusedFrames.next())
         let error = try refused.decode(ErrorFrame.self)
         #expect(error.code == "wire-version")
@@ -439,12 +445,21 @@ final class IdentityBin: @unchecked Sendable {
         let compatible = try await dialer.openStream(timeout: 45)
         defer { compatible.cancel() }
         var frames = compatible.frames.makeAsyncIterator()
-        try await compatible.send(Hello(versions: [1, 0], client: "future-compatible"))
+        try await compatible.send(Hello(versions: [2, 0], client: "future-compatible"))
         let ack = try (try #require(try await frames.next())).decode(HelloAck.self)
         #expect(ack.version == 0)
+        #expect(ack.relayRoads == nil)
         try await compatible.send(SessionOpen(modelID: "scripted"), for: ack.version)
         _ = try (try #require(try await frames.next())).decode(SessionOpened.self)
         #expect(await registry.residentSessions == 1)
+
+        let current = try await dialer.openStream(timeout: 45)
+        defer { current.cancel() }
+        var currentFrames = current.frames.makeAsyncIterator()
+        try await current.send(Hello(versions: [1, 0], client: "relay-capable"))
+        let currentAck = try (try #require(try await currentFrames.next())).decode(HelloAck.self)
+        #expect(currentAck.version == 1)
+        #expect(currentAck.relayRoads == [RoadEndpoint(host: "10.87.0.1", port: config.port)])
     }
 
     @Test func aLaterAuthenticatedHelloLearnsAnAddressThatAppearedAfterStartup() async throws {

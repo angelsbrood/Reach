@@ -96,6 +96,11 @@ public enum StoredRoads: Sendable, Equatable {
 public actor ReachConnectionHub {
     public static let shared = ReachConnectionHub()
 
+    /// The first S32 candidate that preserved a healthy direct road against
+    /// an immediately completing relay while still launching relay well
+    /// inside the cold-open budget when direct stalled.
+    package static let relayHedge: Duration = .milliseconds(100)
+
     public struct SessionHandle: Sendable {
         public let sessionID: UUID
         public let token: String
@@ -115,14 +120,25 @@ public actor ReachConnectionHub {
         let probe: ActiveRoadProbe
     }
 
+    private struct RoadDialer: Sendable {
+        let endpoint: NWEndpoint
+        let dialer: QUICDialer
+    }
+
     private struct Entry {
         var dialer: QUICDialer
         var roadEpoch: UInt64 = 0
+        /// Orders authenticated Hello attempts even when actor reentrancy lets
+        /// two control streams overlap on the same winning road.
+        var declarationEpoch: UInt64 = 0
         var probe: ActiveRoadProbe?
         var reservedGenerationLeases = 0
         var session: SessionHandle?
-        /// Redial candidates the daemon declared in its HelloAck.
-        var candidates: [NWEndpoint] = []
+        /// Authenticated direct roads and lower-tier relay calling cards stay
+        /// separate all the way to the scheduler.
+        var directCandidates: [NWEndpoint] = []
+        var relayCandidates: [NWEndpoint] = []
+        var winningTier: RoadTier = .direct
         /// Set when the path changed or an open failed — the next open
         /// races candidates instead of trusting the cached dialer.
         var dirty = false
@@ -179,6 +195,12 @@ public actor ReachConnectionHub {
     public func notePathPossiblyChanged() {
         pathEpoch += 1
         for key in entries.keys {
+            // A relay road already survived direct-road absence. Merely
+            // learning that another interface appeared is not evidence that
+            // the live relay stopped carrying its authenticated session or
+            // generation. Its normal liveness probe remains authoritative;
+            // once the session is gone, `openRoadStream` races direct first.
+            if entries[key]?.winningTier == .relay { continue }
             entries[key]?.dirty = true
             entries[key]?.reservedGenerationLeases = 0
             if let probe = entries[key]?.probe {
@@ -239,6 +261,12 @@ public actor ReachConnectionHub {
         var retainedControl = false
         defer { if !retainedControl { control.cancel() } }
         var frames = control.frames.makeAsyncIterator()
+        guard let declarationEpoch = beginDeclarationAttempt(
+            for: configuration,
+            roadEpoch: road.roadEpoch
+        ) else {
+            throw ReachError.transport("the road changed before the cluster hello began")
+        }
         let offeredVersions = Wire.supportedVersions
         try await control.send(Hello(versions: offeredVersions, client: "ReachKit/\(Wire.version)"))
         // `.closed` reached the old `else`; `.broke` did not, and left as
@@ -259,7 +287,12 @@ public actor ReachConnectionHub {
                 "wire-version: \(Wire.mismatchMessage(app: offeredVersions, cluster: [ack.version]))"
             )
         }
-        noteCandidates(from: ack, for: configuration)
+        noteCandidates(
+            from: ack,
+            for: configuration,
+            roadEpoch: road.roadEpoch,
+            declarationEpoch: declarationEpoch
+        )
         try await control.send(SessionOpen(modelID: configuration.modelID), for: ack.version)
         let answered = await FrameEnding.next(from: &frames)
         guard case .frame(let openedRaw) = answered else {
@@ -319,6 +352,10 @@ public actor ReachConnectionHub {
         for configuration: ReachExecutor.Configuration,
         timeout: Duration
     ) async -> Bool {
+        guard let declarationEpoch = beginDeclarationAttempt(
+            for: configuration,
+            roadEpoch: lease.roadEpoch
+        ) else { return false }
         let result = await lease.probe.check(timeout: timeout)
         if result.alive,
            let ack = result.refreshedHello,
@@ -327,7 +364,12 @@ public actor ReachConnectionHub {
                activeEpoch: entries[configuration]?.roadEpoch,
                sameProbe: entries[configuration]?.probe === lease.probe
            ) {
-            noteCandidates(from: ack, for: configuration)
+            noteCandidates(
+                from: ack,
+                for: configuration,
+                roadEpoch: lease.roadEpoch,
+                declarationEpoch: declarationEpoch
+            )
         }
         return result.alive
     }
@@ -357,41 +399,146 @@ public actor ReachConnectionHub {
         activeEpoch == leaseEpoch && sameProbe
     }
 
+    /// Waits for the path signal, then decides whether that signal alone may
+    /// interrupt this exact generation road. A current relay stays live; a
+    /// stale lease or direct winner re-dials immediately. Dead relay roads are
+    /// still detected by the existing nonce liveness race.
+    func pathChangeRequiresRedial(
+        after epoch: UInt64,
+        lease: GenerationStreamLease,
+        for configuration: ReachExecutor.Configuration
+    ) async -> Bool {
+        await pathChanged(after: epoch)
+        return Self.pathChangeRequiresRedial(
+            leaseEpoch: lease.roadEpoch,
+            activeEpoch: entries[configuration]?.roadEpoch,
+            sameProbe: entries[configuration]?.probe === lease.probe,
+            winningTier: entries[configuration]?.winningTier
+        )
+    }
+
+    nonisolated static func pathChangeRequiresRedial(
+        leaseEpoch: UInt64,
+        activeEpoch: UInt64?,
+        sameProbe: Bool,
+        winningTier: RoadTier?
+    ) -> Bool {
+        guard isCurrentRoad(
+            leaseEpoch: leaseEpoch,
+            activeEpoch: activeEpoch,
+            sameProbe: sameProbe
+        ) else { return true }
+        return winningTier != .relay
+    }
+
     /// Drops the session (not the material) — the next use opens fresh.
     public func invalidateSession(for configuration: ReachExecutor.Configuration) {
         entries[configuration]?.session = nil
     }
 
-    private func noteCandidates(from ack: HelloAck, for configuration: ReachExecutor.Configuration) {
-        let roads: [RoadEndpoint]
+    /// A cached dialer is a fast path only for another stream on the session
+    /// that proved it. Once that session is invalidated, the next independent
+    /// open must return to the direct/relay race under one absolute deadline;
+    /// otherwise a blackholed former winner can consume the entire budget
+    /// before relay is even attempted.
+    nonisolated package static func cachedRoadIsReusable(
+        proven: Bool,
+        dirty: Bool,
+        hasSession: Bool
+    ) -> Bool {
+        proven && !dirty && hasSession
+    }
+
+    private func noteCandidates(
+        from ack: HelloAck,
+        for configuration: ReachExecutor.Configuration,
+        roadEpoch: UInt64,
+        declarationEpoch: UInt64
+    ) {
+        // A delayed Hello from a road that already lost must not rewrite the
+        // calling cards learned by its replacement.
+        guard let entry = entries[configuration],
+              Self.isCurrentDeclaration(
+                  roadEpoch: roadEpoch,
+                  activeRoadEpoch: entry.roadEpoch,
+                  replyDeclarationEpoch: declarationEpoch,
+                  activeDeclarationEpoch: entry.declarationEpoch
+              )
+        else { return }
+
+        let directRoads: [RoadEndpoint]?
         if let declared = ack.roads {
-            roads = declared
+            directRoads = declared
         } else if let addrs = ack.addrs, let port = ack.port {
-            roads = addrs.map { RoadEndpoint(host: $0, port: port) }
+            directRoads = addrs.map { RoadEndpoint(host: $0, port: port) }
         } else {
-            return
+            directRoads = nil
         }
-        entries[configuration]?.candidates = endpoints(from: roads, for: configuration)
-        // Being answered is exactly what `storedRoads` is asking about, and it
-        // was only ever set when an entry was seeded from disk. So an app that
-        // had just been answered — that had streamed tokens — was still told,
-        // when its cluster later went away, that it "has not been answered
-        // before" and should go and open it once on the cluster's own network.
-        // False, and it points at the wrong next action. A restart mid-answer
-        // is how that sentence gets read most. This also correctly overrides
-        // `.unreadable`: whatever the store can or cannot do, being answered
-        // is the stronger fact about the roads now in hand.
-        entries[configuration]?.storedRoads = .known
-        // Writing them down is what lets the next cold launch dial at all —
-        // this is the one moment the app is certainly being answered, so it is
-        // the only moment the roads are certainly true. Failing to write them
-        // is not a reason to fail a session that is working, and ReachKit has
-        // no channel to say so on; a store that will not write surfaces later
-        // as an app that cannot start away.
-        try? ClusterRoads.save(
-            endpoints: roads.map { .init(host: $0.host, port: $0.port) },
-            for: configuration.identityLabel
+        if let directRoads {
+            entries[configuration]?.directCandidates = endpoints(
+                from: directRoads,
+                for: configuration
+            )
+            // Being answered is stronger than either store's prior result.
+            entries[configuration]?.storedRoads = .known
+            try? ClusterRoads.save(
+                endpoints: directRoads.map { .init(host: $0.host, port: $0.port) },
+                for: configuration.identityLabel
+            )
+        }
+
+        // A newly built client deliberately ignores this key after a selected
+        // v0 session. Omission in v1 preserves; empty clears; nonempty replaces.
+        let update = RelayRoadPolicy.update(
+            from: ack,
+            replyEpoch: declarationEpoch,
+            currentEpoch: entry.declarationEpoch
         )
+        switch update {
+        case .stale:
+            return
+        case .preserve:
+            return
+        case .clear:
+            // Persistence is the authority across processes. If the keychain
+            // cannot accept this authenticated declaration, keep the last
+            // in-memory tier too instead of creating an authority that exists
+            // only until this process exits.
+            do {
+                try ClusterRelayRoads.apply(.clear, for: configuration.identityLabel)
+                entries[configuration]?.relayCandidates = []
+            } catch {
+                return
+            }
+        case .replace(let roads):
+            let persisted = roads.map { ClusterRoads.Roads.Endpoint(host: $0.host, port: $0.port) }
+            do {
+                try ClusterRelayRoads.apply(.replace(persisted), for: configuration.identityLabel)
+                entries[configuration]?.relayCandidates = endpoints(from: roads, for: configuration)
+                entries[configuration]?.storedRoads = .known
+            } catch {
+                return
+            }
+        }
+    }
+
+    private func beginDeclarationAttempt(
+        for configuration: ReachExecutor.Configuration,
+        roadEpoch: UInt64
+    ) -> UInt64? {
+        guard entries[configuration]?.roadEpoch == roadEpoch else { return nil }
+        let next = (entries[configuration]?.declarationEpoch ?? 0) &+ 1
+        entries[configuration]?.declarationEpoch = next
+        return next
+    }
+
+    nonisolated static func isCurrentDeclaration(
+        roadEpoch: UInt64,
+        activeRoadEpoch: UInt64,
+        replyDeclarationEpoch: UInt64,
+        activeDeclarationEpoch: UInt64
+    ) -> Bool {
+        roadEpoch == activeRoadEpoch && replyDeclarationEpoch == activeDeclarationEpoch
     }
 
     /// The declared addresses as endpoints, minus whatever is already the
@@ -412,7 +559,14 @@ public actor ReachConnectionHub {
 
     private func openRoadStream(for configuration: ReachExecutor.Configuration) async throws -> RoadStream {
         let entry = try await ensureEntry(for: configuration)
-        if entry.proven && !entry.dirty {
+        // A live session/generation may stay on either tier. Once the session
+        // is no longer reusable, every independent dial returns to the
+        // direct-first race instead of trying the last winner alone.
+        if Self.cachedRoadIsReusable(
+            proven: entry.proven,
+            dirty: entry.dirty,
+            hasSession: entry.session != nil
+        ) {
             do {
                 let stream = try await entry.dialer.openStream(timeout: configuration.connectTimeout)
                 let probe: ActiveRoadProbe
@@ -432,54 +586,68 @@ public actor ReachConnectionHub {
         return try await racedStream(for: configuration)
     }
 
-    /// Dials every known address at once and keeps the first stream that
-    /// opens; its dialer becomes the cached one. Losers are cancelled (the
-    /// transport tears a cancelled open down promptly), and a second late
-    /// success is surplus — one tunnel is the contract.
+    /// Direct candidates enter first; relay candidates enter after the S32
+    /// hedge (measured as 100 milliseconds). All attempts share one absolute
+    /// deadline and every losing stream is cancelled.
     private func racedStream(for configuration: ReachExecutor.Configuration) async throws -> RoadStream {
         guard let material = await ReachIdentityRegistry.shared.material(for: configuration.identityLabel) else {
             throw ReachError.identityNotRegistered(configuration.identityLabel)
         }
-        var endpoints = [primaryEndpoint(for: configuration)]
-        for candidate in entries[configuration]?.candidates ?? [] where !endpoints.contains(candidate) {
-            endpoints.append(candidate)
+        var directEndpoints = [primaryEndpoint(for: configuration)]
+        for candidate in entries[configuration]?.directCandidates ?? [] where !directEndpoints.contains(candidate) {
+            directEndpoints.append(candidate)
         }
-        let dialers = endpoints.map { endpoint in
+        var relayEndpoints: [NWEndpoint] = []
+        for candidate in entries[configuration]?.relayCandidates ?? []
+            where !directEndpoints.contains(candidate) && !relayEndpoints.contains(candidate)
+        {
+            relayEndpoints.append(candidate)
+        }
+        func roadDialer(_ endpoint: NWEndpoint) -> RoadDialer {
             let options = TLSBuilder.clientOptions(
                 alpn: Wire.alpn,
                 identity: material.identity,
                 serverTrustRoots: [material.caCertificate]
             )
             let parameters = NWParameters.reachQUIC(options: options, handover: configuration.multipathHandover)
-            return QUICDialer(endpoint: endpoint, parameters: parameters)
+            return RoadDialer(
+                endpoint: endpoint,
+                dialer: QUICDialer(endpoint: endpoint, parameters: parameters)
+            )
         }
-        let timeout = configuration.connectTimeout
-        let winner: (Int, ReachTransport.QUICStream)? = await withTaskGroup(
-            of: (Int, ReachTransport.QUICStream)?.self
-        ) { group in
-            for (index, dialer) in dialers.enumerated() {
-                group.addTask {
-                    guard let stream = try? await dialer.openStream(timeout: timeout) else { return nil }
-                    return (index, stream)
-                }
-            }
-            var won: (Int, ReachTransport.QUICStream)?
-            while let result = await group.next() {
-                if let (index, stream) = result {
-                    if won == nil {
-                        won = (index, stream)
-                        group.cancelAll()
-                    } else {
-                        stream.cancel()
-                    }
-                }
-            }
-            return won
-        }
-        guard let (index, stream) = winner else {
+        let direct = directEndpoints.map(roadDialer)
+        let relay = relayEndpoints.map(roadDialer)
+        let deadline = ContinuousClock.now + .seconds(configuration.connectTimeout)
+        let winner: TieredRoadRace.Winner<RoadDialer, ReachTransport.QUICStream>?
+        do {
+            winner = try await TieredRoadRace.run(
+                direct: direct,
+                relay: relay,
+                hedge: Self.relayHedge,
+                deadline: deadline,
+                open: { candidate, remaining in
+                    try await candidate.dialer.openStream(timeout: Self.seconds(remaining))
+                },
+                discard: { $0.cancel() }
+            )
+        } catch is CancellationError {
+            // `ReachLanguageModel.openingBy` owns the one absolute cold-open
+            // deadline. When it expires it cancels this child, waits for the
+            // road race to tear every attempt down, and expects the hub's
+            // existing actionable account of what was tried. A cancellation
+            // of the *calling* generation is distinguished one layer up by
+            // that parent task's own cancellation bit, so translating here
+            // does not turn an app cancellation into a road failure.
             entries[configuration]?.dirty = true
             throw ReachError.unreachable(
-                roads: endpoints.count,
+                roads: direct.count + relay.count,
+                stored: entries[configuration]?.storedRoads ?? .none
+            )
+        }
+        guard let winner else {
+            entries[configuration]?.dirty = true
+            throw ReachError.unreachable(
+                roads: direct.count + relay.count,
                 stored: entries[configuration]?.storedRoads ?? .none
             )
         }
@@ -487,15 +655,16 @@ public actor ReachConnectionHub {
             await previous.invalidate()
         }
         let epoch = (entries[configuration]?.roadEpoch ?? 0) &+ 1
-        let probe = ActiveRoadProbe(dialer: dialers[index])
-        entries[configuration]?.dialer = dialers[index]
+        let probe = ActiveRoadProbe(dialer: winner.candidate.dialer)
+        entries[configuration]?.dialer = winner.candidate.dialer
         entries[configuration]?.roadEpoch = epoch
         entries[configuration]?.probe = probe
         entries[configuration]?.reservedGenerationLeases = 0
         entries[configuration]?.dirty = false
+        entries[configuration]?.winningTier = winner.tier
         // The only place a dial is ever proven: it opened a stream.
         entries[configuration]?.proven = true
-        return RoadStream(stream: stream, roadEpoch: epoch, probe: probe)
+        return RoadStream(stream: winner.opened, roadEpoch: epoch, probe: probe)
     }
 
     private func ensureEntry(for configuration: ReachExecutor.Configuration) async throws -> Entry {
@@ -527,6 +696,8 @@ public actor ReachConnectionHub {
         // the second as the first is what made the app tell a person to go and
         // pair it again over a keychain it cannot open. The dial collapses
         // them; the sentence must not.
+        var directUnreadable = false
+        var relayUnreadable = false
         do {
             if let roads = try ClusterRoads.load(for: configuration.identityLabel) {
                 let stored = endpoints(
@@ -534,11 +705,25 @@ public actor ReachConnectionHub {
                     for: configuration
                 )
                 if !stored.isEmpty {
-                    entry.candidates = stored
-                    entry.storedRoads = .known
+                    entry.directCandidates = stored
                 }
             }
         } catch {
+            directUnreadable = true
+        }
+        do {
+            if let roads = try ClusterRelayRoads.load(for: configuration.identityLabel) {
+                entry.relayCandidates = endpoints(
+                    from: roads.endpoints.map { RoadEndpoint(host: $0.host, port: $0.port) },
+                    for: configuration
+                )
+            }
+        } catch {
+            relayUnreadable = true
+        }
+        if !entry.directCandidates.isEmpty || !entry.relayCandidates.isEmpty {
+            entry.storedRoads = .known
+        } else if directUnreadable || relayUnreadable {
             entry.storedRoads = .unreadable
         }
         entries[configuration] = entry
@@ -554,5 +739,10 @@ public actor ReachConnectionHub {
                 port: NWEndpoint.Port(rawValue: configuration.port)!
             )
         }
+    }
+
+    private nonisolated static func seconds(_ duration: Duration) -> Double {
+        let components = duration.components
+        return max(0.001, Double(components.seconds) + Double(components.attoseconds) / 1e18)
     }
 }

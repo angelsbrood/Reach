@@ -8,14 +8,14 @@ import Testing
 /// must not partition TLS, and an envelope bump must be deliberate.
 @Test func wireConstants() {
     #expect(Wire.baselineVersion == 0)
-    #expect(Wire.version == 0)
-    #expect(Wire.supportedVersions == [0])
+    #expect(Wire.version == 1)
+    #expect(Wire.supportedVersions == [1, 0])
     #expect(Wire.envelopeVersion == 0)
     #expect(Wire.alpn == "reach/0")
     #expect(Wire.enrollALPN == "reach-enroll/0")
     #expect(Wire.bonjourService == "_reach._udp")
     #expect(Wire.txtVersionsKey == "v")
-    #expect(Wire.txtVersionsValue == "0")
+    #expect(Wire.txtVersionsValue == "1,0")
     #expect(Wire.txtVersionsValue(for: [1, 0]) == "1,0")
 }
 

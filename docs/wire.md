@@ -20,7 +20,7 @@ language, not a translation of one.
                        └─── length counts these two ───┘
 ```
 
-Bodies are JSON in v0. A frame is capped at 16 MiB — far beyond
+Bodies are JSON in both supported dialects. A frame is capped at 16 MiB — far beyond
 text-generation scale, and a hard stop against a nonsense length from a broken
 or hostile peer. A zero length is rejected, and an unrecognized frame type is
 an **error rather than something to skip**: a peer that cannot name what it was
@@ -30,12 +30,13 @@ and yields whole frames, one instance per stream direction.
 ### Compatibility contract
 
 The ALPN names the **envelope generation**; `Hello`/`HelloAck` negotiate the
-JSON dialect carried inside it. Today both are generation 0, but they are
-deliberately separate constants. A dialect-only bump keeps `reach/0`, offers
-every supported dialect newest-first, and lets the daemon select its first
-preferred common value. Only a change to the length/type/body framing earns a
-new ALPN and deliberately partitions peers that cannot parse one another's
-envelopes. Serving multiple ALPNs waits until such a framing change exists.
+JSON dialect carried inside it. The envelope remains generation 0 while the
+current JSON dialect is v1 and peers offer `[1, 0]` newest-first. These are
+deliberately separate constants. A dialect-only bump keeps `reach/0` and lets
+the daemon select its first preferred common value. Only a change to the
+length/type/body framing earns a new ALPN and deliberately partitions peers
+that cannot parse one another's envelopes. Serving multiple ALPNs waits until
+such a framing change exists.
 
 Three rules hold every future wire edit:
 
@@ -57,7 +58,7 @@ ended 3/3 as the opaque `stream open timeout`. The retained register is in
 | | Frame | |
 |---|---|---|
 | **1** | `Hello` | versions offered, client name |
-| **2** | `HelloAck` | version, cluster, models, **roads?**, addrs?, port? |
+| **2** | `HelloAck` | version, cluster, models, **roads?**, **relayRoads?**, addrs?, port? |
 | **3** | `SessionOpen` | model id |
 | **4** | `SessionOpened` | session id, resume token, capabilities |
 | **5, 6** | *reserved* | retired; see below |
@@ -124,7 +125,8 @@ session.
 ```
   Hello{versions, client}                client ──► daemon
   HelloAck{version, cluster, models,
-           roads?, addrs?, port?}        daemon ──► client
+           roads?, relayRoads?,
+           addrs?, port?}                daemon ──► client
   SessionOpen{modelID}                   client ──► daemon
   SessionOpened{sessionID, token,
                 capabilities}            daemon ──► client
@@ -138,12 +140,11 @@ selected value then belongs to the session: generation begin and re-attach,
 grants, keepalives, events and acknowledgements are all gated by it rather than
 falling back to the process's preferred dialect.
 
-`HelloAck.roads` is the endpoint-specific declaration: every entry is
-`{host, port}` because gateways may translate the session mapping to a port
-other than the listener's internal port. A client prefers this list, re-dials
-its candidates in parallel, and keeps the first that connects. The list arrives
-over an already mutually authenticated stream, so trusting it grants nothing
-that mTLS did not already grant.
+`HelloAck.roads` is the endpoint-specific **direct** declaration: every entry
+is `{host, port}` because gateways may translate the session mapping to a port
+other than the listener's internal port. The list arrives over an already
+mutually authenticated stream, so trusting it grants nothing that mTLS did not
+already grant. Relay aliases never enter this field or legacy `addrs`.
 
 `addrs` plus `port` is retained as the legacy projection. It contains local
 addresses and may include a mapped address only when that mapping preserved the
@@ -165,6 +166,49 @@ compatibility story: a daemon that predates endpoint-specific roads omits them,
 a new client lazily upgrades the old single-port store, and a client receiving
 neither form falls back to the address it already had. `roads` adds no new
 frame type and leaves dialect v0 unchanged.
+
+Dialect v1 adds a second, deliberately separate calling card:
+`HelloAck.relayRoads`. It has three authenticated meanings:
+
+- omitted preserves the relay candidates already stored for this cluster;
+- `[]` authoritatively clears them; and
+- a nonempty array atomically replaces them.
+
+Explicit `null`, duplicates, malformed endpoints, noncanonical or non-private
+hosts, and zero ports are rejected. The field is interpreted only when the
+selected session dialect is v1. A newly built client speaking selected v0
+ignores it and neither refreshes nor clears its relay state. Relay candidates
+live under the separate Keychain service
+`systems.reach.cluster-relay-roads`; no endpoint migrates between that record
+and `systems.reach.cluster-roads`, and deleting the cluster identity deletes
+both. If one store is unreadable the other remains independently usable; an
+unreadable tier is never treated as an empty declaration.
+
+S32 selected a **100 ms direct-preference hedge**. Direct candidates start at
+time zero. Relay candidates start 100 ms later unless a direct has already won.
+That positive grace made the measured 20 ms healthy-direct arm deterministic
+against an immediately completing relay; at 0 ms the relay correctly won.
+Every attempt still shares the existing absolute ten-second
+deadline and every loser is cancelled. A cached road is reused only while its
+authenticated session exists; invalidating that session makes the next
+independent open return to the tiered race, so a blackholed former direct
+winner cannot consume the deadline alone. A healthy relay session or resident
+generation is not interrupted merely because a direct road later appears.
+Reattachment uses the same tiering while preserving generation ID, replay
+cursor, residency, and provider admission.
+
+Only the currently authenticated road epoch may commit a v1 declaration. A
+delayed control/probe reply cannot overwrite newer persistence. Accepted
+sessions, generation receipts, and reattachments classify a source as
+`relay-overlay` only when it falls inside the operator-configured relay prefix;
+that privacy-safe label contains no endpoint, identity, prompt, output,
+certificate, or token count. Keeper and enrollment do not consume this field;
+device provisioning remains separately Held.
+
+The corrected installed S32 authority is reachd `a9660a83…6b790` with the
+unchanged helper restored to canonical direct-only generation 37. Its exact v0
+client, v1 replace/preserve/clear, 100 ms direct-first and relay-only opens, and
+both same-generation transition directions passed before that restoration.
 
 ## A generation
 
@@ -463,6 +507,7 @@ dead storage.
 | Crossing surface | Verdict |
 |---|---|
 | `Hello.versions`; `HelloAck.version`, `cluster`, `addrs`, `port`, `roads`; `RoadEndpoint.host`, `port` | **HONORED** — dialect selection, authenticated cluster identity, and endpoint-specific road refresh |
+| v1 `HelloAck.relayRoads` | **HONORED** — selected-v1 omission preserves the separate authenticated relay store, empty clears it, and nonempty replaces it; selected v0 ignores it |
 | `SessionOpened.sessionID`, `token`, `capabilities` | **HONORED** — generation identity/reattach and the `ClusterDial`/`doctor` capability result |
 | `Ping.nonce`; `Pong.nonce`; `ErrorFrame.code`, `message` | **HONORED** — active-road liveness requires an exact, timely nonce match; the daemon echoes it and both sides turn remote refusals into typed failures |
 | `GrantEvent`'s request, provenance, app identity and fingerprint; `GrantRule.requestID`, `allow` | **HONORED** — the sheet renders the request and its ruling resolves that same parked request |
@@ -479,7 +524,8 @@ dead storage.
 
 `GrantSubscribe` has no body to ignore. The unknown-key rule still makes old
 decoders safe when optional fields are added; it does not turn any required v0
-field into deletion permission. `responseReplace` is honored receiver
+field into deletion permission. The v1 relay field is additive rather than a
+reinterpretation of a v0 key. `responseReplace` is honored receiver
 vocabulary even though today's daemon only appends. Framework request
 `metadata` is not in this table because v0 cannot encode it and therefore it
 does not cross.

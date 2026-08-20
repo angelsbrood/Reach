@@ -166,14 +166,19 @@ public struct ReachExecutor: FoundationModels.LanguageModelExecutor {
                     Task { await ReachConnectionHub.shared.releaseGenerationStream(lease) }
                 }
                 defer { stream.cancel() }
-                // A path change (an SSID hop, Wi-Fi loss) cancels the live
-                // stream so the retry loop re-dials now — the hub then races
-                // every address the daemon declared, the mesh included.
-                // Without this, a dead path surfaces only at the QUIC idle
-                // timeout.
+                // A path change (an SSID hop, Wi-Fi loss) cancels a direct
+                // stream so the retry loop re-dials now. A current relay is
+                // deliberately different: the appearance of a direct road is
+                // not proof that its live generation stopped. Keep that relay
+                // until its nonce liveness probe or stream proves otherwise.
                 let watcher = Task {
-                    await ReachConnectionHub.shared.pathChanged(after: epoch)
-                    stream.cancel()
+                    if await ReachConnectionHub.shared.pathChangeRequiresRedial(
+                        after: epoch,
+                        lease: lease,
+                        for: configuration
+                    ) {
+                        stream.cancel()
+                    }
                 }
                 defer { watcher.cancel() }
                 do {
@@ -459,14 +464,11 @@ public struct ReachExecutor: FoundationModels.LanguageModelExecutor {
     /// attempt and not merely the pause before the next one.
     ///
     /// `waitBeforeRetry` above checks the deadline before *sleeping*, which
-    /// bounds the gaps between dials and nothing else. A single iteration can
-    /// spend far more than the whole budget inside one attempt, and did:
-    /// `ReachConnectionHub.openStream` tries the cached dialer for the full
-    /// `connectTimeout` and then hands the same timeout to every racer, so a
-    /// warm hub pays it twice per call and this function is called twice per
-    /// iteration — up to 4× the configured timeout, 80 s at the default 20,
-    /// against a 10 s promise. Both existing measurements of this hid it by
-    /// choosing a tiny `connectTimeout`.
+    /// bounds the gaps between dials and nothing else. This outer gate is what
+    /// turns the hub's configured transport timeout into the unchanged ten-
+    /// second cold-open contract. Inside the hub, direct and relay attempts now
+    /// share one race deadline and each opener receives only its remaining
+    /// budget; this gate also includes the control exchange that follows.
     ///
     /// **On expiry the hub's own error is what surfaces, not one invented
     /// here.** Cancelling reaches `NWConnection` (the transport tears a

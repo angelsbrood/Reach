@@ -2887,3 +2887,207 @@ into a v0 road or disturbing direct ownership. No client can yet learn or dial
 that relay; negotiated relay vocabulary, persistence and hedging remain the
 next bounded pass. Keeper, a public hub, external service, router and phone
 remain outside S31.
+
+## S32 — negotiated relay roads and the corrected direct grace (20 August 2026)
+
+**Baseline and measurement gate.** S32 began from synchronized `8a29d02` with
+installed reachd `266e29ec…148e2`, unchanged helper `a784f257…b28ca8`, helper
+status v2 generation 25 direct-ready/relay-verified-absent, and unchanged four
+identity/registry hashes. A genuine authenticated baseline dial passed in
+109 ms with **15 pass, 3 expected mapping warnings, 0 waiting and 0 fail**;
+sandboxed `SecPKCS12Import -25291` attempts were diagnostic-only and did not
+substitute for it.
+
+The first private scratch gate used ephemeral identities, unused ports, one
+disposable daemon and deterministic impairment proxies. Each delay ran three
+times through healthy-direct/healthy-relay, stalled-direct/healthy-relay,
+failed-relay/healthy-direct, all-failed, and same-generation reattachment:
+
+| configured relay hedge | healthy direct preferred | stalled direct reached relay | failed relay preserved direct | all failed under one deadline | maximum observed relay start |
+|---:|---:|---:|---:|---:|---:|
+| 0 ms | 3/3 | 3/3 | 3/3 | 3/3 | 0.031 ms |
+| 100 ms | 3/3 | 3/3 | 3/3 | 3/3 | 106.757 ms |
+| 250 ms | 3/3 | 3/3 | 3/3 | 3/3 | 266.760 ms |
+| 500 ms | 3/3 | 3/3 | 3/3 | 3/3 | 527.072 ms |
+
+That fixture called 0 ms the first qualifying value, but its relay path carried
+an artificial 40 ms delay. Post-install review reran the exact scheduler with a
+healthy 20 ms direct and an immediate relay; 0 ms selected relay, proving that
+task-admission order is not deterministic direct preference. The earlier
+compatibility, persistence, failure, removal and reattachment results remain
+valid, but the 0 ms selection and exact-byte closeout are superseded.
+
+The bounded correction compiled the exact `TieredRoadRace.swift` with a
+disposable synthetic timing harness and repeated all candidates three times:
+
+| configured relay hedge | healthy 20 ms direct beat immediate relay | stalled direct reached relay | failed relay preserved direct | all failed under one deadline | invalidated proven direct reached relay | maximum observed relay start |
+|---:|---:|---:|---:|---:|---:|---:|
+| 0 ms | 0/3 | 3/3 | 3/3 | 3/3 | 3/3 | 0.076 ms |
+| 100 ms | 3/3 | 3/3 | 3/3 | 3/3 | 3/3 | 106.829 ms |
+| 250 ms | 3/3 | 3/3 | 3/3 | 3/3 | 3/3 | 264.416 ms |
+| 500 ms | 3/3 | 3/3 | 3/3 | 3/3 | 3/3 | 518.181 ms |
+
+The first qualifying positive value is therefore **100 ms**. Zero is honestly
+fastest-authenticated-road behavior; 500 ms misses the declared start bound.
+The production scheduler now uses 100 ms, and an authenticated cached dialer is
+eligible only while its session remains reusable. The correction pack is
+`/private/tmp/reach-s32-direct-grace-evidence-20260820`; its raw matrix hashes
+to `554d50c0…b0dead`.
+
+**Implementation boundary.** The JSON dialect set is now `[1, 0]` over the
+unchanged envelope ALPN `reach/0`; no frame or framing changed. Selected v1
+adds optional `HelloAck.relayRoads`: omission preserves the separate relay
+Keychain record, `[]` clears it, and nonempty replaces it. Selected v0 ignores
+the field and leaves relay persistence untouched. Direct `roads`, legacy
+`addrs`, pairing addresses, and certificates retain their existing direct
+semantics. Relay candidates use the same tiered race for cold dialing and
+reattachment, declarations are committed only by the current authenticated
+road epoch, and `relay-overlay` attribution is derived from configured host
+intent rather than a hardcoded prefix. Keeper, helper, enrollment, router and
+public-infrastructure behavior are unchanged.
+
+One separately attributed build-graph correction is included in the exact S32
+daemon bytes: reachd passes `traits: []` to the pinned `mlx-swift-lm`
+dependency so its unused default Foundation Models adapter is neither compiled
+nor linked. Reach still links the container loader, LLM, guided-generation and
+MLX products it names directly. This is SDK-build-surface hardening, not relay
+behavior; warnings-as-errors release and Example/Keeper linkage builds are its
+acceptance gate.
+
+Focused wire/store/race/daemon suites passed ReachKit **39/39** and reachd
+**38/38**, three fresh runs each. Complete ReachKit passed **94/94** eight
+times; reachd passed **250/250 in 36 suites** eight times. The warnings-as-
+errors release, generic-Simulator Example and generic-iOS Keeper linkage guard
+passed. The complete eight-item candidate is coverage-clean reachd
+`66836721…1d398`, CDHash `8c1a8186…898a8`; Keeper source and helper bytes did
+not change.
+
+**Attributed bridge correction.** The first guarded installed attempt stopped
+and restored the complete prior authority because the scratch bridge emitted a
+synthetic inner IPv4 packet without its header checksum. After that was fixed,
+the host received the request but a wildcard reply selected a direct source;
+the relay router correctly refused it. Binding the reply to the relay alias
+proved bidirectional encrypted request/response **3/3** in 0.03, 0.02 and
+0.02 seconds without changing installed Reach. The corrected proof transcript
+hashes to `117b3a35…6360`. The corrected retry remained bound to the exact
+candidate and harness; no failed attempt was relabeled as product success.
+
+**Installed compatibility matrix.** The corrected guarded retry replaced only
+the complete eight-item daemon layout, used the unchanged local helper plus a
+disposable relay/device, and passed seven cells in 30.516 seconds:
+
+| cell | authenticated source / transition | session | generation | sequence evidence |
+|---|---|---|---|---|
+| exact v0 client | loopback | `5F3B4F30…BE45` | `56EEBE97…0953` | 0 → 32 complete |
+| v1 replace / direct-first | loopback | `039E812E…642F` | `2B2D66DD…C917` | 0 → 32 complete |
+| helper mismatch / preserve | loopback | `CD720A48…1684` | `36EF9369…12BC` | 0 → 32 complete |
+| relay-only cold open | `10.87.41.2`, `relay-overlay` | `FDFE28C4…0466` | `4F09EA7A…FB17` | 0 → 32 complete |
+| direct → relay | loopback → `relay-overlay` | `E5CD71C1…F59D` | `62ED9AE6…DE6E` | accepted 0; reattached after cursor 0; terminal 1025 |
+| relay → direct | `relay-overlay` → loopback | `9C3F6C6B…1BAB` | `A28BA65D…2D55` | accepted 0; reattached after cursor 0; terminal 1025 |
+| explicit clear | loopback | `0398BE6D…668B` | `DCF5C1F0…5264` | 0 → 32 complete |
+
+The transitions were deliberately cut immediately after the first event, so
+their cumulative reattach cursor is exactly 0; each resumed strictly after
+that cursor and reached terminal sequence 1025 under the same generation ID.
+The immutable daemon segment contains exactly one accepted and terminal receipt
+per generation plus both matching reattachment categories. Independent
+controller counters corroborated every leg: direct bytes stayed flat during
+relay-only, relay bytes advanced there, both moved on their respective
+transition legs, and the clear cell ended at generation 31 with relay verified
+absent. The exact backed-up v0 binary authenticated against the v1 daemon on
+attempt 1.
+
+Final installed reachd is `66836721…1d398` at PID 26798. Helper
+`a784f257…b28ca8`, its plist, Keeper, registry `75d9dbf9…0def`, host key
+`99526d11…a1d`, CA `03a08c64…c737`, and server certificate
+`15302bb6…d5af` are unchanged; CA creation remained zero. Helper status v2 is
+generation 31 on `utun0`, direct ready with one peer, relay configured false
+and ready true with zero address/routes/hub peers. Scripted and MLX selftests
+passed. Final authenticated `doctor --dial` passed on attempt 1 in 34 ms with
+**15 pass, 3 expected mapping warnings, 0 waiting and 0 fail**.
+
+The accepted installed evidence is
+`/private/tmp/reach-s32-authorized-retry-20260820`; its four-file immutable
+matrix manifest hashes to `f92a02e7…adf5`, and all entries verify. The complete
+prior authority remains recoverable at
+`/private/tmp/reach-s32-installed-retry-backup-20260820` and is excluded from
+the evidence manifest because it contains secrets.
+
+**Post-install review verdict (superseded): REOPENED FOR CORRECTED EXACT-BYTE
+ACCEPTANCE.** The first installed matrix remained authoritative for
+negotiation, persistence, attribution and transitions, but not for the claimed
+0 ms direct preference or the invalidated-session fast path. It therefore did
+not retire S32.
+
+**Post-review direct-preference correction checkpoint.** The exact scheduler
+rerun above selected 100 ms and focused race coverage passed **7/7** in three
+fresh products. Complete ReachKit passed **95/95** in 8/8 fresh products;
+reachd passed **250/250 in 36 suites** in 8/8. A fresh warnings-as-errors arm64
+release is coverage/profile clean, produces no `.profraw`, stages exactly one
+executable plus seven bundles, and hashes to `a9660a83…6b790` with CDHash
+`69b54c8c…a1f9f`. Generic-Simulator Example and unchanged generic-iOS Keeper
+linkage builds passed with coverage disabled. The release build contains
+`MLXLLM`, `MLXLMCommon`, `MLXHuggingFace`, and `MLXGuidedGeneration` targets,
+but no `MLXFoundationModels` adapter target. Scripted selftest, unconstrained
+sampling 3/3, guided schemas 15/15, and the MLX spine passed from the staged
+eight-item layout.
+
+The corrected disposable controller hashes to `2ec3de4d…f42af`; the client
+test binary rebuilt from the exact current ReachKit source plus its explicitly
+sealed nonshipping impairment seam hashes to `1fc0a7ea…c6749`. Source,
+candidate, and harness manifests verify.
+
+**Corrected exact-byte installed acceptance.** The first authorized invocation
+stopped before any product replacement because the sealed and regenerated
+source manifests contained the same 29 path/hash pairs in different line
+orders. The failed preflight and empty backup were retained with an explicit
+`preflight-order-mismatch` suffix. The guard was corrected to compare sorted
+manifests; it was not bypassed and no source or candidate byte changed.
+
+The guarded retry installed only the complete eight-item daemon layout and
+passed the same seven cells in **30.383 seconds**:
+
+| cell | authenticated source / transition | session | generation | sequence evidence |
+|---|---|---|---|---|
+| exact v0 client | loopback | `1D58BE23…8B1E` | `A7870FB9…6BFD` | 0 → 32 complete |
+| v1 replace / 100 ms direct-first | loopback | `490F6095…C7DB` | `4DF3A37A…FADA` | 0 → 32 complete |
+| helper mismatch / preserve | loopback | `AC80D8BB…B7D3` | `9EE87910…5DB9` | 0 → 32 complete |
+| relay-only cold open | `10.87.41.2`, `relay-overlay` | `E5892555…4B50` | `2AD2A7EA…4B50` | 0 → 32 complete |
+| direct → relay | loopback → `relay-overlay` | `E40B526B…9417` | `4DDA80E7…975C` | accepted 0; reattached after cursor 0; terminal 1025 |
+| relay → direct | `relay-overlay` → loopback | `27455CB5…9C69` | `DC5D8471…EE07` | accepted 0; reattached after cursor 0; terminal 1025 |
+| explicit clear | loopback | `27E4BFC4…C7D1` | `F8820BC3…127B` | 0 → 32 complete |
+
+The immutable daemon segment contains exactly one accepted and terminal
+receipt for every generation and the exact raw/category evidence for both
+reattachments. Independent controller counters kept relay bytes flat for the
+direct cells, direct bytes flat for relay-only, advanced the selected lens on
+each transition, and ended at helper generation **37** with relay configured
+false/ready true and zero relay address, routes or hub peers. The exact backed-
+up v0 binary authenticated on attempt 1. Scripted and MLX selftests passed.
+
+Final installed reachd is coverage-clean `a9660a83…6b790`, CDHash
+`69b54c8c…a1f9f`, at PID 21242 beside the canonical seven bundles. Helper
+`a784f257…b28ca8`, its plist, Keeper, registry `75d9dbf9…0def`, host key
+`99526d11…a1d`, CA `03a08c64…c737`, and server certificate
+`15302bb6…d5af` are unchanged; CA creation remained zero. Final authenticated
+`doctor --dial` passed on attempt 1 in **36 ms** with **15 pass, 3 expected
+mapping warnings, 0 waiting and 0 fail**.
+
+Three immediate post-closeout diagnostic repeats then reproduced the known
+`SecPKCS12Import -25291` identity-mint warning. They did not move runtime state
+and do not replace or weaken the retained genuine 36 ms authenticated pass.
+
+The corrected installed evidence is
+`/private/tmp/reach-s32-correction-authorized-install-20260820`; its four-file
+immutable manifest hashes to `432b9123…73fdd`, and every entry verifies. The
+complete prior authority remains recoverable at
+`/private/tmp/reach-s32-correction-installed-backup-20260820` and is excluded
+from that manifest because it contains secrets. Its pre-install source manifest
+necessarily predates this closeout: the four documentation entries now differ,
+while all 23 package, product, and test source entries remain exact.
+
+**Verdict: PASS — S32 RETIRED.** ReachKit and reachd now use authenticated,
+separately persisted relay calling cards as a measured 100 ms direct-first
+fallback while exact v0 peers remain compatible. This is still not an
+operational relay: no public endpoint or provisioned device exists, and Keeper
+remains Held. No new Now item is promoted without a separate founder ruling.

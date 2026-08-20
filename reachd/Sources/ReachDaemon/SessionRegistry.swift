@@ -11,16 +11,29 @@ package enum GenerationReceipt: Sendable, Equatable {
     package enum Source: String, Sendable, Equatable {
         case loopback
         case reachMesh = "reach-mesh"
+        case relayOverlay = "relay-overlay"
         case privateLAN = "private-lan"
         case sharedAddressSpace = "shared-address-space"
         case publicNetwork = "public"
         case unknown
 
-        package init(remoteEndpointDescription: String?) {
+        package init(remoteEndpointDescription: String?, relayNetwork: String? = nil) {
             guard let remoteEndpointDescription,
                   let endpoint = MeshEndpoint.split(remoteEndpointDescription),
                   let kind = MeshEndpoint.classify(endpoint.host) else {
                 self = .unknown
+                return
+            }
+            if kind == .loopback {
+                self = .loopback
+                return
+            }
+            if kind == .mesh {
+                self = .reachMesh
+                return
+            }
+            if MeshEndpoint.isRelayOverlayAddress(endpoint.host, network: relayNetwork) {
+                self = .relayOverlay
                 return
             }
             self = switch kind {

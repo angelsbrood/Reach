@@ -138,3 +138,87 @@ struct ClusterRoadsTests {
         try ClusterRoads.forget(for: freshLabel())
     }
 }
+
+@Suite(.serialized)
+struct ClusterRelayRoadsTests {
+    private func freshLabel() -> String { "reach-test-relay-roads-\(UUID().uuidString)" }
+
+    @Test func preserveReplaceAndClearAreDistinct() throws {
+        let label = freshLabel()
+        defer { try? ClusterRelayRoads.forget(for: label) }
+        let first: [ClusterRoads.Roads.Endpoint] = [
+            .init(host: "10.87.0.1", port: 47_337),
+        ]
+        let second: [ClusterRoads.Roads.Endpoint] = [
+            .init(host: "192.168.77.1", port: 47_338),
+        ]
+
+        try ClusterRelayRoads.apply(.replace(first), for: label)
+        try ClusterRelayRoads.apply(.preserve, for: label)
+        #expect(try ClusterRelayRoads.load(for: label)?.endpoints == first)
+
+        try ClusterRelayRoads.apply(.replace(second), for: label)
+        #expect(try ClusterRelayRoads.load(for: label)?.endpoints == second)
+
+        try ClusterRelayRoads.apply(.clear, for: label)
+        #expect(try ClusterRelayRoads.load(for: label) == nil)
+    }
+
+    @Test func relayStoreRejectsUnsafeOrAmbiguousEndpoints() {
+        let invalid: [[ClusterRoads.Roads.Endpoint]] = [
+            [],
+            [.init(host: "203.0.113.9", port: 47_337)],
+            [.init(host: "010.87.0.1", port: 47_337)],
+            [.init(host: "10.87.0.0", port: 47_337)],
+            [.init(host: "10.87.0.255", port: 47_337)],
+            [.init(host: "10.87.0.1", port: 0)],
+            [
+                .init(host: "10.87.0.1", port: 47_337),
+                .init(host: "10.87.0.1", port: 47_337),
+            ],
+        ]
+        for endpoints in invalid {
+            #expect(throws: IdentityError.self) {
+                try ClusterRelayRoads.save(endpoints: endpoints, for: freshLabel())
+            }
+        }
+    }
+
+    @Test func unreadableRelayStateDoesNotTouchDirectRoads() throws {
+        let label = freshLabel()
+        defer {
+            try? ClusterRelayRoads.forget(for: label)
+            try? ClusterRoads.forget(for: label)
+        }
+        try ClusterRoads.save(addrs: ["192.168.8.210"], port: 47_337, for: label)
+        let add: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: ClusterRelayRoads.service,
+            kSecAttrAccount as String: label,
+            kSecValueData as String: Data("not json".utf8),
+        ]
+        #expect(SecItemAdd(add as CFDictionary, nil) == errSecSuccess)
+
+        #expect(throws: IdentityError.self) {
+            _ = try ClusterRelayRoads.load(for: label)
+        }
+        #expect(try ClusterRoads.load(for: label)?.addrs == ["192.168.8.210"])
+    }
+
+    @Test func concurrentReplacementsAlwaysLeaveOneCompleteDeclaration() async throws {
+        let label = freshLabel()
+        defer { try? ClusterRelayRoads.forget(for: label) }
+        let declarations = (1 ... 16).map {
+            [ClusterRoads.Roads.Endpoint(host: "10.87.0.\($0)", port: UInt16(47_000 + $0))]
+        }
+        await withTaskGroup(of: Void.self) { group in
+            for declaration in declarations {
+                group.addTask {
+                    try? ClusterRelayRoads.apply(.replace(declaration), for: label)
+                }
+            }
+        }
+        let stored = try #require(try ClusterRelayRoads.load(for: label)?.endpoints)
+        #expect(declarations.contains(stored))
+    }
+}

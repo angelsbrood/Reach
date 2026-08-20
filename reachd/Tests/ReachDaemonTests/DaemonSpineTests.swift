@@ -105,6 +105,14 @@ private final class GenerationReceiptRecorder: @unchecked Sendable {
         let genID = UUID(uuidString: "22222222-2222-2222-2222-222222222222")!
         #expect(GenerationReceipt.Source(remoteEndpointDescription: "127.0.0.1:47337") == .loopback)
         #expect(GenerationReceipt.Source(remoteEndpointDescription: "10.86.0.2:49152") == .reachMesh)
+        #expect(GenerationReceipt.Source(
+            remoteEndpointDescription: "10.87.0.2:49152",
+            relayNetwork: "10.87.0.0/24"
+        ) == .relayOverlay)
+        #expect(GenerationReceipt.Source(
+            remoteEndpointDescription: "10.86.0.2:49152",
+            relayNetwork: "10.86.0.0/24"
+        ) == .reachMesh)
         #expect(GenerationReceipt.Source(remoteEndpointDescription: "192.168.8.225:49153") == .privateLAN)
         #expect(GenerationReceipt.Source(remoteEndpointDescription: "100.103.193.21:49154") == .sharedAddressSpace)
         #expect(GenerationReceipt.Source(remoteEndpointDescription: "203.0.113.4:49155") == .publicNetwork)

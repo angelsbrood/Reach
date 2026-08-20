@@ -224,7 +224,7 @@ import X509
         try await device.send(EnrollBegin(
             token: token,
             deviceName: "future-phone",
-            versions: [1]
+            versions: [2]
         ))
         let deviceError = try (try #require(try await deviceFrames.next())).decode(ErrorFrame.self)
         #expect(deviceError.code == "wire-version")
@@ -240,7 +240,7 @@ import X509
         try await app.send(AppEnrollBegin(
             bundleID: "systems.reach.future-only",
             displayName: "Future Only",
-            versions: [1]
+            versions: [2]
         ))
         let appError = try (try #require(try await appFrames.next())).decode(ErrorFrame.self)
         #expect(appError.code == "wire-version")

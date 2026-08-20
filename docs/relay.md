@@ -1,10 +1,12 @@
 # Relay overlay contract
 
-Reach does not currently ship an operational relay. The repository contains a
-reference-hub core and a scriptless Linux package, proved with synthetic
-encrypted traffic in a disposable native-arm64 Ubuntu VM and removed after
-acceptance. This note fixes the larger contract that core and every future
-endpoint integration must satisfy so that an inbound wall becomes an additive
+Reach does not currently operate a public relay endpoint. The repository does
+ship the reference-hub core and scriptless Linux package, host-side relay
+authority, and negotiated relay calling cards/direct-first client fallback.
+Those pieces were proved with synthetic encrypted traffic and a disposable
+local endpoint; no device is provisioned for the overlay and no external
+service was created. This note fixes the contract every deployment and future
+device integration must satisfy so that an inbound wall becomes an additive
 road, not a new trust system disguised as transport.
 
 ## Selected topology
@@ -75,8 +77,8 @@ Retrying readiness for that same generation does not trust the digest alone:
 the core re-reads the complete peer manifest and requires the matching router
 ownership snapshot with its forwarding gate open before publishing ready.
 
-Future authenticated calling cards keep direct roads and relay roads separate.
-The planned minimal wire shape is a `HelloAck.relayRoads` array under negotiated
+Authenticated calling cards keep direct roads and relay roads separate. The
+shipped wire shape is a `HelloAck.relayRoads` array under negotiated
 dialect v1. Existing `HelloAck.roads` remains direct-only. Under selected v1,
 the optional field has three authoritative states: omission preserves the
 stored relay roads, an empty array explicitly removes them, and a nonempty
@@ -87,7 +89,7 @@ intentionally absent. A v0 peer never sends or interprets relay vocabulary.
 Framing is unchanged, so the envelope ALPN generation remains 0 and no new
 frame is required.
 
-Relay-capable apps will keep relay candidates in a separate keychain record.
+Relay-capable ReachKit apps keep relay candidates in a separate keychain record.
 A previously authenticated relay road may be used as a lower-priority cold-dial
 candidate before a new `Hello` can negotiate; the cluster CA and mTLS identity,
 not the endpoint, still decide trust. A later v0 session neither refreshes nor
@@ -96,11 +98,15 @@ transient host-side outage cannot become permanent client-side removal and
 does not require a server-pushed `HelloAck` after recovery. A later
 authenticated v1 empty declaration explicitly clears it.
 
-Direct candidates start first. Relay candidates use a bounded measured hedge,
-inside the existing cold-open budget, rather than waiting for dead direct roads
-to exhaust a full timeout. The same tiering applies to reattachment. A healthy
-relay session is not disrupted merely because a direct road later becomes
-available.
+S32 selected a 100 ms direct-preference hedge: direct candidates start at time
+zero and relay candidates start 100 ms later if direct has not won. That grace,
+not task-admission order, made the measured 20 ms healthy-direct arm win
+deterministically against an immediately completing relay. Both tiers share the
+unchanged ten-second absolute budget. The same tiering applies to reattachment.
+A healthy relay session is not disrupted merely because a direct road later
+becomes available,
+but every independent dial after session invalidation returns to the tiered
+race instead of trying a proven direct road alone for the full timeout.
 
 Future ceremony fields add an optional relay provision to the existing grant:
 the hub public key and endpoint, the device relay `/32`, the host relay `/32`,
@@ -165,12 +171,13 @@ authority and a bounded outcome. False readiness, a leaked removed path,
 generation rollback, or any peer/address/route/digest disagreement is FAIL.
 Version-1 helper status remains readable during upgrade.
 
-Wire v0 remains deliberately direct-only. Listener certificates and local
-diagnostics still see every local address, but pairing and `HelloAck.roads`
-exclude the relay address and conservatively exclude every non-`10.86.0.1`
-IPv4 address on the interface that owns the direct mesh. Desired intent and
-helper status add a second quarantine source. A stale or misplaced relay alias
-therefore cannot leak into a v0 calling card.
+Direct calling cards remain deliberately direct-only in both dialects.
+Listener certificates and local diagnostics still see every local address,
+but pairing, `HelloAck.roads`, and legacy `addrs` exclude the relay address and
+conservatively exclude every non-`10.86.0.1` IPv4 address on the interface that
+owns the direct mesh. Desired intent and helper status add a second quarantine
+source. A stale or misplaced relay alias therefore cannot leak into v0 or the
+v1 direct tier; only authenticated v1 `relayRoads` can name it as relay.
 
 S31 installed and exercised this host boundary on 19 August 2026. One local
 reference hub proved add, idempotent reapply, endpoint-only update, relay-prefix
@@ -190,8 +197,18 @@ installed regression retained generation 19, staged 20, and acknowledged 20
 only after 20 was active; the same bytes then restored canonical direct-only
 generation 25. The accepted helper is `a784f257…b28ca8`, with relay configured
 false/ready true and no residual relay or transaction artifact.
-This is host ownership only: no operational relay ships until negotiated relay
-roads and Keeper-held device provisioning exist.
+
+S32 then installed negotiated relay-road support without changing that helper.
+The daemon and client selected dialect v1 over unchanged `reach/0`, exercised
+authenticated replace/preserve/clear declarations, cold-opened over the local
+relay, and carried one generation direct-to-relay and another relay-to-direct.
+The exact backed-up v0 client still authenticated against the v1 daemon.
+Corrected installed reachd `a9660a83…6b790` ended with helper generation 37 in
+canonical direct-only state; helper `a784f257…b28ca8`, all identities, and
+Keeper were unchanged. The installed matrix re-earned the exact v0 client,
+100 ms direct-first, relay-only, both transition directions and clear against
+those bytes. This is a client-visible transport capability, not an operational
+relay deployment: no public endpoint or device provisioning exists.
 
 ## Security and observation boundary
 
@@ -250,6 +267,7 @@ real public deployment remain follow-on work. Linux acceptance proves the
 private deployment substrate; it does not choose, provision, expose, or
 operate an endpoint.
 
-Host relay ownership is only one endpoint half. No operational relay, wire
-dialect v1, relay-road advertisement or persistence, device provisioning,
-public endpoint, or Keeper relay behavior ships from this slice.
+Host ownership and negotiated relay roads now cover the Mac/reference-client
+half. No operational relay endpoint, device provisioning, public deployment,
+or Keeper relay behavior ships. Until Keeper is separately released, the
+iPhone cannot receive the second address/hub peer required to use this road.

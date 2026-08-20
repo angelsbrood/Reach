@@ -6,11 +6,11 @@ public enum Wire {
     /// peer built before negotiation existed remains legible.
     public static let baselineVersion: UInt8 = 0
 
-    /// Preferred dialect carried first in `Hello`; one live dialect today.
-    public static let version: UInt8 = 0
+    /// Preferred JSON dialect carried first in `Hello`.
+    public static let version: UInt8 = 1
 
     /// Dialects this build can speak, in server preference order.
-    public static let supportedVersions: [UInt8] = [version]
+    public static let supportedVersions: [UInt8] = [version, baselineVersion]
 
     /// The framing generation named by ALPN. This changes only when the
     /// length/type/body envelope itself becomes incompatible, not when a JSON

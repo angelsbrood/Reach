@@ -223,14 +223,7 @@ public enum ReachEnrollment {
         // A fresh grant REPLACES whatever an earlier provisioning left
         // under this label — keychain items outlive app installs, and a
         // stale identity beside a granted one makes lookup a coin toss.
-        KeychainIdentity.remove(label: identityLabel)
-        KeychainIdentity.remove(label: identityLabel + ".ca")
-        // The roads go with them. A grant against a different cluster would
-        // otherwise inherit the last one's addresses: trust makes dialing
-        // them harmless — they cannot present this cluster's chain — but they
-        // are noise in the race, and a record of where this device used to be
-        // is not something a re-pair should keep.
-        try? ClusterRoads.forget(for: identityLabel)
+        resetStoredClusterAuthority(label: identityLabel)
         let identity = try KeychainIdentity.store(
             privateKeyX963: key.x963Representation,
             certificateDER: grant.appCertDER,
@@ -280,5 +273,19 @@ public enum ReachEnrollment {
         )
         await ReachIdentityRegistry.shared.register(label: identityLabel, material: material)
         return material
+    }
+
+    /// Package-only identity replacement boundary. Direct and relay calling
+    /// cards belong to the same authenticated cluster identity but remain in
+    /// separate stores; replacing that identity removes both without ever
+    /// migrating endpoints between them.
+    package static func resetStoredClusterAuthority(label: String) {
+        KeychainIdentity.remove(label: label)
+        KeychainIdentity.remove(label: label + ".ca")
+        // A grant against another cluster must not inherit either tier of the
+        // prior cluster's transport hints. Trust would make them harmless, but
+        // they remain noise and private history.
+        try? ClusterRoads.forget(for: label)
+        try? ClusterRelayRoads.forget(for: label)
     }
 }

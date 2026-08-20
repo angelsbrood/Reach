@@ -15,7 +15,13 @@ let package = Package(
         // the take was shot on — a filing artifact, so it names itself.
         .package(
             url: "https://github.com/ml-explore/mlx-swift-lm.git",
-            revision: "83f3ef6dc5bc24daeea33cfd9e18ab1383bb0bc8"
+            revision: "83f3ef6dc5bc24daeea33cfd9e18ab1383bb0bc8",
+            // reachd uses MLX's container loader, LLM, and guided-generation
+            // products directly. The package's default-on Foundation Models
+            // adapter is a separate, unused surface whose SDK signatures can
+            // move between Xcode seeds; do not compile or link it into the
+            // daemon merely because the dependency enables it by default.
+            traits: []
         ),
         .package(url: "https://github.com/huggingface/swift-transformers.git", from: "1.3.0"),
         .package(url: "https://github.com/huggingface/swift-huggingface.git", from: "0.9.0"),

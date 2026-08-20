@@ -58,6 +58,10 @@ public struct HelloAck: WireFrame, Equatable {
     /// Endpoint-specific routes, preferred by new clients. Optional so a v0
     /// decoder built before mapped reachability continues to ignore it.
     public var roads: [RoadEndpoint]?
+    /// Lower-tier relay calling cards. This field has meaning only when the
+    /// selected dialect is v1: omission preserves the separate authenticated
+    /// relay store, an empty array clears it, and a nonempty array replaces it.
+    public var relayRoads: [RoadEndpoint]?
 
     public init(
         version: UInt8 = Wire.version,
@@ -65,7 +69,8 @@ public struct HelloAck: WireFrame, Equatable {
         models: [ModelDescriptor],
         addrs: [String]? = nil,
         port: UInt16? = nil,
-        roads: [RoadEndpoint]? = nil
+        roads: [RoadEndpoint]? = nil,
+        relayRoads: [RoadEndpoint]? = nil
     ) {
         self.version = version
         self.cluster = cluster
@@ -73,6 +78,88 @@ public struct HelloAck: WireFrame, Equatable {
         self.addrs = addrs
         self.port = port
         self.roads = roads
+        self.relayRoads = relayRoads
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case version
+        case cluster
+        case models
+        case addrs
+        case port
+        case roads
+        case relayRoads
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        version = try container.decode(UInt8.self, forKey: .version)
+        cluster = try container.decode(String.self, forKey: .cluster)
+        models = try container.decode([ModelDescriptor].self, forKey: .models)
+        addrs = try container.decodeIfPresent([String].self, forKey: .addrs)
+        port = try container.decodeIfPresent(UInt16.self, forKey: .port)
+        roads = try container.decodeIfPresent([RoadEndpoint].self, forKey: .roads)
+        if version == 1, container.contains(.relayRoads) {
+            // `decodeIfPresent` folds explicit null into omission, but those
+            // have different authority: omission preserves and null is not a
+            // dialect-v1 value at all. Decode the array directly so null is a
+            // wire error rather than a silent preserve.
+            let decoded = try container.decode([RoadEndpoint].self, forKey: .relayRoads)
+            try Self.validateRelayRoads(decoded, codingPath: decoder.codingPath + [CodingKeys.relayRoads])
+            relayRoads = decoded
+        } else {
+            relayRoads = nil
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(version, forKey: .version)
+        try container.encode(cluster, forKey: .cluster)
+        try container.encode(models, forKey: .models)
+        try container.encodeIfPresent(addrs, forKey: .addrs)
+        try container.encodeIfPresent(port, forKey: .port)
+        try container.encodeIfPresent(roads, forKey: .roads)
+        if version == 1, let relayRoads {
+            try Self.validateRelayRoads(relayRoads, codingPath: encoder.codingPath + [CodingKeys.relayRoads])
+            try container.encode(relayRoads, forKey: .relayRoads)
+        }
+    }
+
+    private static func validateRelayRoads(
+        _ roads: [RoadEndpoint],
+        codingPath: [any CodingKey]
+    ) throws {
+        var seen: Set<RoadEndpoint> = []
+        for road in roads {
+            guard road.port != 0,
+                  isCanonicalPrivateIPv4(road.host),
+                  seen.insert(road).inserted
+            else {
+                throw DecodingError.dataCorrupted(.init(
+                    codingPath: codingPath,
+                    debugDescription: "relay roads must be unique canonical private IPv4 endpoints with nonzero ports"
+                ))
+            }
+        }
+    }
+
+    private static func isCanonicalPrivateIPv4(_ host: String) -> Bool {
+        let parts = host.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count == 4 else { return false }
+        var octets: [UInt8] = []
+        for part in parts {
+            guard !part.isEmpty,
+                  part.allSatisfy(\.isNumber),
+                  let value = UInt8(part),
+                  String(value) == part
+            else { return false }
+            octets.append(value)
+        }
+        let rfc1918 = octets[0] == 10
+            || (octets[0] == 172 && (16 ... 31).contains(octets[1]))
+            || (octets[0] == 192 && octets[1] == 168)
+        return rfc1918 && (1 ... 254).contains(octets[3])
     }
 }
 

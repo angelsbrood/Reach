@@ -747,6 +747,52 @@ private final class MeshIntentTestLatch: @unchecked Sendable {
         #expect(leaked.level == .fail)
     }
 
+    @Test func relayRoadDeclarationRequiresExactV2AuthorityAndClearsOnlyFromDirectIntent() throws {
+        let desired = try relayIntent()
+        let healthy = RelayRoadDeclarationProvider.resolve(
+            version: 1,
+            port: 47_337,
+            intent: desired,
+            evidence: evidence(v2Status(for: desired)),
+            addresses: [[10, 86, 0, 1], [10, 87, 0, 1]],
+            pathEvidence: .available(path(for: desired))
+        )
+        #expect(healthy == .replace([.init(host: "10.87.0.1", port: 47_337)]))
+
+        let unattested = RelayRoadDeclarationProvider.resolve(
+            version: 1,
+            port: 47_337,
+            intent: desired,
+            evidence: evidence(v2Status(for: desired)),
+            addresses: [[10, 86, 0, 1]],
+            pathEvidence: .available(path(for: desired, includeRelay: false))
+        )
+        #expect(unattested == .preserve)
+
+        let v0 = RelayRoadDeclarationProvider.resolve(
+            version: 0,
+            port: 47_337,
+            intent: desired,
+            evidence: evidence(v2Status(for: desired)),
+            addresses: [[10, 86, 0, 1], [10, 87, 0, 1]],
+            pathEvidence: .available(path(for: desired))
+        )
+        #expect(v0 == .preserve)
+
+        var removed = desired
+        removed.generation += 1
+        removed.relay = nil
+        let clear = RelayRoadDeclarationProvider.resolve(
+            version: 1,
+            port: 47_337,
+            intent: removed,
+            evidence: evidence(nil, pid: nil),
+            addresses: [],
+            pathEvidence: .unavailable
+        )
+        #expect(clear == .clear)
+    }
+
     @Test func directAddressSelectionQuarantinesEveryNonDirectAddressOnTheMeshInterface() {
         let entries: [LocalAddresses.IPv4Entry] = [
             .init(interface: "lo0", address: [127, 0, 0, 1]),

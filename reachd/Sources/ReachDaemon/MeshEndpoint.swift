@@ -121,6 +121,18 @@ public enum MeshEndpoint {
         return .publicAddress
     }
 
+    /// Whether `host` belongs to the operator-configured relay overlay.
+    /// Direct mesh classification always takes precedence at the caller.
+    package static func isRelayOverlayAddress(_ host: String, network: String?) -> Bool {
+        guard let network,
+              let address = ipv4(host),
+              !isReachMeshAddress(address),
+              let prefix = MeshIPv4Prefix.parse(network), prefix.length == 24
+        else { return false }
+        let raw = address.reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
+        return MeshIPv4Prefix(network: raw, length: 32).isContained(in: prefix)
+    }
+
     static func ipv4(_ host: String) -> [UInt8]? {
         let parts = host.split(separator: ".", omittingEmptySubsequences: false)
         guard parts.count == 4 else { return nil }
