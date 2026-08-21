@@ -1,10 +1,16 @@
 #!/bin/sh
 set -eu
 
+# DEVELOPMENT-ONLY: this convenience package is not the deterministic Reach
+# product release. Release payloads and provenance are assembled and verified
+# by Tools/ReleasePackage from a sealed dependency depot.
+
 if [ "$#" -ne 1 ]; then
-    echo "usage: $0 OUTPUT-DIRECTORY" >&2
+    echo "usage: $0 OUTPUT-DIRECTORY (development package only)" >&2
     exit 64
 fi
+
+echo "warning: building a development-only helper package; not a Reach release artifact" >&2
 
 SOURCE_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 OUTPUT_DIR=$1

@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "product": {
+    "name": "Reach",
+    "version": "0.0.1",
+    "architecture": "arm64",
+    "minimumMacOS": "27.0.0"
+  },
+  "components": {
+    "host": {
+      "identifier": "systems.reach.host",
+      "version": "0.0.1"
+    },
+    "helper": {
+      "identifier": "systems.reach.meshd",
+      "version": "1.0.1"
+    }
+  },
+  "compatibility": {
+    "wireDialects": [
+      1,
+      0
+    ],
+    "helperStatusVersions": [
+      1,
+      2
+    ],
+    "helperSpecificationVersions": [
+      1,
+      2
+    ],
+    "hostMinimum": "0.0.1",
+    "hostMaximum": "0.0.1",
+    "helperMinimum": "1.0.1",
+    "helperMaximum": "1.0.1"
+  },
+  "consumedVersions": {
+    "systems.reach.host": [],
+    "systems.reach.meshd": [
+      "1.0.0"
+    ]
+  },
+  "hostBundles": [
+    "mlx-swift_Cmlx.bundle",
+    "swift-crypto_CCryptoBoringSSL.bundle",
+    "swift-crypto_CCryptoBoringSSLShims.bundle",
+    "swift-crypto_Crypto.bundle",
+    "swift-crypto_CryptoBoringWrapper.bundle",
+    "swift-crypto_CryptoExtras.bundle",
+    "swift-transformers_Hub.bundle"
+  ],
+  "untrackedAllowlist": [
+    "tasks/"
+  ]
+}

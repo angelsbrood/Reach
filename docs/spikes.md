@@ -3256,3 +3256,161 @@ deterministic unsigned package/notices only. Developer ID signing/notarization
 remains credential/network gated; install/update acceptance remains admin and
 clean-Mac gated; adoption remains September-gated; the consortium audit remains
 external. Keeper and its profile-authority rider remain Held.
+
+## S34 / 8A — the unsigned package knew every byte it owned (20–21 August 2026)
+
+S34 implemented only the deterministic unsigned Mac package selected by S33.
+Source authority was synchronized at `175184b`; the build used a clean export
+with submodule `6dfd538`, while the release tool and its strict configuration
+were captured separately as uncommitted implementation inputs. The installed
+daemon, helper, receipt, state, identities, service jobs and Keeper did not
+change. No Installer, `sudo`, VM, Developer ID operation, Apple upload or
+public artifact was used.
+
+### Frozen authority and offline build
+
+`release/release.json` freezes product/host **0.0.1**, helper **1.0.1**,
+identifiers `systems.reach.host` and `systems.reach.meshd`, arm64/macOS 27.0,
+wire `[1,0]`, helper status/specification `[1,2]`, the seven exact host bundles,
+and consumed helper version 1.0.0. `release/notices.json` freezes every expected
+dependency and notice family. `Tools/ReleasePackage` provides three
+dependency-free operations: snapshot already-cached dependencies, build from
+clean authority, and independently verify a completed candidate.
+
+The private sealed depot hashes to
+`a6a1cc0b…e3e6b` and contains 17 Swift pins, two Swift submodules, ten external
+Go modules, and 49 exact notice inputs. All build work after that snapshot ran
+offline. Source export rejects divergent refs, tracked dirt, unapproved
+untracked entries, dirty/wrong submodules, pin drift and reused/nonmonotonic
+versions. Process execution uses fixed executable paths and argument arrays,
+a dedicated process group created at spawn, one monotonic clock for execution
+and TERM/KILL deadlines, bounded group cleanup after timeout or normal leader
+exit, descendant-leak refusal, private exclusive logs and a sanitized environment;
+the inherited environment is never written to evidence. Shared filesystem
+enumeration is fail-closed: any traversal error rejects source, copy, payload,
+time-normalization and manifest operations instead of silently omitting entries.
+
+Two isolated clean exports produced byte-identical reachd
+`d41040ad…837e7`, helper `c66e5386…71d15`, host tree
+`0823c0d7…c829a`, helper tree `aecd725b…7279`, notices
+`d8c6c113…05354` and non-self-referential embedded manifest
+`434315e7…9523`. Swift/C warnings-as-errors, deterministic Swift hashing,
+serial compilation, reproducible linker ordering, default/fast Objective-C
+stubs and source-prefix normalization,
+coverage/profile exclusion, `strip -x`, deterministic ad-hoc identities,
+offline Go `-trimpath -buildvcs=false -buildid=`, arm64-only inspection and
+system-library-only linkage all passed. The older
+`mesh-helper/build-package.sh` now identifies itself as development-only; the
+release path independently rebuilds and assembles meshd.
+
+The original S34 candidate used `-objc_stubs_small` to eliminate an
+object-graph-dependent linker choice. Review correctly identified that as
+Apple's size-first dispatch mode rather than a neutral reproducibility flag.
+The final build restores the default/fast path and applies a narrow fail-closed
+Mach-O normalization before ad-hoc signing. It requires exactly two adjacent
+authenticated GOT bindings for the same `libobjc/_objc_msgSend`, the exact
+ordinary and 32-byte Objective-C fast-stub instruction shapes, and the expected
+thin arm64 sections; any different layout or symbol refuses the build. Build A
+used GOT ordinal 0 for all 164 fast stubs and ordinal 1 for its one ordinary
+message-send stub; build B exercised the inverse ordering. Both normalized to
+UUID `552BEE70-22CE-89DF-ADE4-84EBA2741CAF` and identical bytes while retaining
+2,200 ordinary 12-byte stubs and 164 32-byte fast stubs (`__objc_stubs` size
+0x1480, alignment 32). The repair therefore fixes equivalent binding order
+without selecting a new runtime-performance tradeoff.
+
+### Payload, provenance and notices
+
+One canonical entry table drives both the numeric BOM and a repository-owned
+old-portable-ASCII cpio writer. Stable path ordering, inode/link counts,
+commit-derived timestamps, numeric root:wheel ownership, exact modes and
+`gzip -9 -n` make payload semantics independent of the building filesystem.
+Independent verification joined **50 host records** and **6 helper records**
+entry-for-entry across allowlist, BOM and cpio. It proved the absolute
+`/usr/local/bin/reachd` symlink, exact seven bundles and MLX metallib, no hard
+links or special files, no xattrs/ACLs/AppleDouble, no cluster/operator/secret
+state, no Scripts or Resources, and ad-hoc executable identities `reachd` and
+`systems.reach.meshd` with no Team ID.
+
+The embedded schema-v1 manifest has no self-entry of any kind. External
+`release-provenance.json` records its completed size/hash and only the earned
+P0 source, P1 payload and U1 unsigned-container stages; signing, notary and
+staple fields are absent. Thirty-seven exact notice families generate
+`THIRD-PARTY-NOTICES.md` and a machine-readable notice manifest. Unknown
+dependencies, changed or missing license/NOTICE inputs, payload-excluded
+families and fabricated legal conclusions refuse the build. Independent
+verification reconstructs and requires complete canonical equality for the
+notice authority and all P0/P1/U1 provenance fields—including artifact paths,
+sizes and hashes—rather than accepting summary digests or a subset.
+
+The selected private outer package is
+`Reach-0.0.1-unsigned.pkg`, 13,715,807 bytes, SHA-256
+`c8d7896e…fcfc`, and has **no package signature**. A second productbuild call
+is `db893934…96cc`; recursively normalized components, PackageInfo, BOM, cpio,
+Distribution, member order and payload are identical at
+`a969fef4…8f22`. Only XAR creation time differs. The two host component hashes
+are `c7f6594f…e0669` and `937e4f30…b177`; the helper components are
+`e7623c9d…dea7` and `bd68bed4…5f75e`. Their actual hashes remain provenance;
+S34 does not pretend Apple-container bytes are reproducible when Apple writes
+time-varying metadata.
+
+### Refusal, transaction and verification matrix
+
+Static alternate-root cells passed fresh install, torn A→B detection, complete
+A rollback, B application, uninstall and retained-state reinstall while one
+independent state sentinel stayed exact. Unmanaged migration, downgrade,
+alias collision and second-login ownership were refused. Candidate-backed
+release-tool tests also refused tampered Distribution and payload bytes,
+missing helper, extra Scripts and stale provenance. Read-only Installer choice
+inspection showed both choices hidden, disabled and initially selected; an
+explicit choice-change file nevertheless deselected the helper while leaving
+the host selected. Therefore two mandatory payloads/receipts remain a clean-
+Mac acceptance requirement rather than an S34 claim.
+
+The candidate-backed release-tool suite passed **31/31 three complete times**.
+Each provenance variant first copied the complete authority tree, then reached
+and asserted its exact P0, P1-path, P1-size, stale-U1 or U1-hash refusal. The
+suite also proves monotonic timeout/cleanup bounds, process-group cleanup after
+timeout, refusal and cleanup when a successful leader leaves a descendant, full
+notice mutation refusal and unreadable-descendant traversal refusal. The three
+added tests prove inverse equivalent GOT orders normalize identically without
+changing default-fast dispatch shape, and reject size-first/unknown stubs or a
+nonexact authenticated binding set.
+Fresh ReachKit passed **95/95** and reachd **250/250 across 36 suites**. The
+mesh-helper offline module check, complete suite, race detector and vet passed.
+Independent Apple-tool inspection used `pkgutil`, `lsbom`, `xar`, `codesign`,
+`otool`, `file`, `xmllint`, `plutil` and exact privacy/license/path allowlists.
+Superseded probe failures are retained separately and attributed; they are not
+in the authoritative evidence pack.
+
+Installed parity remained exact: reachd `a9660a83…6b790` at PID 21242/run 29,
+helper `a784f257…b28ca8` at PID 20190/run 1, receipt version 1.0.0, helper
+generation 37 on `utun0`, one direct peer and relay configured false/ready true.
+Registry, host public key, CA and server certificate remain
+`75d9dbf9…0def`, `99526d11…a1d`, `03a08c64…c737` and
+`15302bb6…d5af`; the current log still records zero CA creation. Three bounded
+S34 dial retries reproduced only the known diagnostic-side
+`SecPKCS12Import -25291`. Installed bytes and identities are unchanged and join
+to the retained genuine 36 ms authenticated pass from those exact bytes with
+15 pass, 3 expected warnings and 0 fail.
+
+The privacy-minimized 0700/0600 evidence root is
+`/private/tmp/reach-s34-evidence-authoritative-fast-final-20260821`; it retains only the
+authoritative package manifests and reports, successful test/inspection
+transcripts, narrowly scoped release-tool/config sources, a privacy-safe
+runtime-parity summary and a verified **55-entry** manifest. Its final
+`SHA256SUMS` hashes to `a3559ff5…eb4c`; all 56 retained files including the
+seal itself are mode 0600. It excludes the 13 MB package
+duplicate, caches, raw diagnostic transcripts, broad project documents, user
+state, endpoints, identities, secrets and generated content. The earlier
+size-first, overbroad and failed/partial correction packs are explicitly
+superseded rather than treated as closeout authority. The candidate remains
+private at
+`/private/tmp/reach-s34-build-output-fast-normalized-final-20260821`.
+
+**Verdict: S34 / 8A COMPLETE — PRIVATE UNSIGNED SUBSTRATE ONLY.** Deterministic
+package/licensing implementation is unreimbursed M4 baseline. It is not signed,
+notarized, stapled, Gatekeeper-accepted, installed or public. With zero
+Developer ID Application and Installer identities available, no signing plan
+is promoted and the roadmap has no active Now item. Clean-Mac install/update
+acceptance, September adoption, accessibility and consortium audit remain
+separately gated. Keeper and its profile-authority rider remain Held.

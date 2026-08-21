@@ -1,0 +1,476 @@
+{
+  "schemaVersion": 1,
+  "expectedSwiftPins": [
+    {
+      "identity": "eventsource",
+      "revision": "a3a85a85214caf642abaa96ae664e4c772a59f6e"
+    },
+    {
+      "identity": "mlx-swift",
+      "revision": "0bb916c67f4b9e5c682cbe02a42c701c93ab5021"
+    },
+    {
+      "identity": "mlx-swift-lm",
+      "revision": "83f3ef6dc5bc24daeea33cfd9e18ab1383bb0bc8"
+    },
+    {
+      "identity": "swift-argument-parser",
+      "revision": "6a52f3251125d74daf04fcbd5e6f08a75d074382"
+    },
+    {
+      "identity": "swift-asn1",
+      "revision": "a9a5efd40eaf558a2bcd48d64b1d1646be686008"
+    },
+    {
+      "identity": "swift-atomics",
+      "revision": "0442cb5a3f98ab802acb777929fdb446bda11a34"
+    },
+    {
+      "identity": "swift-certificates",
+      "revision": "89fbc3714264cce8db8e4ec51b64e01c3e28c6c5"
+    },
+    {
+      "identity": "swift-collections",
+      "revision": "a0cb0954ecb21e4e31b0070e6ed5674e8556685a"
+    },
+    {
+      "identity": "swift-crypto",
+      "revision": "47d3869a7291f085c1fb9fb1e6d3b97a793f45c6"
+    },
+    {
+      "identity": "swift-huggingface",
+      "revision": "b721959445b617d0bf03910b2b4aced345fd93bf"
+    },
+    {
+      "identity": "swift-jinja",
+      "revision": "7d0b8880ef8e567dd4e0089f8b99fb354129017c"
+    },
+    {
+      "identity": "swift-nio",
+      "revision": "0b18836bd8b0162e7e17a995a3fbee20ed8f3b2b"
+    },
+    {
+      "identity": "swift-numerics",
+      "revision": "0c0290ff6b24942dadb83a929ffaaa1481df04a2"
+    },
+    {
+      "identity": "swift-syntax",
+      "revision": "79e4b74a295b6eb74a8b585e3a39d29e70c1dbd1"
+    },
+    {
+      "identity": "swift-system",
+      "revision": "50688cacbd41d547e9eb9f7a213542340b7c442b"
+    },
+    {
+      "identity": "swift-transformers",
+      "revision": "2fa33e1f5e7131a7fc64c28e6d161dcec0d24820"
+    },
+    {
+      "identity": "yyjson",
+      "revision": "8b4a38dc994a110abaec8a400615567bd996105f"
+    }
+  ],
+  "expectedGoModules": [
+    {
+      "path": "github.com/google/btree",
+      "revision": "v1.1.2"
+    },
+    {
+      "path": "golang.org/x/crypto",
+      "revision": "v0.37.0"
+    },
+    {
+      "path": "golang.org/x/net",
+      "revision": "v0.39.0"
+    },
+    {
+      "path": "golang.org/x/sys",
+      "revision": "v0.32.0"
+    },
+    {
+      "path": "golang.org/x/term",
+      "revision": "v0.31.0"
+    },
+    {
+      "path": "golang.org/x/text",
+      "revision": "v0.24.0"
+    },
+    {
+      "path": "golang.org/x/time",
+      "revision": "v0.7.0"
+    },
+    {
+      "path": "golang.zx2c4.com/wintun",
+      "revision": "v0.0.0-20230126152724-0fa3db229ce2"
+    },
+    {
+      "path": "golang.zx2c4.com/wireguard",
+      "revision": "v0.0.0-20250521234502-f333402bd9cb"
+    },
+    {
+      "path": "gvisor.dev/gvisor",
+      "revision": "v0.0.0-20250503011706-39ed1f5ac29c"
+    }
+  ],
+  "families": [
+    {
+      "id": "reach-root",
+      "scope": "reach-source",
+      "sourceRoot": ".",
+      "licensePaths": [
+        "LICENSE"
+      ],
+      "noticePaths": []
+    },
+    {
+      "id": "reach-mesh-helper",
+      "scope": "helper-source",
+      "sourceRoot": "mesh-helper",
+      "licensePaths": [
+        "LICENSE"
+      ],
+      "noticePaths": [
+        "NOTICE.md"
+      ]
+    },
+    {
+      "id": "swift-eventsource",
+      "scope": "host-swift-package",
+      "sourceRoot": "swift-checkouts/EventSource",
+      "licensePaths": [
+        "LICENSE.md"
+      ],
+      "noticePaths": []
+    },
+    {
+      "id": "swift-mlx",
+      "scope": "host-swift-package",
+      "sourceRoot": "swift-checkouts/mlx-swift",
+      "licensePaths": [
+        "LICENSE"
+      ],
+      "noticePaths": []
+    },
+    {
+      "id": "mlx-embedded-fmt",
+      "scope": "host-embedded-source",
+      "sourceRoot": "swift-checkouts/mlx-swift",
+      "licensePaths": [
+        "Source/Cmlx/fmt/LICENSE"
+      ],
+      "noticePaths": []
+    },
+    {
+      "id": "mlx-embedded-json",
+      "scope": "host-embedded-source",
+      "sourceRoot": "swift-checkouts/mlx-swift",
+      "licensePaths": [
+        "Source/Cmlx/json/LICENSE.MIT"
+      ],
+      "noticePaths": []
+    },
+    {
+      "id": "mlx-embedded-metal-cpp",
+      "scope": "host-embedded-source",
+      "sourceRoot": "swift-checkouts/mlx-swift",
+      "licensePaths": [
+        "Source/Cmlx/metal-cpp/LICENSE.txt"
+      ],
+      "noticePaths": []
+    },
+    {
+      "id": "mlx-embedded-mlx-c",
+      "scope": "host-embedded-source",
+      "sourceRoot": "swift-checkouts/mlx-swift",
+      "licensePaths": [
+        "Source/Cmlx/mlx-c/LICENSE"
+      ],
+      "noticePaths": []
+    },
+    {
+      "id": "mlx-embedded-mlx",
+      "scope": "host-embedded-source",
+      "sourceRoot": "swift-checkouts/mlx-swift",
+      "licensePaths": [
+        "Source/Cmlx/mlx/LICENSE"
+      ],
+      "noticePaths": []
+    },
+    {
+      "id": "swift-mlx-lm",
+      "scope": "host-swift-package",
+      "sourceRoot": "swift-checkouts/mlx-swift-lm",
+      "licensePaths": [
+        "LICENSE"
+      ],
+      "noticePaths": []
+    },
+    {
+      "id": "mlx-lm-embedded-xgrammar",
+      "scope": "host-embedded-source",
+      "sourceRoot": "swift-checkouts/mlx-swift-lm",
+      "licensePaths": [
+        "Libraries/MLXCXGrammar/xgrammar/LICENSE"
+      ],
+      "noticePaths": [
+        "Libraries/MLXCXGrammar/xgrammar/NOTICE"
+      ]
+    },
+    {
+      "id": "swift-argument-parser",
+      "scope": "host-swift-package",
+      "sourceRoot": "swift-checkouts/swift-argument-parser",
+      "licensePaths": [
+        "LICENSE.txt"
+      ],
+      "noticePaths": []
+    },
+    {
+      "id": "swift-asn1",
+      "scope": "host-swift-package",
+      "sourceRoot": "swift-checkouts/swift-asn1",
+      "licensePaths": [
+        "LICENSE.txt"
+      ],
+      "noticePaths": [
+        "NOTICE.txt"
+      ]
+    },
+    {
+      "id": "swift-atomics",
+      "scope": "host-swift-package",
+      "sourceRoot": "swift-checkouts/swift-atomics",
+      "licensePaths": [
+        "LICENSE.txt"
+      ],
+      "noticePaths": []
+    },
+    {
+      "id": "swift-certificates",
+      "scope": "host-swift-package",
+      "sourceRoot": "swift-checkouts/swift-certificates",
+      "licensePaths": [
+        "LICENSE.txt"
+      ],
+      "noticePaths": [
+        "NOTICE.txt"
+      ]
+    },
+    {
+      "id": "swift-collections",
+      "scope": "host-swift-package",
+      "sourceRoot": "swift-checkouts/swift-collections",
+      "licensePaths": [
+        "LICENSE.txt"
+      ],
+      "noticePaths": []
+    },
+    {
+      "id": "swift-crypto",
+      "scope": "host-swift-package",
+      "sourceRoot": "swift-checkouts/swift-crypto",
+      "licensePaths": [
+        "LICENSE.txt"
+      ],
+      "noticePaths": [
+        "NOTICE.txt"
+      ]
+    },
+    {
+      "id": "swift-huggingface",
+      "scope": "host-swift-package",
+      "sourceRoot": "swift-checkouts/swift-huggingface",
+      "licensePaths": [
+        "LICENSE"
+      ],
+      "noticePaths": []
+    },
+    {
+      "id": "swift-jinja",
+      "scope": "host-swift-package",
+      "sourceRoot": "swift-checkouts/swift-jinja",
+      "licensePaths": [
+        "LICENSE"
+      ],
+      "noticePaths": []
+    },
+    {
+      "id": "swift-nio",
+      "scope": "host-swift-package",
+      "sourceRoot": "swift-checkouts/swift-nio",
+      "licensePaths": [
+        "LICENSE.txt"
+      ],
+      "noticePaths": [
+        "NOTICE.txt"
+      ]
+    },
+    {
+      "id": "swift-nio-embedded-llhttp",
+      "scope": "host-embedded-source",
+      "sourceRoot": "swift-checkouts/swift-nio",
+      "licensePaths": [
+        "Sources/CNIOLLHTTP/LICENSE"
+      ],
+      "noticePaths": []
+    },
+    {
+      "id": "swift-numerics",
+      "scope": "host-swift-package",
+      "sourceRoot": "swift-checkouts/swift-numerics",
+      "licensePaths": [
+        "LICENSE.txt"
+      ],
+      "noticePaths": []
+    },
+    {
+      "id": "swift-syntax",
+      "scope": "host-swift-package",
+      "sourceRoot": "swift-checkouts/swift-syntax",
+      "licensePaths": [
+        "LICENSE.txt"
+      ],
+      "noticePaths": []
+    },
+    {
+      "id": "swift-system",
+      "scope": "host-swift-package",
+      "sourceRoot": "swift-checkouts/swift-system",
+      "licensePaths": [
+        "LICENSE.txt"
+      ],
+      "noticePaths": []
+    },
+    {
+      "id": "swift-transformers",
+      "scope": "host-swift-package",
+      "sourceRoot": "swift-checkouts/swift-transformers",
+      "licensePaths": [
+        "LICENSE"
+      ],
+      "noticePaths": []
+    },
+    {
+      "id": "swift-yyjson",
+      "scope": "host-swift-package",
+      "sourceRoot": "swift-checkouts/yyjson",
+      "licensePaths": [
+        "LICENSE"
+      ],
+      "noticePaths": []
+    },
+    {
+      "id": "go-google-btree",
+      "scope": "helper-go-module",
+      "sourceRoot": "go-modules/github.com/google/btree@v1.1.2",
+      "licensePaths": [
+        "LICENSE"
+      ],
+      "noticePaths": []
+    },
+    {
+      "id": "go-x-crypto",
+      "scope": "helper-go-module",
+      "sourceRoot": "go-modules/golang.org/x/crypto@v0.37.0",
+      "licensePaths": [
+        "LICENSE"
+      ],
+      "noticePaths": [
+        "PATENTS"
+      ]
+    },
+    {
+      "id": "go-x-net",
+      "scope": "helper-go-module",
+      "sourceRoot": "go-modules/golang.org/x/net@v0.39.0",
+      "licensePaths": [
+        "LICENSE"
+      ],
+      "noticePaths": [
+        "PATENTS"
+      ]
+    },
+    {
+      "id": "go-x-sys",
+      "scope": "helper-go-module",
+      "sourceRoot": "go-modules/golang.org/x/sys@v0.32.0",
+      "licensePaths": [
+        "LICENSE"
+      ],
+      "noticePaths": [
+        "PATENTS"
+      ]
+    },
+    {
+      "id": "go-x-term",
+      "scope": "helper-go-module",
+      "sourceRoot": "go-modules/golang.org/x/term@v0.31.0",
+      "licensePaths": [
+        "LICENSE"
+      ],
+      "noticePaths": [
+        "PATENTS"
+      ]
+    },
+    {
+      "id": "go-x-text",
+      "scope": "helper-go-module",
+      "sourceRoot": "go-modules/golang.org/x/text@v0.24.0",
+      "licensePaths": [
+        "LICENSE"
+      ],
+      "noticePaths": [
+        "PATENTS"
+      ]
+    },
+    {
+      "id": "go-x-time",
+      "scope": "helper-go-module",
+      "sourceRoot": "go-modules/golang.org/x/time@v0.7.0",
+      "licensePaths": [
+        "LICENSE"
+      ],
+      "noticePaths": [
+        "PATENTS"
+      ]
+    },
+    {
+      "id": "go-wintun",
+      "scope": "helper-go-module",
+      "sourceRoot": "go-modules/golang.zx2c4.com/wintun@v0.0.0-20230126152724-0fa3db229ce2",
+      "licensePaths": [
+        "LICENSE"
+      ],
+      "noticePaths": []
+    },
+    {
+      "id": "wireguard-go",
+      "scope": "helper-go-module",
+      "sourceRoot": "go-modules/golang.zx2c4.com/wireguard@v0.0.0-20250521234502-f333402bd9cb",
+      "licensePaths": [
+        "LICENSE"
+      ],
+      "noticePaths": []
+    },
+    {
+      "id": "go-gvisor",
+      "scope": "helper-go-module",
+      "sourceRoot": "go-modules/gvisor.dev/gvisor@v0.0.0-20250503011706-39ed1f5ac29c",
+      "licensePaths": [
+        "LICENSE"
+      ],
+      "noticePaths": []
+    },
+    {
+      "id": "go-toolchain",
+      "scope": "helper-toolchain",
+      "sourceRoot": "go-toolchain",
+      "licensePaths": [
+        "LICENSE"
+      ],
+      "noticePaths": [
+        "PATENTS"
+      ]
+    }
+  ]
+}

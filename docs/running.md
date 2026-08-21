@@ -1,5 +1,101 @@
 # Running the daemon
 
+## Building the private unsigned Mac package
+
+`Tools/ReleasePackage` builds and independently verifies the deterministic
+arm64 package substrate selected in S33. Its output is **private, unsigned,
+unnotarized, and not an installable or trusted Reach release**. Do not pass the
+result to Installer, distribute it, or treat its ad-hoc executable signatures
+as a public trust chain.
+
+The tool has three operations. `snapshot-dependencies` seals sources that are
+already cached locally; it never downloads them. `build` exports the exact
+clean source commit, rebuilds reachd and meshd twice with isolated caches,
+assembles the two scriptless components, and emits external provenance.
+`verify` expands an existing candidate into a fresh directory and independently
+joins its Distribution, PackageInfo, BOM, cpio, payload, signature class,
+architecture, linked libraries, notices, manifest, and provenance.
+The reachd build retains Apple's default/fast Objective-C stubs. A fail-closed
+post-link normalizer resolves only the nondeterministic choice between two
+adjacent authenticated GOT bindings for the same `_objc_msgSend` symbol, then
+derives a content-bound UUID before ad-hoc signing. It requires the exact
+ordinary and 32-byte fast-stub shapes and refuses small or unknown stubs, so
+reproducibility does not select the linker's size-first dispatch mode.
+
+Build the tool in an explicit scratch product:
+
+```sh
+/usr/bin/swift build \
+  --package-path /absolute/path/to/Reach/Tools/ReleasePackage \
+  --configuration release \
+  --scratch-path /private/tmp/reach-release-tool-build
+REACH_RELEASE_BIN=$(/usr/bin/swift build \
+  --package-path /absolute/path/to/Reach/Tools/ReleasePackage \
+  --configuration release \
+  --scratch-path /private/tmp/reach-release-tool-build \
+  --show-bin-path)
+```
+
+Create the depot from explicit already-cached inputs. The paths below are
+placeholders; the operation refuses missing, changed, or unclassified source
+and license inputs:
+
+```sh
+"$REACH_RELEASE_BIN/reach-release-package" \
+  snapshot-dependencies \
+  --repository /absolute/path/to/clean/Reach \
+  --swift-checkouts /absolute/path/to/swiftpm/checkouts \
+  --go-module-cache /absolute/path/to/preseeded/go-module-cache \
+  --go-root /absolute/path/to/pinned/go/root \
+  --notices /absolute/path/to/Reach/release/notices.json \
+  --output /private/tmp/reach-release-depot \
+  --logs /private/tmp/reach-release-depot-logs
+```
+
+Then build from synchronized clean source. The repository authority must have
+`HEAD == main == origin/main`, exact clean submodules, no tracked changes, and
+no untracked entry except `tasks/`:
+
+```sh
+"$REACH_RELEASE_BIN/reach-release-package" build \
+  --repository /absolute/path/to/clean/Reach \
+  --release-tool-source /absolute/path/to/Reach/Tools/ReleasePackage \
+  --configuration /absolute/path/to/Reach/release/release.json \
+  --notices /absolute/path/to/Reach/release/notices.json \
+  --depot /private/tmp/reach-release-depot \
+  --work /private/tmp/reach-release-work \
+  --output /private/tmp/reach-release-output
+```
+
+Verify the selected candidate in a new scratch root:
+
+```sh
+"$REACH_RELEASE_BIN/reach-release-package" verify \
+  --package /private/tmp/reach-release-output/Reach-0.0.1-unsigned.pkg \
+  --release-tool-source /absolute/path/to/Reach/Tools/ReleasePackage \
+  --configuration /absolute/path/to/Reach/release/release.json \
+  --notices /absolute/path/to/Reach/release/notices.json \
+  --depot /private/tmp/reach-release-depot \
+  --provenance /private/tmp/reach-release-output/release-provenance.json \
+  --notice-manifest /private/tmp/reach-release-output/notice-manifest.json \
+  --scratch /private/tmp/reach-release-verify \
+  --report /private/tmp/reach-release-output/independent-verification.json
+```
+
+The embedded `payload-manifest.json` deliberately has no self-entry. Its final
+size and hash live only in `release-provenance.json`. Different unsigned outer
+package hashes are expected when XAR creation time differs; the verifier strips
+only that field and requires recursively identical component, BOM, cpio,
+Distribution, and payload semantics. Any other difference refuses the build.
+
+Both component choices are hidden, initially selected, and UI-disabled, but a
+read-only S34 choice-file probe could deselect the helper. That means the clean-
+Mac gate must still prove both payloads and receipts before the two components
+can be called mandatory in practice. S34 did not invoke Installer or mutate a
+receipt. Developer ID Application/Installer signing, notarization, stapling,
+Gatekeeper, migration, update, rollback, uninstall, and second-login ownership
+remain later separately authorized gates.
+
 ## The reference relay hub is accepted substrate, not a running Reach service
 
 `relay-hub/` has a measured scriptless package boundary on native Ubuntu 26.04
