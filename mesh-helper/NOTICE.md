@@ -8,5 +8,13 @@ release tag `0.0.20250522`, commit
 WireGuard is a registered trademark of Jason A. Donenfeld. The embedded
 implementation is distributed under the MIT license; its copyright and license
 notices are retained in the upstream source and Go module cache used to build
-the single helper executable. Reach's own helper code is also MIT licensed
-under the repository's `LICENSE`.
+the single helper executable.
+
+The Reach-authored Go sources in `mesh-helper/` carry
+`SPDX-License-Identifier: MIT` and are distributed under the dedicated
+`mesh-helper/LICENSE`. This file-level license is distinct from the repository
+root's Apache License 2.0.
+
+The statically linked executable also contains the Go runtime and standard
+library. Their license and patent notices are retained with the release notice
+inputs used to build the helper.

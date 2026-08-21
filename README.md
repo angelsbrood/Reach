@@ -91,7 +91,10 @@ Identity designed by [Vanessa Spiral](https://vanessaspiral.com).
 
 ## License
 
-Apache-2.0. Copyright 2026 Cassie Spiral.
+Reach is Apache-2.0, except for the Reach-authored Go sources in
+`mesh-helper/` and `relay-hub/`, whose file-level SPDX declarations and
+dedicated `mesh-helper/LICENSE` and `relay-hub/LICENSE` are MIT. Copyright 2026
+Cassie Spiral.
 
 Third-party code is carried under its own terms and marked as such: the
 patched WireGuardKit submodule under `Keeper/vendor/`, the two wg-quick parser

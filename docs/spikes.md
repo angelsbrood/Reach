@@ -33,18 +33,18 @@ the decision. Kill criteria come from the pre-filing plan.
 | S27 | Can the pinned provider restore one exact public generation across process death on every shipped route? | **EVIDENCED STOP / RAW KV IS NOT A GENERATION** (2026-08-13) — ordinary, guided, allowed-tool and required-tool execution all lack complete serializable provider state; corrupted cache files were accepted, and client-owned tool effects require acknowledgement/idempotency rather than inferred recovery |
 | S28 | Would explicit structured-partial wire events add a capability beyond Foundation Models' locally derived typed snapshots? | **EVIDENCED STOP / THE TYPED VALUE WAS ALREADY ON THE CLIENT** (2026-08-13) — 21/21 real TLS/wire/daemon/guided executions plus synthetic typed probes found no structured information absent from the text-derived surface; candidate payload models added overhead and the public executor exposes no structured injection action |
 
-## Upstream checkpoint — nested tool grammar schema test (2026-08-11)
+## Upstream checkpoint — nested tool grammar schema test (2026-08-11; merged 2026-08-17)
 
-The first prepared post-S19 dependency contribution is filed as
+The first prepared post-S19 dependency contribution was filed as
 [`mlx-swift-lm` PR #527](https://github.com/ml-explore/mlx-swift-lm/pull/527).
 Fresh upstream `main` was `0b47e698`; the publication commit is `634345a`,
-whose stable patch ID exactly matches prepared commit `7828993`. The PR is
-open, ready for review and mergeable, with review still required. It contains
-one commit and one changed test file (+12/-6), and changes no library, package,
-public API or runtime behavior. Post-filing review found no actionable
-correctness, security, performance or maintainability issue. GitHub Actions run
-`31547983222` completed immediately as `action_required` with zero jobs: an
-external approval gate, not a failing check and not a CI pass.
+whose stable patch ID exactly matches prepared commit `7828993`. The PR merged
+on 17 August as upstream commit `ef0b0cc945896216902ccd7f8df1590eb848485f`.
+It contains one commit and one changed test file (+12/-6), and changes no
+library, package, public API or runtime behavior. Post-filing review found no
+actionable correctness, security, performance or maintainability issue. After
+the initial approval-gated run, GitHub Actions completed both `lint` and
+`mac_build_and_test` successfully before merge.
 
 The current-base `ToolCallingSchemaTests` reproduced the stale assertion at
 **11/12**: only `grammarBuilderHoistsNestedDefsInBothArms()` failed at its
@@ -57,7 +57,7 @@ continuation-test failures, while the baseline additionally failed
 all documentation builds passed.
 
 This is ecosystem maintenance, not a Reach product or grant-frontier change.
-The project record is therefore **four merged upstream contributions and one
+The project record is therefore **five merged upstream contributions and none
 open**. The signed-range prototype `fd04f2f` remains unpushed and unfiled but is
 now **retired**, not pending publication: it hand-edits MLX's pinned xgrammar
 v0.1.30 snapshot even though its vendor marker routes patches upstream, and
@@ -131,7 +131,8 @@ at the founder's direction they are neither pushed nor filed while another
 architectural hardening and as a prerequisite for any future sampled path,
 not as a claimed defect fixed in the current product.
 
-**Later status (11 August):** the structural-test commit became PR #527; the
+**Later status:** the structural-test commit became PR #527 on 11 August and
+merged as `ef0b0cc9` on 17 August after lint and macOS build/test passed; the
 signed-range prototype was retired unfiled after the upstream/vendor review;
 the finite-double prototype remains parked. The paragraph above records the
 S19 stop-time state rather than the current publication queue.
@@ -3091,3 +3092,167 @@ separately persisted relay calling cards as a measured 100 ms direct-first
 fallback while exact v0 peers remain compatible. This is still not an
 operational relay: no public endpoint or provisioned device exists, and Keeper
 remains Held. No new Now item is promoted without a separate founder ruling.
+
+## S33 — Mac release distribution kept cluster state out of the package (20 August 2026)
+
+S33 was an architecture/evidence pass. It changed no product, package script,
+installed byte, certificate, receipt, service, state, Keeper target or public
+artifact. Source, `main` and `origin/main` were synchronized at `7c05914`; the
+existing PR #527 merge correction above and unrelated `tasks/` were preserved.
+
+### Baseline and current distribution gap
+
+Installed reachd remained `a9660a83…6b790` at PID 21242/run 29 beside its seven
+canonical bundles. Root meshd remained `a784f257…b28ca8` at PID 20190/run 1,
+generation 37 on `utun0`, one direct peer and relay verified absent. The helper
+receipt remained `systems.reach.meshd` version 1.0.0; that identifier/version
+is therefore consumed and cannot name the first new helper package. CA creation
+remained zero. Identity and registry parity was checked; the corrected sealed
+pack retains counts and outcomes only, not raw identity, state, address or
+endpoint material.
+
+Both installed executables are arm64 and ad-hoc signed with no Team ID. The
+current keychain exposed **zero** valid Developer ID Application identities and
+**zero** valid Developer ID Installer identities. S33 neither requested nor
+used one. Four current `doctor --dial` attempts reproduced only the known
+diagnostic-side `SecPKCS12Import -25291`; the exact unchanged daemon is joined
+to the retained genuine 36 ms authenticated result with **15 pass, 3 expected
+warnings, 0 waiting and 0 fail**.
+
+A clean exported-HEAD arm64 release staged exactly reachd plus seven adjacent
+bundles. Reachd hashes to `4ab18b72…3dc4`; the complete staged file payload is
+61,348,677 bytes. Swift and C warnings-as-errors and coverage/profile exclusion
+passed. Four upstream MLX Metal C++17-extension diagnostics remain explicitly
+attributed rather than called zero warnings. The clean exported helper is
+`c82b425e…dee4`; it differs from the installed Git-checkout build because
+ambient Go VCS stamping is not normalized. The package implementation pass
+must disable that ambient input or replace it with explicit manifest
+provenance and prove two clean builds identical.
+
+Apple's current direct-distribution contract was rechecked against local tools
+and primary documentation. A signed installer is the natural container for
+multiple components or fixed paths; executable code and installer containers
+use distinct Developer ID identity classes; normal notarization requires
+Developer ID signing, hardened runtime and secure timestamps, and a supported
+ticket can be stapled. None of those credentialed gates was claimed here.
+
+### Selected architecture
+
+S33 selected **one arm64 flat product installer with two mandatory,
+separately versioned, scriptless components**:
+
+| component | immutable payload | selected authority |
+|---|---|---|
+| `systems.reach.host` | `/Library/Application Support/Reach/Host/reachd`, its seven adjacent bundles, release license/notices/non-self-referential payload manifest and `/usr/local/bin/reachd` as one symlink | Installer places root-owned bytes; a named login user later binds the LaunchAgent |
+| `systems.reach.meshd` | `/Library/PrivilegedHelperTools/systems.reach.meshd` and `/Library/LaunchDaemons/systems.reach.meshd.plist` | Installer places root-owned bytes; mesh application remains a separate administrator action even if launchd starts the unconfigured KeepAlive process |
+
+The Distribution declares arm64, hides/selects/UI-disables both components,
+sets both top-level package references active, disallows customization and has
+no scripts. Read-only choice inspection showed that UI disablement alone is not
+authority against an explicit choice-change file; later clean-VM acceptance
+must prove both payloads and receipts. Host executable mode is 0755;
+bundle directories/files are 0755/0644; release metadata is 0644; helper and
+plist remain 0555/0644. Numeric BOM inspection proved the intended root:wheel
+owners and modes. No login-owned path, cluster state, CA, registry, model,
+secret, log, mesh intent, helper active/pending state, Keeper artifact, Linux
+relay artifact, build cache or evidence is payload.
+
+The successful nonprivileged probe produced host component
+`0e28713d…2ce` and unchanged helper component `466862fe…5b6c`. A corrected
+two-build probe produced different unsigned Apple-container hashes
+`9e5a1e00…c25b` and `6cbc783c…0939`, while normalized expanded semantics were
+byte-identical at `13062790…c7ad`; XAR creation time accounted for the outer
+difference. These are synthetic probe bytes, not a release and not hashes
+expected to survive later signing.
+Expansion found no Scripts or AppleDouble entries. A synthetic alternate-root
+A→B→A sequence restored the whole A executable while an independent state
+sentinel remained byte-identical. Changed executable, missing bundle and wrong
+mode all refused. No Installer was invoked and no live receipt changed.
+
+One combined package wins over split host/helper artifacts because it preserves
+the same scriptless user/root boundary while adding a single compatibility and
+provenance root. Split artifacts add two public trust chains and a larger
+mixed-version window. A containing app/`SMAppService` shell was not materially
+superior enough to justify a new product/lifecycle ruling. Package-manager or
+source installation may remain an expert convenience but is not the
+first-class trust path.
+
+### Authority, provenance and transactions
+
+Installer may place immutable root-owned release data. It never selects the
+cluster owner, reads login state, starts reachd as root, creates a CA or applies
+mesh intent. After installation, the explicitly chosen login user binds the
+same GUI-domain LaunchAgent. The installed KeepAlive plist may start an
+unconfigured helper process at reboot; mesh application remains the separate
+visible administrator action, and no interface, route or active state may
+appear before it.
+
+The manifest authority is acyclic. Embedded `payload-manifest.json` has no
+self-entry—its path, type, owner, group, mode, size and hash are all omitted—
+and excludes every component/BOM/container/signing/notary/staple hash. An
+external `release-provenance.json` records the completed manifest's path, size
+and hash plus each later stage: P0 clean source; P1 payload; U1 unsigned-
+container semantics; P2
+separately Developer-ID-signed executables; P3 Installer-signed container; P4
+notarized container plus log; P5 stapled public candidate. Unearned fields are
+absent, and no hash is claimed to survive signing or stapling.
+
+The first package must also migrate present reality: inventory and preserve the
+unmanaged login-owned eight-item host, refuse `/usr/local/bin`/PATH collisions,
+stop only its exact GUI job, install and verify both package components, rebind
+that same LaunchAgent to the packaged canonical path, authenticate, and only
+then retire the old unit. A second-login clean-guest cell must prove or reject
+system-wide one-owner enforcement; any competing authority stops for a product
+ruling rather than inventing root-owned owner state.
+
+Updates stop the exact login agent before replacement, verify one complete
+compatible host/helper product, reload the helper separately if its bytes
+changed, then restart the same user service and reprove identities, zero CA
+creation, supervision, selftests and authenticated dialing. A failure keeps the
+service stopped until a complete compatible A or B is authoritative. Rollback
+restores immutable software only, never state. Downgrade refuses by default.
+Uninstall removes package-owned bytes/receipts and separately unloads jobs;
+user/root operator state is retained unless its exact targets are separately
+authorized for destruction.
+
+The deterministic notice input includes Reach/Apache-2.0, the Reach-authored
+helper's file-scoped MIT license, all pinned SwiftPM root and embedded MLX/
+xgrammar licenses/notices, Swift Crypto/BoringSSL notice material, the pinned
+WireGuard/wireguard-go/Go graph, and the statically linked Go runtime/standard
+library. The corrected helper notice identifies both Reach helper code and
+wireguard-go as separately attributable MIT code. Keeper, Example,
+Linux relay-hub and model weights remain excluded because they are not this Mac
+payload. Counsel review of the generated notice presentation and export/
+cryptography classification remain explicit open questions, not legal
+conclusions or silent release blockers.
+
+### Later acceptance and closeout
+
+The later acceptance rig is a disposable native-arm64 macOS VM created from
+one pinned Apple restore image with no host-home share or host keychain/state.
+Its matrix covers static provenance, nested signatures, package/notary/staple/
+Gatekeeper, fresh install, reboot-before-mesh-application (allowing only the
+unconfigured state directories, privacy-safe status and root control socket),
+first unmanaged-host
+migration, alias/PATH collision, second-user contention, explicit user binding,
+mesh application, retained state, A→B/interruption/rollback, component
+refusal/downgrade, lifecycle, tamper, uninstall and reinstall. S33 did not
+download an image, create a VM, sign, notarize, install or publish anything.
+
+The private 0700/0600 evidence root is
+`/private/tmp/reach-s33-release-scope-20260820`; its corrected 31-entry manifest
+verifies and `SHA256SUMS` hashes to `d0634bcf…68c6`. It includes the public
+installed map, counts-only identity record, redacted runtime/dial result,
+shipping/exclusion/notice ledgers, Apple contract, decision matrix, threat and
+transaction models, payload-manifest/external-provenance contract, corrected
+package-choice/normalization probe, acceptance rig/matrix, follow-on ledger and
+privacy-scanned successful build transcripts. Raw diagnostics, user paths,
+private state, labels, endpoints, identity material and superseded failures are
+not retained.
+
+**Verdict: S33 COMPLETE — ARCHITECTURE BASELINE ONLY.** The selected contract
+is unreimbursed M4 baseline. `PLAN-release-package.md` is sole Now for
+deterministic unsigned package/notices only. Developer ID signing/notarization
+remains credential/network gated; install/update acceptance remains admin and
+clean-Mac gated; adoption remains September-gated; the consortium audit remains
+external. Keeper and its profile-authority rider remain Held.
