@@ -3480,3 +3480,61 @@ authority. S35 stays stopped. After this correction is separately committed
 and `HEAD == main == origin/main`, the same three-process/six-build gate must
 run from that synchronized correction commit and seal one new U1 authority
 before any identity resolution, signing, timestamp or Apple submission.
+
+### S34 synchronized final-U1 authority (22 August 2026)
+
+The correction landed and refs synchronized at
+`92b233e9c8c0ebfee57d0aceb182130d0bd7fa0b`. Before any credential action, a
+fresh committed release tool ran the final gate from three physical,
+unaliased, byte-exact caller work roots of 54, 74 and 91 UTF-8 bytes. Each
+process performed its own A/B build with isolated mutable roots and the sealed
+offline depot `a6a1cc0b…c3e6b`; all six comparison records name the fixed
+canonical compiler-visible authority at 240 UTF-8 bytes.
+
+All six reachd executables are exactly `fecb7da1…254b`; all six helper
+executables are `c66e5386…71d15`; all three embedded manifests are
+`e92463b7…07957`; and all three normalized U1 semantic digests are
+`3b7324a9…305d`. The three actual selected outer packages are
+`a8ff82e0…14a88`, `f671015b…16dec` and `ff9dec80…27fed`; independent recursive
+normalization attributes their difference only to XAR creation time. Every
+selected package independently joined exactly 50 host and 6 helper records and
+contained neither Scripts nor Resources. No historical or preliminary S34
+semantic digest appears in the final authority.
+
+Invocation 1 build A is the unambiguous S35 parent:
+`/private/tmp/reach-s34-final-u1-sync-one-20260822-output/Reach-0.0.1-unsigned.pkg`,
+13,715,801 bytes, SHA-256 `a8ff82e0…14a88`, normalized semantics
+`3b7324a9…305d`. Candidate-backed release-tool tests passed **37/37 three
+complete times** from separate scratch products. They include independent
+candidate verification, complete P0/P1/U1 mutation refusals, process cleanup,
+and the dot-segment, nested-symlink, case-folded and Unicode-normalized
+path-authority regressions.
+
+The privacy-minimized final authority pack is
+`/private/tmp/reach-s34-final-u1-authority-20260822`. Its **39-entry** manifest
+verifies; all 40 retained files including the seal are 0600 below 0700
+directories, and `SHA256SUMS` hashes to `556db65d…5612`. Exact source
+snapshots, complete source hashes, schema-v2 comparisons, provenance,
+manifests, independent reports, sanitized build-command records and three
+successful test transcripts are retained. Packages, caches, raw diagnostics,
+credentials, identities, endpoints, prompts, model output, Keeper and `tasks/`
+are excluded. An earlier interrupted partial invocation is explicitly outside
+this authority; the final gate restarted only after two unexpected exact-copy
+untracked files were founder-authorized into a recoverable `/private/tmp`
+quarantine and the repository again contained only `tasks/`.
+
+Read-only live parity remained exact: installed reachd is
+`a9660a83…6b790` at PID 21242/run 29; helper is `a784f257…b28ca8` at PID
+20190/run 1 with receipt 1.0.0; helper generation 37 is direct-ready with one
+peer and relay configured false/ready true. Four cluster identity artifact
+classes and one device record remain present, and the retained log has zero CA
+creation events. No fresh diagnostic replaced the retained exact-byte 36 ms
+authenticated result with 15 pass, 3 expected warnings and 0 fail.
+
+**Verdict: the bounded S34 correction is complete and final U1 is earned.**
+The old equal-root and preliminary correction hashes remain history, not
+fallback authority. No Developer ID identity was resolved or used; no profile
+was created or validated; and nothing was signed, timestamped, submitted,
+notarized, stapled, installed, published, restarted or changed at runtime.
+S35 may now name this U1, but credentialed execution remains paused for the
+founder's separate review checkpoint.
