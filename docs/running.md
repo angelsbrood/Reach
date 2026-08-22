@@ -121,9 +121,110 @@ Both component choices are hidden, initially selected, and UI-disabled, but a
 read-only S34 choice-file probe could deselect the helper. That means the clean-
 Mac gate must still prove both payloads and receipts before the two components
 can be called mandatory in practice. S34 did not invoke Installer or mutate a
-receipt. Developer ID Application/Installer signing, notarization, stapling,
-Gatekeeper, migration, update, rollback, uninstall, and second-login ownership
-remain later separately authorized gates.
+receipt. S35 added private Developer ID signing, notarization, and stapling;
+Gatekeeper installation, migration, update, rollback, uninstall, and second-
+login ownership remain later separately authorized gates.
+
+## Finalizing and verifying a private notarized candidate
+
+S35 adds three credential-bound operations to the release tool. They produce a
+private P2 through P5 chain from one already-verified U1 authority. They do not
+install, publish, upload to a release feed, mutate receipts, or prove clean-Mac
+lifecycle behavior. Keep every work, state, and output root private and use
+physical canonical `/private/tmp/...` spellings.
+
+`sign` consumes the exact frozen unsigned authority and two distinct source
+authorities: the committed S34 tool that minted U1 and the S35 finalizer. It
+requires exactly one valid Developer ID Application identity and one valid
+Developer ID Installer identity in the default login Keychain, selects them by
+certificate fingerprint internally, signs both executable leaves with Hardened
+Runtime and secure timestamps, and signs the outer package:
+
+```sh
+"$REACH_RELEASE_BIN/reach-release-package" sign \
+  --unsigned-authority /private/path/to/verified-u1-authority \
+  --unsigned-tool-source /private/path/to/exact-s34-tool-source \
+  --finalizer-tool-source /absolute/path/to/Reach/Tools/ReleasePackage \
+  --configuration /absolute/path/to/Reach/release/release.json \
+  --notices /absolute/path/to/Reach/release/notices.json \
+  --depot /private/path/to/sealed-dependency-depot \
+  --work /private/tmp/reach-sign-work \
+  --output /private/tmp/reach-sign-output
+```
+
+Create the local credential profile only in an interactive Terminal. Use a
+private, nonsynchronized profile label and Apple ID authentication. Never put
+the Apple ID, app-specific password, private key, profile label, local identity
+selector, or credential environment into a script, command record, repository
+file, or evidence pack. Verification evidence necessarily retains public Team
+ID, certificate-chain hashes and public signing metadata; those are not
+credentials:
+
+```sh
+/usr/bin/xcrun notarytool store-credentials PRIVATE_PROFILE_LABEL
+```
+
+After independently verifying the exact P3 hash and complete pre-notary report,
+submit it once. The durable journal owns the lineage. A timeout resumes by the
+persisted submission UUID; it never licenses a second upload. An ambiguous
+upload requires the explicit recovery path and renewed authority described by
+the retired S35 plan. Before profile validation or upload, the notarizer now
+reconstructs the complete Distribution/BOM/cpio/manifest/notice authority,
+verifies both nested signatures and the Installer signature, consumes the
+canonical independent P3 report, and writes its hash beside the exact P3 hash
+in a schema-v2 journal. An unfinished legacy schema-v1 journal fails closed.
+Existing exact accepted wait/log files are mode-checked, revalidated, and
+reused after interruption rather than overwritten or uploaded again.
+
+```sh
+"$REACH_RELEASE_BIN/reach-release-package" notarize \
+  --signed-authority /private/tmp/reach-sign-output \
+  --configuration /absolute/path/to/Reach/release/release.json \
+  --notices /absolute/path/to/Reach/release/notices.json \
+  --depot /private/path/to/sealed-dependency-depot \
+  --keychain-profile PRIVATE_PROFILE_LABEL \
+  --state /private/tmp/reach-notary/journal.json \
+  --output /private/tmp/reach-notarized-output
+```
+
+Finally, verify P5 from a fresh scratch root. Verification requires the signed
+P0, P1, and U1 stages to equal the retained U1 provenance byte-for-byte, binds
+the frozen U1 source and the exact S35 finalizer source that originally minted
+P2, checks every embedded certificate in order, and then joins P3 parent, Apple
+acceptance, staple, nested signatures, BOM/payload semantics, and local
+Installer assessment. Run the corrected verifier executable from the current
+checkout, but pass the retained finalizer snapshot whose canonical tree digest
+is `264ee25395a16847a770e76de1b474fe71310b62b9f4f6f8ddde54b8cd98925e`:
+
+```sh
+"$REACH_RELEASE_BIN/reach-release-package" verify-release \
+  --package /private/tmp/reach-notarized-output/Reach-0.0.1.pkg \
+  --provenance /private/tmp/reach-notarized-output/release-provenance.json \
+  --unsigned-tool-source /private/path/to/exact-s34-tool-source \
+  --finalizer-tool-source /private/tmp/reach-s35.Aunigs/finalizer-tool-source/Tools/ReleasePackage \
+  --configuration /absolute/path/to/Reach/release/release.json \
+  --notices /absolute/path/to/Reach/release/notices.json \
+  --depot /private/path/to/sealed-dependency-depot \
+  --scratch /private/tmp/reach-verify-release \
+  --report /private/tmp/reach-notarized-output/p5-independent-verification.json
+```
+
+When the report is written directly into the signed authority root, the
+verifier atomically regenerates that root's `SHA256SUMS`. The result is one
+independently checkable sidecar tree containing the P5 report and every small
+authority file. A manifest that merely indexes files split across multiple
+roots is composite evidence, not a directly checkable `SHA256SUMS` authority.
+
+The six signed-candidate tests are explicitly disabled with the reason
+`signed-candidate authority environment is absent` when none of their six
+authority variables is present. A partial or malformed environment fails. The
+credentialed acceptance gate requires all six to run and rejects a test result
+containing a disabled candidate cell.
+
+The accepted S35 package remains private. Do not pass it to Installer or share
+it as a release until the separate native clean-Mac install/update/rollback/
+uninstall matrix earns both mandatory receipts, retained state, and complete
+recovery behavior.
 
 ## The reference relay hub is accepted substrate, not a running Reach service
 
@@ -549,8 +650,10 @@ package installs exactly the executable at
 `/Library/PrivilegedHelperTools/systems.reach.meshd` and a fixed
 `/Library/LaunchDaemons/systems.reach.meshd.plist`. The job is `RunAtLoad`,
 unconditionally kept alive, throttled to ten seconds, and starts with umask
-`077`. Developer ID signing and notarized distribution remain future release
-work; the local package records hashes and uses an ad-hoc code signature.
+`077`. The currently installed local package records hashes and still uses an
+ad-hoc code signature. S35 produced a separate private Developer-ID-signed and
+notarized release candidate without installing it; trusted clean-Mac install/
+update/rollback/uninstall acceptance remains future work.
 
 The helper's version-1 input is data, not a configuration language. It fixes
 the host at `10.86.0.1/24`, UDP `51820`, MTU `1280`, installs the connected

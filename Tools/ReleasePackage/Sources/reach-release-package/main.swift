@@ -38,6 +38,17 @@ struct Arguments {
     return try ReleasePathAuthority.absoluteURL(value, label: "--\(key)")
   }
 
+  func requireString(_ key: String) throws -> String {
+    guard let value = values["--\(key)"], !value.isEmpty else {
+      throw ReleasePackageError.invalidArgument("--\(key) requires a value")
+    }
+    return value
+  }
+
+  func optionalString(_ key: String) -> String? {
+    values["--\(key)"]
+  }
+
   func validateKeys(_ allowed: Set<String>) throws {
     let actual = Set(values.keys.map { String($0.dropFirst(2)) })
     guard actual.isSubset(of: allowed) else {
@@ -51,6 +62,9 @@ struct Arguments {
       reach-release-package snapshot-dependencies --repository PATH --swift-checkouts PATH --go-module-cache PATH --go-root PATH --notices PATH --output PATH --logs PATH
       reach-release-package build --repository PATH --release-tool-source PATH --configuration PATH --notices PATH --depot PATH --work PATH --output PATH
       reach-release-package verify --package PATH --release-tool-source PATH --configuration PATH --notices PATH --depot PATH --scratch PATH [--provenance PATH] [--notice-manifest PATH] [--report PATH]
+      reach-release-package sign --unsigned-authority PATH --unsigned-tool-source PATH --finalizer-tool-source PATH --configuration PATH --notices PATH --depot PATH --work PATH --output PATH
+      reach-release-package notarize --signed-authority PATH --configuration PATH --notices PATH --depot PATH --keychain-profile PROFILE --state PATH --output PATH [--recover-submission UUID]
+      reach-release-package verify-release --package PATH --provenance PATH --unsigned-tool-source PATH --finalizer-tool-source PATH --configuration PATH --notices PATH --depot PATH --scratch PATH --report PATH
     """
 }
 
@@ -111,6 +125,52 @@ do {
       try SecureFiles.atomicWrite(encoded, to: reportURL)
     }
     FileHandle.standardOutput.write(encoded)
+  case "sign":
+    try arguments.validateKeys([
+      "unsigned-authority", "unsigned-tool-source", "finalizer-tool-source", "configuration",
+      "notices", "depot", "work", "output",
+    ])
+    let result = try SignedReleaseFinalizer().sign(
+      unsignedAuthority: arguments.require("unsigned-authority"),
+      unsignedToolSource: arguments.require("unsigned-tool-source"),
+      finalizerToolSource: arguments.require("finalizer-tool-source"),
+      configurationURL: arguments.require("configuration"),
+      noticeAuthorityURL: arguments.require("notices"),
+      dependencyDepot: arguments.require("depot"),
+      workRoot: arguments.require("work"),
+      outputRoot: arguments.require("output"))
+    FileHandle.standardOutput.write(try CanonicalJSON.encode(result))
+  case "notarize":
+    try arguments.validateKeys([
+      "signed-authority", "configuration", "notices", "depot", "keychain-profile", "state",
+      "output", "recover-submission",
+    ])
+    let result = try ReleaseNotarizer().notarize(
+      signedAuthority: arguments.require("signed-authority"),
+      configurationURL: arguments.require("configuration"),
+      noticeAuthorityURL: arguments.require("notices"),
+      dependencyDepot: arguments.require("depot"),
+      keychainProfile: arguments.requireString("keychain-profile"),
+      stateURL: arguments.require("state"),
+      outputRoot: arguments.require("output"),
+      recoverSubmission: arguments.optionalString("recover-submission"))
+    FileHandle.standardOutput.write(try CanonicalJSON.encode(result))
+  case "verify-release":
+    try arguments.validateKeys([
+      "package", "provenance", "unsigned-tool-source", "finalizer-tool-source",
+      "configuration", "notices", "depot", "scratch", "report",
+    ])
+    let report = try SignedReleaseVerifier().verify(
+      package: arguments.require("package"),
+      provenanceURL: arguments.require("provenance"),
+      unsignedToolSource: arguments.require("unsigned-tool-source"),
+      finalizerToolSource: arguments.require("finalizer-tool-source"),
+      configurationURL: arguments.require("configuration"),
+      noticeAuthorityURL: arguments.require("notices"),
+      dependencyDepot: arguments.require("depot"),
+      scratch: arguments.require("scratch"),
+      reportURL: arguments.require("report"))
+    FileHandle.standardOutput.write(try CanonicalJSON.encode(report))
   default:
     throw ReleasePackageError.invalidArgument(Arguments.usage)
   }

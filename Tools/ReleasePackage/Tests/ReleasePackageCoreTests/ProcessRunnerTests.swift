@@ -135,3 +135,127 @@ private func expectProcessGone(_ process: pid_t) {
     try ProcessRunner().run("ls", [])
   }
 }
+
+@Test func processRunnerRedactsSensitiveArgumentsFromRecordsAndBoundedErrors() throws {
+  let root = try makeTemporaryDirectory("process-redaction")
+  defer { removeTemporaryDirectory(root) }
+  let secret = root.appendingPathComponent("profile-secret-value").path
+  let log = root.appendingPathComponent("redacted.log")
+  do {
+    _ = try ProcessRunner().run(
+      "/bin/ls", [secret], logURL: log,
+      redactedArguments: [0: "<redacted-profile>"])
+    Issue.record("missing path unexpectedly succeeded")
+  } catch {
+    #expect(!String(describing: error).contains(secret))
+  }
+  let recordData = try Data(
+    contentsOf: URL(fileURLWithPath: log.path + ".command.json"))
+  let record = try JSONDecoder().decode(CommandRecord.self, from: recordData)
+  #expect(record.arguments == ["<redacted-profile>"])
+  #expect(!String(decoding: recordData, as: UTF8.self).contains(secret))
+  #expect(
+    String(
+      decoding: try Data(contentsOf: URL(fileURLWithPath: log.path + ".stderr")), as: UTF8.self
+    ).contains(secret))
+}
+
+@Test func processRunnerForbidsRawNotaryCredentialsAndUnapprovedXcrunTools() throws {
+  let submissionID = "377a2eab-d486-4e6d-b08f-06b677075a5d"
+  let profile = "private-profile"
+  let approved: [([String], [Int: String])] = [
+    (["notarytool", "--version"], [:]),
+    (
+      ["notarytool", "history", "--keychain-profile", profile, "--output-format", "json"],
+      [3: "<redacted-profile>"]
+    ),
+    (
+      [
+        "notarytool", "submit", "/private/tmp/a.pkg", "--keychain-profile", profile,
+        "--output-format", "json",
+      ],
+      [4: "<redacted-profile>"]
+    ),
+    (
+      [
+        "notarytool", "wait", submissionID, "--keychain-profile", profile,
+        "--output-format", "json",
+      ],
+      [4: "<redacted-profile>"]
+    ),
+    (
+      [
+        "notarytool", "log", submissionID, "--keychain-profile", profile,
+        "--output-format", "json",
+      ],
+      [4: "<redacted-profile>"]
+    ),
+  ]
+  for (arguments, redaction) in approved {
+    #expect(
+      ProcessRunner.notarytoolInvocationIsAllowed(
+        arguments, redactedArguments: redaction))
+  }
+
+  let refused = [
+    ["notarytool", "submit", "/private/tmp/a.pkg", "-k", "key.p8"],
+    ["notarytool", "submit", "/private/tmp/a.pkg", "-kkey.p8"],
+    ["notarytool", "submit", "/private/tmp/a.pkg", "-d", "issuer"],
+    ["notarytool", "submit", "/private/tmp/a.pkg", "-i", "key-id"],
+    ["notarytool", "submit", "/private/tmp/a.pkg", "--password=secret"],
+    [
+      "notarytool", "submit", "/private/tmp/a.pkg", "--keychain-profile", profile,
+      "--output-format", "json", "--force",
+    ],
+    [
+      "notarytool", "submit", "/private/tmp/a.pkg", "--keychain-profile=\(profile)",
+      "--output-format=json",
+    ],
+    [
+      "notarytool", "wait", "not-a-uuid", "--keychain-profile", profile,
+      "--output-format", "json",
+    ],
+    ["notarytool", "info", submissionID, "--keychain-profile", profile],
+  ]
+  for arguments in refused {
+    #expect(
+      !ProcessRunner.notarytoolInvocationIsAllowed(
+        arguments, redactedArguments: [4: "<redacted-profile>"]))
+  }
+  #expect(
+    !ProcessRunner.notarytoolInvocationIsAllowed(
+      approved[2].0, redactedArguments: [:]))
+
+  #expect(throws: ReleasePackageError.self) {
+    try ProcessRunner().run(
+      "/usr/bin/xcrun",
+      ["notarytool", "submit", "/private/tmp/a.pkg", "--password", "secret"])
+  }
+  #expect(throws: ReleasePackageError.self) {
+    try ProcessRunner().run(
+      "/usr/bin/xcrun",
+      ["notarytool", "submit", "/private/tmp/a.pkg", "-ksecret"])
+  }
+  #expect(throws: ReleasePackageError.self) {
+    try ProcessRunner().run(
+      "/usr/bin/xcrun",
+      [
+        "notarytool", "submit", "/private/tmp/a.pkg", "--keychain-profile", profile,
+        "--output-format", "json", "--force",
+      ],
+      redactedArguments: [4: "<redacted-profile>"])
+  }
+  #expect(throws: ReleasePackageError.self) {
+    try ProcessRunner().run(
+      "/usr/bin/xcrun", ["notarytool", "history"],
+      environment: ["APPLE_PASSWORD": "secret"])
+  }
+  #expect(
+    ProcessRunner.notarytoolEnvironmentIsAllowed([
+      "HOME": FileManager.default.homeDirectoryForCurrentUser.path
+    ]))
+  #expect(!ProcessRunner.notarytoolEnvironmentIsAllowed(["HOME": "/var/empty"]))
+  #expect(throws: ReleasePackageError.self) {
+    try ProcessRunner().run("/usr/bin/xcrun", ["simctl", "list"])
+  }
+}

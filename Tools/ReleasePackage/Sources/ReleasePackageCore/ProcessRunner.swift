@@ -28,10 +28,11 @@ public struct ProcessRunner: Sendable {
     "/usr/bin/diff", "/usr/bin/ditto", "/usr/bin/dyld_info", "/usr/bin/file", "/usr/bin/git",
     "/usr/bin/gzip",
     "/usr/bin/lsbom", "/usr/bin/mkbom", "/usr/bin/otool", "/usr/bin/plutil",
-    "/usr/bin/productbuild", "/usr/bin/shasum", "/usr/bin/stat", "/usr/bin/strip",
+    "/usr/bin/productbuild", "/usr/bin/productsign", "/usr/bin/shasum", "/usr/bin/stat",
+    "/usr/bin/strip",
     "/usr/bin/strings", "/usr/bin/swift", "/usr/bin/tar", "/usr/bin/xar",
     "/usr/bin/xcodebuild", "/usr/bin/xcrun", "/usr/bin/sw_vers", "/usr/sbin/installer",
-    "/usr/sbin/pkgutil",
+    "/usr/sbin/pkgutil", "/usr/sbin/spctl",
   ]
 
   private let testExecutables: Set<String>
@@ -48,6 +49,7 @@ public struct ProcessRunner: Sendable {
     environment: [String: String] = [:],
     timeout: TimeInterval = 1_800,
     logURL: URL? = nil,
+    redactedArguments: [Int: String] = [:],
     requireSuccess: Bool = true
   ) throws -> CommandResult {
     try validateExecutable(executable)
@@ -59,6 +61,20 @@ public struct ProcessRunner: Sendable {
     else {
       throw ReleasePackageError.invalidArgument(
         "process arguments and environment cannot contain NUL")
+    }
+    guard redactedArguments.keys.allSatisfy({ arguments.indices.contains($0) }),
+      redactedArguments.values.allSatisfy({
+        $0.hasPrefix("<redacted-") && $0.hasSuffix(">") && !$0.contains("\0")
+      })
+    else {
+      throw ReleasePackageError.invalidArgument("sensitive argument redaction is malformed")
+    }
+    try validateInvocation(
+      executable, arguments, environment: environment,
+      redactedArguments: redactedArguments)
+    let sensitiveValues = redactedArguments.keys.map { arguments[$0] }
+    guard sensitiveValues.allSatisfy({ !$0.isEmpty }) else {
+      throw ReleasePackageError.invalidArgument("sensitive argument values cannot be empty")
     }
     if let currentDirectory { try SecureFiles.rejectSymlink(url: currentDirectory) }
 
@@ -213,7 +229,9 @@ public struct ProcessRunner: Sendable {
     let record = CommandRecord(
       schemaVersion: 1,
       executable: executable,
-      arguments: arguments,
+      arguments: arguments.enumerated().map { index, argument in
+        redactedArguments[index] ?? argument
+      },
       currentDirectory: currentDirectory?.path,
       startedAtUTC: formatter.string(from: startedAt),
       elapsedMilliseconds: milliseconds,
@@ -241,7 +259,9 @@ public struct ProcessRunner: Sendable {
       throw ReleasePackageError.processFailure("\(executable) exceeded \(Int(timeout)) seconds")
     }
     if requireSuccess, result.exitStatus != 0 {
-      let bounded = String((result.output + result.errorOutput).prefix(4_096))
+      let bounded = redact(
+        String((result.output + result.errorOutput).prefix(4_096)),
+        values: sensitiveValues)
       throw ReleasePackageError.processFailure(
         "\(executable) exited \(result.exitStatus): \(bounded)")
     }
@@ -255,6 +275,96 @@ public struct ProcessRunner: Sendable {
     if Self.fixedExecutables.contains(executable) || testExecutables.contains(executable) { return }
     throw ReleasePackageError.invalidArgument(
       "executable is outside the fixed tool allowlist: \(executable)")
+  }
+
+  private func validateInvocation(
+    _ executable: String,
+    _ arguments: [String],
+    environment: [String: String],
+    redactedArguments: [Int: String]
+  ) throws {
+    guard executable == "/usr/bin/xcrun" else { return }
+    let sdkQueries = [
+      ["--sdk", "macosx", "--show-sdk-path"],
+      ["--sdk", "macosx", "--show-sdk-version"],
+    ]
+    if sdkQueries.contains(arguments) { return }
+    guard let tool = arguments.first else {
+      throw ReleasePackageError.invalidArgument("xcrun requires an approved tool")
+    }
+    switch tool {
+    case "notarytool":
+      guard
+        Self.notarytoolInvocationIsAllowed(
+          arguments, redactedArguments: redactedArguments),
+        Self.notarytoolEnvironmentIsAllowed(environment)
+      else {
+        throw ReleasePackageError.invalidArgument(
+          "notarytool invocation must match an exact opaque-Keychain-profile operation")
+      }
+    case "stapler":
+      guard arguments.count == 3,
+        Set(["staple", "validate"]).contains(arguments[1]),
+        arguments[2].hasPrefix("/")
+      else {
+        throw ReleasePackageError.invalidArgument("xcrun stapler operation is not approved")
+      }
+    default:
+      throw ReleasePackageError.invalidArgument("xcrun tool is outside the fixed allowlist")
+    }
+  }
+
+  static func notarytoolInvocationIsAllowed(
+    _ arguments: [String],
+    redactedArguments: [Int: String]
+  ) -> Bool {
+    if arguments == ["notarytool", "--version"] {
+      return redactedArguments.isEmpty
+    }
+    guard arguments.first == "notarytool", arguments.count >= 2 else { return false }
+    let profileIndex: Int
+    switch arguments[1] {
+    case "history":
+      guard arguments.count == 6 else { return false }
+      profileIndex = 3
+      guard arguments[2] == "--keychain-profile",
+        arguments[4] == "--output-format",
+        arguments[5] == "json"
+      else { return false }
+    case "submit":
+      guard arguments.count == 7, arguments[2].hasPrefix("/") else { return false }
+      profileIndex = 4
+      guard arguments[3] == "--keychain-profile",
+        arguments[5] == "--output-format",
+        arguments[6] == "json"
+      else { return false }
+    case "wait", "log":
+      guard arguments.count == 7, UUID(uuidString: arguments[2]) != nil else { return false }
+      profileIndex = 4
+      guard arguments[3] == "--keychain-profile",
+        arguments[5] == "--output-format",
+        arguments[6] == "json"
+      else { return false }
+    default:
+      return false
+    }
+    let profile = arguments[profileIndex]
+    return !profile.isEmpty
+      && !profile.hasPrefix("-")
+      && !profile.contains("/")
+      && redactedArguments == [profileIndex: "<redacted-profile>"]
+  }
+
+  static func notarytoolEnvironmentIsAllowed(_ environment: [String: String]) -> Bool {
+    if environment.isEmpty { return true }
+    guard environment.count == 1, let home = environment["HOME"] else { return false }
+    return home.utf8.elementsEqual(FileManager.default.homeDirectoryForCurrentUser.path.utf8)
+  }
+
+  private func redact(_ text: String, values: [String]) -> String {
+    values.reduce(text) { result, value in
+      result.replacingOccurrences(of: value, with: "<redacted-sensitive-value>")
+    }
   }
 
   private func sanitizedEnvironment(overrides: [String: String]) -> [String: String] {

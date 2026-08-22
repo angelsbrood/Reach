@@ -13,6 +13,16 @@ public struct VerificationReport: Codable, Equatable, Sendable {
   public let resourcesPresent: Bool
 }
 
+enum OuterSignatureExpectation {
+  case unsigned
+  case developerID
+}
+
+enum LeafSignatureExpectation {
+  case adHoc
+  case developerID
+}
+
 public struct PackageVerifier {
   private let runner: ProcessRunner
   private let assembler: PackageAssembler
@@ -32,6 +42,60 @@ public struct PackageVerifier {
     noticeManifestURL: URL? = nil,
     scratch: URL,
     logDirectory: URL
+  ) throws -> VerificationReport {
+    try verifyPackage(
+      package: package,
+      configurationURL: configurationURL,
+      noticeAuthorityURL: noticeAuthorityURL,
+      dependencyDepot: dependencyDepot,
+      expectedReleaseToolSourceSHA256: expectedReleaseToolSourceSHA256,
+      provenanceURL: provenanceURL,
+      noticeManifestURL: noticeManifestURL,
+      scratch: scratch,
+      logDirectory: logDirectory,
+      outerSignature: .unsigned,
+      leafSignature: .adHoc
+    )
+  }
+
+  func verifySignedPayload(
+    package: URL,
+    configurationURL: URL,
+    noticeAuthorityURL: URL,
+    dependencyDepot: URL,
+    expectedFinalizerToolSourceSHA256: String,
+    noticeManifestURL: URL?,
+    scratch: URL,
+    logDirectory: URL,
+    outerSigned: Bool
+  ) throws -> VerificationReport {
+    try verifyPackage(
+      package: package,
+      configurationURL: configurationURL,
+      noticeAuthorityURL: noticeAuthorityURL,
+      dependencyDepot: dependencyDepot,
+      expectedReleaseToolSourceSHA256: expectedFinalizerToolSourceSHA256,
+      provenanceURL: nil,
+      noticeManifestURL: noticeManifestURL,
+      scratch: scratch,
+      logDirectory: logDirectory,
+      outerSignature: outerSigned ? .developerID : .unsigned,
+      leafSignature: .developerID
+    )
+  }
+
+  private func verifyPackage(
+    package: URL,
+    configurationURL: URL,
+    noticeAuthorityURL: URL,
+    dependencyDepot: URL,
+    expectedReleaseToolSourceSHA256: String,
+    provenanceURL: URL?,
+    noticeManifestURL: URL?,
+    scratch: URL,
+    logDirectory: URL,
+    outerSignature: OuterSignatureExpectation,
+    leafSignature: LeafSignatureExpectation
   ) throws -> VerificationReport {
     try requireRegularFile(package, label: "unsigned product package", mode: 0o600)
     try SecureFiles.createPrivateDirectory(scratch)
@@ -55,10 +119,18 @@ public struct PackageVerifier {
       logURL: logDirectory.appendingPathComponent("verify-package-signature.log"),
       requireSuccess: false
     )
-    guard signature.exitStatus != 0,
-      (signature.output + signature.errorOutput).contains("Status: no signature")
-    else {
-      throw ReleasePackageError.verification("U1 container must be unsigned")
+    switch outerSignature {
+    case .unsigned:
+      guard signature.exitStatus != 0,
+        (signature.output + signature.errorOutput).contains("Status: no signature")
+      else {
+        throw ReleasePackageError.verification("unsigned container must not have a signature")
+      }
+    case .developerID:
+      guard signature.exitStatus == 0 else {
+        throw ReleasePackageError.verification(
+          "signed container does not have a valid Installer signature")
+      }
     }
     let expanded = scratch.appendingPathComponent("expanded")
     try SecureFiles.createDirectory(expanded, mode: 0o700)
@@ -306,10 +378,12 @@ public struct PackageVerifier {
     }
     let reachdLibraries = try inspectMachO(
       host.members, path: "./Library/Application Support/Reach/Host/reachd", scratch: scratch,
-      label: "reachd", expectedIdentifier: "reachd", logDirectory: logDirectory)
+      label: "reachd", expectedIdentifier: "reachd", signatureExpectation: leafSignature,
+      logDirectory: logDirectory)
     _ = try inspectMachO(
       helper.members, path: "./Library/PrivilegedHelperTools/systems.reach.meshd", scratch: scratch,
-      label: "meshd", expectedIdentifier: "systems.reach.meshd", logDirectory: logDirectory)
+      label: "meshd", expectedIdentifier: "systems.reach.meshd",
+      signatureExpectation: leafSignature, logDirectory: logDirectory)
     guard manifest.linkedSystemLibraries == reachdLibraries else {
       throw ReleasePackageError.verification("embedded linked-library authority changed")
     }
@@ -500,6 +574,7 @@ public struct PackageVerifier {
     scratch: URL,
     label: String,
     expectedIdentifier: String,
+    signatureExpectation: LeafSignatureExpectation,
     logDirectory: URL
   ) throws -> [String] {
     guard let member = members.first(where: { $0.record.path == path }) else {
@@ -543,12 +618,27 @@ public struct PackageVerifier {
       logURL: logDirectory.appendingPathComponent("verify-codesign-detail-\(label).log")
     )
     let signatureDetail = signature.output + signature.errorOutput
-    guard signatureDetail.contains("Identifier=\(expectedIdentifier)\n"),
-      signatureDetail.contains("Signature=adhoc\n"),
-      signatureDetail.contains("TeamIdentifier=not set\n")
-    else {
-      throw ReleasePackageError.verification(
-        "\(label) is not the expected deterministic ad-hoc code")
+    guard signatureDetail.contains("Identifier=\(expectedIdentifier)\n") else {
+      throw ReleasePackageError.verification("\(label) signature identifier changed")
+    }
+    switch signatureExpectation {
+    case .adHoc:
+      guard signatureDetail.contains("Signature=adhoc\n"),
+        signatureDetail.contains("TeamIdentifier=not set\n")
+      else {
+        throw ReleasePackageError.verification(
+          "\(label) is not the expected deterministic ad-hoc code")
+      }
+    case .developerID:
+      guard !signatureDetail.contains("Signature=adhoc\n"),
+        !signatureDetail.contains("TeamIdentifier=not set\n"),
+        signatureDetail.contains("TeamIdentifier="),
+        signatureDetail.contains("Runtime Version="),
+        signatureDetail.contains("Timestamp=")
+      else {
+        throw ReleasePackageError.verification(
+          "\(label) is not Developer-ID signed with runtime and timestamp")
+      }
     }
     return libraries.sorted()
   }

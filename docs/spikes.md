@@ -3538,3 +3538,199 @@ was created or validated; and nothing was signed, timestamped, submitted,
 notarized, stapled, installed, published, restarted or changed at runtime.
 S35 may now name this U1, but credentialed execution remains paused for the
 founder's separate review checkpoint.
+
+### S35 private Developer ID signing and notarization (22 August 2026)
+
+S35 consumed only the synchronized S34 U1 parent from commit
+`92b233e9c8c0ebfee57d0aceb182130d0bd7fa0b`: unsigned package
+`a8ff82e0…14a88`, 13,715,801 bytes, normalized semantics
+`3b7324a9…305d`, and committed unsigned-tool source `7b215b2b…7c8a`. The
+separate S35 finalizer source is `264ee253…925e`; its accepted executable is
+`0ac54df2…4abd`. No historical or preliminary S34 lineage was accepted.
+
+Security-framework resolution found exactly one usable Developer ID
+Application identity and one usable Developer ID Installer identity in the
+default login Keychain, with one common team authority. The release tool chose
+their exact certificate selectors internally; no selector, profile label,
+Apple account, password, private key, or credential environment enters tracked
+state or retained evidence. Public Team ID, certificate-chain hashes,
+validity, and designated-requirement metadata are retained because the release
+cannot be verified without them. The founder created one local nonsynchronized
+`notarytool` profile interactively. Credential validation and the later Apple
+calls received only that opaque profile label; command records redacted it.
+
+P2 is `01e23c1d…5e90`, 13,726,021 bytes, with normalized semantics
+`f8d4c482…7753`. Its only executable leaves are reachd
+`d02ffa24…d9d` and meshd `2821c1c…1024`. Both retain arm64, their frozen
+identifiers, Hardened Runtime, secure timestamps, valid Developer ID
+Application chains, and an empty entitlement blob. The signed reachd help,
+scripted selftest, and MLX selftest passed from isolated scratch state; the
+helper smoke did not start a service.
+
+The Developer ID Installer signed P3 is `43ffaf45…07620`, 13,739,184 bytes,
+with a secure timestamp. Independent expansion rejoined exactly 50 host and 6
+helper records, no Scripts or Resources, both signed leaves, and the same P2
+semantics. Pre-notary local assessment was retained as observation, not a
+failure or install claim.
+
+The crash-safe journal persisted `submitting` before the one real upload. One
+submission ID was durably recovered from complete output; that exact P3 hash
+reached `Accepted` with status code zero and **0 issues**. The matching notary
+log is `3c8e3b48…c96f7`. No timeout, ambiguity, retry, second upload, `--force`,
+or replacement lineage occurred. The full submission ID stays in the private
+authority pack rather than tracked documentation.
+
+P5 is `97397473…6389f`, 13,741,205 bytes, with P3
+`43ffaf45…07620` as its exact parent. `stapler validate`, both nested
+Developer ID signatures, package signature verification, and local Installer
+assessment all passed. A fresh independent verifier again joined 50 host and
+6 helper records, no Scripts or Resources, a valid staple, and normalized
+semantics `f8d4c482…7753`. The P3 and P5 packages remain private at their
+recorded `/private/tmp` paths and are not duplicated into the evidence pack.
+
+The stabilized release-tool, candidate-backed, failure-state, and live-
+identity suite passed **55/55 three complete times**. ReachKit passed **95/95**;
+reachd passed **250/250 across 36 suites**; and mesh-helper's complete suite,
+race detector, vet, and offline module verification passed. The privacy-
+minimized authority is
+`/private/tmp/reach-s35-signing-notarization-authority-20260822`: its
+**49-entry** manifest verifies and `SHA256SUMS` hashes to
+`f195e860…37a8`. All 50 files including the manifest are 0600 below 0700
+directories. It retains exact finalizer source, sanitized stage/runtime/test
+authority, and three successful suite transcripts while excluding packages,
+raw Apple/Keychain logs, account/team/certificate/profile data, credentials,
+cluster identities/endpoints/content, Keeper, `tasks/`, caches, and every
+superseded attempt.
+
+Installed Reach never moved: reachd remains `a9660a83…6b790` at PID
+21242/run 29; helper remains `a784f257…b28ca8` at PID 20190/run 1 with receipt
+1.0.0; generation 37 is ready on `utun0`, one direct peer, relay configured
+false/ready true. Four identity artifact classes, one device record, and zero
+CA-creation events remain. A bounded final `doctor --dial` returned 13 pass,
+4 expected warnings, 0 waiting, 0 fail and reproduced only the known
+diagnostic-side `SecPKCS12Import -25291`; unchanged bytes remain joined to the
+retained genuine authenticated 15-pass result.
+
+**Verdict: S35 / 8B COMPLETE — PRIVATE SIGNED AND NOTARIZED CANDIDATE ONLY.**
+Developer ID executable/container signing, Hardened Runtime, secure timestamps,
+one exact notarization lineage, and stapling are unreimbursed M4 baseline. No
+Installer invocation, receipt mutation, VM, clean-Mac lifecycle acceptance,
+publication, release feed/tag, adoption, accessibility, audit, network, Keeper,
+or installed-runtime action occurred. Clean-Mac install/update/rollback/
+uninstall remains administrator-and-native-VM gated; publication remains a
+separate founder action; September adoption, accessibility, and consortium
+audit remain future. No new Now item is promoted. Keeper and its profile-
+authority rider remain Held.
+
+### S35 post-closeout verifier and evidence correction (22 August 2026)
+
+Post-closeout review accepted the actual P3/P4/P5 lineage but found that its
+forward verifier contract and retained evidence did not yet justify every
+claim. The old 49-entry pack remains immutable at seal
+`f195e860…37a8`; it is historical lineage evidence, not the corrected verifier
+authority. No leaf or container was signed again, no timestamp was requested,
+and submission `377a2eab-d486-4e6d-b08f-06b677075a5d` was not contacted or
+repeated.
+
+The bounded correction now:
+
+- reruns complete signed Distribution/BOM/cpio/manifest/notice verification
+  plus both leaf and Installer signature checks before notarization, consumes
+  the canonical independent P3 report, and binds its exact hash with P3 in a
+  schema-v2 journal before any upload;
+- requires signed P0, P1, and U1 to equal the retained U1 provenance exactly;
+- verifies every embedded leaf and XAR certificate digest in order and
+  recognizes only the exact Developer ID G2 intermediate/root chain;
+- covers P2 ad-hoc/runtime/timestamp/entitlement/chain, P3 payload/class, and
+  P5 parent/staple/ticket/tamper refusals against the real candidate; and
+- validates and reuses already durable accepted wait/log records after the
+  log-write crash window instead of wedging or resubmitting the lineage.
+
+The historical schema-v1 stapled journal is preserved honestly rather than
+rewritten. Its independent P3 report `738118fe…d591` existed before the sole
+submission. The corrected executable independently reproduced that P3 report
+and P5 report `50d0501a…b671`; P3 remains `43ffaf45…07620`, P5 remains
+`97397473…6389f`, both reconstruct 50 host and 6 helper records with no Scripts
+or Resources, and P5 again passed staple validation and local assessment. The
+first correction retained a composite index that names the P5 independent
+report, but that index spans two roots and is not itself a directly checkable
+`SHA256SUMS` authority. The later forward-boundary correction below fixes the
+actual external authority root.
+
+The complete release-tool and signed-candidate suite passed **65/65 three
+complete times** from separate scratch products. The replacement privacy-
+minimized pack is
+`/private/tmp/reach-s35-signing-notarization-correction-authority-20260822`:
+its **79-entry** manifest verifies and seals at `26fa10c0…c1bf9`; the exact
+41-file corrected release-tool snapshot matches the worktree. It retains the
+small decisive provenance, journal, submit/wait/log, signature-command,
+staple, verifier, and refusal records while keeping package bytes external.
+
+Read-only parity remained exact: reachd `a9660a83…6b790` stayed PID 21242/run
+29; helper `a784f257…b28ca8` stayed PID 20190/run 1 with receipt 1.0.0;
+generation 37 remained ready on `utun0` with one direct peer and verified
+relay absence; four identity artifact classes, one device record, and zero CA
+creation events remained. No new dial replaced the retained authenticated
+exact-byte result or the later attributed `SecPKCS12Import -25291` diagnostic.
+
+**Corrected verdict: S35 / 8B CORRECTED-COMPLETE.** The same private accepted
+lineage is now backed by the promised fail-closed verifier, recovery, refusal,
+and evidence contracts. No install, receipt, VM, publication, runtime, network,
+or Keeper boundary moved, and no new Now item follows.
+
+### S35 forward upload, credential and sidecar correction (22 August 2026)
+
+A second review left the accepted P3/P4/P5 lineage intact but found three
+forward-boundary gaps and three evidence/runbook ambiguities. This bounded
+non-credentialed correction again read the accepted artifacts without signing,
+timestamping, contacting Apple, submitting, stapling, installing, or changing
+runtime state.
+
+One shared retained-U1 binder now requires the signed P0, P1, and U1 stages to
+equal canonical `u1-release-provenance.json` before the P3 semantic/signature
+preflight and before profile authentication. The final verifier calls the same
+binder. Real-candidate mutations of each stage are refused at both boundaries.
+The process runner no longer tries to blacklist credential flags: it accepts
+only the exact version, history, submit, wait, and log argument shapes used by
+the release tool. Raw `-k`, `-d`, `-i`, joined forms, `--force`, reordered or
+extra options, unredacted profiles, and unknown operations are rejected before
+process creation.
+
+All six signed-candidate tests are now explicitly disabled with a visible
+reason when the entire authority environment is absent. A partial or malformed
+environment fails. Three complete candidate-backed runs passed **65/65** with
+zero skipped cells; a separate ordinary run visibly reported six disabled
+candidate cells, and a one-variable partial environment failed as intended.
+
+The corrected verifier executable then exercised the documented P3 and P5
+commands while `--finalizer-tool-source` named the retained exact source that
+minted P2, digest `264ee253…925e`, rather than the corrected checkout. P3 and
+P5 remain `43ffaf45…07620` and `97397473…6389f`; their reports remain
+`738118fe…d591` and `50d0501a…b671`; each joins 50 host and 6 helper files with
+no Scripts or Resources, and P5 again passed staple validation and local
+assessment. The actual external notarized-output root now has one directly
+checkable **34-entry** `SHA256SUMS`, including both reports, with digest
+`4660c0e9…f8320`.
+
+The newest privacy-minimized authority is
+`/private/tmp/reach-s35-signing-notarization-forward-correction-authority-20260822`.
+Its **64-entry** manifest verifies and seals at `cda4d03e…f753`; its 41-file
+source manifest hashes to `b50859aa…1e34` and matches the worktree. It retains
+the three complete passes, explicit-skip and partial-refusal transcripts,
+decisive small lineage records, and a clearly labeled copy of the external
+sidecar while keeping package bytes external. Public Team ID and certificate
+verification metadata are retained; credentials, selectors, account data,
+profile labels, keys, Reach state/content/endpoints, and Keeper are absent.
+
+Read-only runtime parity remained exact: reachd `a9660a83…6b790` stayed PID
+21242/run 29; helper `a784f257…b28ca8` stayed PID 20190/run 1 with receipt
+1.0.0; generation 37 remained ready on `utun0` with one direct peer and relay
+verified absent. No fresh diagnostic replaced the retained authenticated
+exact-byte acceptance.
+
+**Final corrected verdict: S35 / 8B CORRECTED-COMPLETE.** The single private
+accepted lineage now has identical fail-closed retained-U1 authority before
+upload and after notarization, an exact non-credential argument grammar,
+truthful candidate-test accounting, a runnable retained-source verification
+command, and one independently checkable external sidecar. No new Now item
+follows.

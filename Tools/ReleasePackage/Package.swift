@@ -9,7 +9,13 @@ let package = Package(
     .executable(name: "reach-release-package", targets: ["reach-release-package"]),
   ],
   targets: [
-    .target(name: "ReleasePackageCore"),
+    .target(
+      name: "ReleasePackageCore",
+      linkerSettings: [
+        .linkedFramework("LocalAuthentication"),
+        .linkedFramework("Security"),
+      ]
+    ),
     .executableTarget(
       name: "reach-release-package",
       dependencies: ["ReleasePackageCore"]
