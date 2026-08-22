@@ -14,6 +14,8 @@ public struct ReleaseBuildResult: Codable, Equatable, Sendable {
 
 public struct ReleaseBuildComparison: Codable, Equatable, Sendable {
   public let schemaVersion: Int
+  public let compilePathAuthority: String
+  public let compilerVisibleRootUTF8Length: Int
   public let sourceAuthorityEqual: Bool
   public let reachdSHA256: [String]
   public let helperSHA256: [String]
@@ -26,6 +28,36 @@ public struct ReleaseBuildComparison: Codable, Equatable, Sendable {
   public let outerContainerSHA256: [String]
   public let normalizedSemanticSHA256: String
   public let xarDifference: String
+}
+
+/// Swift's escaping-closure diagnostics retain the byte length of their
+/// compiler-visible source filename even when `-file-prefix-map` rewrites the
+/// filename itself. Every release pass therefore builds below a private root
+/// with one fixed UTF-8 length. The caller's scratch-root spelling cannot
+/// become executable code, while each invocation still owns disjoint storage.
+struct CompilePathAuthority {
+  static let rootUTF8Length = 240
+  private static let componentPrefix = "compile-root-"
+
+  static func passRoot(workRoot: URL, passName: String) throws -> URL {
+    guard passName == "build-a" || passName == "build-b" else {
+      throw ReleasePackageError.invalidArgument("unknown deterministic build pass")
+    }
+    let container = workRoot.appendingPathComponent(passName, isDirectory: true)
+    let fixedBytes = container.path.utf8.count + 1 + componentPrefix.utf8.count
+    let paddingBytes = rootUTF8Length - fixedBytes
+    guard paddingBytes >= 16 else {
+      throw ReleasePackageError.invalidArgument(
+        "release work path is too long for the fixed compile-path authority")
+    }
+    let component = componentPrefix + String(repeating: "p", count: paddingBytes)
+    let result = container.appendingPathComponent(component, isDirectory: true)
+    guard result.path.utf8.count == rootUTF8Length else {
+      throw ReleasePackageError.verification(
+        "fixed compile-path authority did not reach its exact UTF-8 length")
+    }
+    return result
+  }
 }
 
 public struct ReleaseBuilder {
@@ -61,6 +93,8 @@ public struct ReleaseBuilder {
     workRoot: URL,
     outputRoot: URL
   ) throws -> ReleaseBuildResult {
+    let workRoot = try ReleasePathAuthority.mutableRoot(workRoot, label: "release work root")
+    let outputRoot = try ReleasePathAuthority.mutableRoot(outputRoot, label: "release output root")
     try requireEmptyPrivateRoot(workRoot)
     try requireEmptyPrivateRoot(outputRoot)
     let configuration = try ReleaseConfiguration.load(from: configurationURL)
@@ -79,6 +113,10 @@ public struct ReleaseBuilder {
     let toolchain = try inspectToolchain(
       depot: depot, logs: workRoot.appendingPathComponent("toolchain-logs"))
 
+    let passAContainer = workRoot.appendingPathComponent("build-a", isDirectory: true)
+    let passBContainer = workRoot.appendingPathComponent("build-b", isDirectory: true)
+    try SecureFiles.createDirectory(passAContainer, mode: 0o700)
+    try SecureFiles.createDirectory(passBContainer, mode: 0o700)
     let passA = try buildPass(
       name: "build-a",
       repository: repository,
@@ -93,7 +131,7 @@ public struct ReleaseBuilder {
       releaseToolSourceHash: releaseToolSourceHash,
       noticeAuthorityHash: noticeAuthorityHash,
       toolchain: toolchain,
-      root: workRoot.appendingPathComponent("build-a")
+      root: CompilePathAuthority.passRoot(workRoot: workRoot, passName: "build-a")
     )
     let passB = try buildPass(
       name: "build-b",
@@ -109,7 +147,7 @@ public struct ReleaseBuilder {
       releaseToolSourceHash: releaseToolSourceHash,
       noticeAuthorityHash: noticeAuthorityHash,
       toolchain: toolchain,
-      root: workRoot.appendingPathComponent("build-b")
+      root: CompilePathAuthority.passRoot(workRoot: workRoot, passName: "build-b")
     )
     try compare(passA, passB)
 
@@ -170,7 +208,10 @@ public struct ReleaseBuilder {
     let provenanceURL = outputRoot.appendingPathComponent("release-provenance.json")
     try SecureFiles.atomicWrite(try CanonicalJSON.encode(provenance), to: provenanceURL)
     let comparison = ReleaseBuildComparison(
-      schemaVersion: 1,
+      schemaVersion: 2,
+      compilePathAuthority:
+        "unaliased canonical root with fixed UTF-8 byte length before compiler invocation",
+      compilerVisibleRootUTF8Length: CompilePathAuthority.rootUTF8Length,
       sourceAuthorityEqual: passA.source == passB.source,
       reachdSHA256: try [passA.reachd, passB.reachd].map(Digests.sha256(file:)),
       helperSHA256: try [passA.helper, passB.helper].map(Digests.sha256(file:)),

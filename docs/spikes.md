@@ -3414,3 +3414,69 @@ Developer ID Application and Installer identities available, no signing plan
 is promoted and the roadmap has no active Now item. Clean-Mac install/update
 acceptance, September adoption, accessibility and consortium audit remain
 separately gated. Keeper and its profile-authority rider remain Held.
+
+### S34 correction gate — compiler-visible path-length authority (21 August 2026)
+
+S35's clean-U1 preflight correctly stopped before credentials. Rebuilding the
+same historical P0 with the same release-tool, depot and toolchain from a new
+absolute root produced reachd `4122823b…` instead of the retained
+`d41040ad…`. Of 273 changed bytes, UUID/signature derivation explained all but
+34. The remainder was 17 arm64 `mov w2, #filenameLength` operands immediately
+before `_swift_isEscapingClosureAtFileLocation`, with the three observed values
+tracking the absolute paths to `Memory.swift`, `Cache.swift` and
+`PreTokenizer.swift`. This was compiler-generated diagnostic behavior, not a
+third equivalent-link-order class. The narrow `_objc_msgSend` normalizer stays
+unchanged.
+
+The correction candidate gives build A and build B disjoint private storage
+whose compiler-visible roots are each exactly 240 UTF-8 bytes. Prefix maps
+continue to remove path contents; the fixed length removes the remaining
+diagnostic immediate. Unknown pass names and caller paths too long to retain a
+safe padding component fail before compilation. Every raw CLI path now also
+rejects empty, dot or dot-dot components and any existing symlink ancestor.
+The deepest existing prefix must byte-match `realpath(3)` before either mutable
+root is created; the core independently repeats that validation. Every such
+comparison now uses `utf8.elementsEqual`, not Swift's Unicode-canonical
+`String` equality. This closes case-folded and APFS composed/decomposed aliases
+and prevents the 240-byte calculation from using any caller spelling that
+differs from the physical bytes SwiftPM compiles through. The external
+comparison record is schema 2 and names the unaliased canonical fixed-length
+authority and its exact length. Candidate-backed release-tool tests passed
+**37/37 three complete times** from separate scratch products, including the
+full copied-authority P0/P1/U1 mutation paths plus dot-segment, nested-symlink,
+case-alias and Unicode-normalization refusal.
+
+The final preliminary cross-root gate ran three independent tool processes
+from physical, byte-exact caller work roots of 44, 72 and 94 UTF-8 bytes. Each
+process performed its own A/B build, giving six full reachd builds. All six
+executables are exactly `fecb7da1…254b`; all three independently verified U1
+semantic digests are exactly `cdd91ae2…da1f`; each verifier joined 50 host and
+6 helper files with no Scripts or Resources. The embedded manifest is
+`392e4bc0…4187` and all three selected unsigned containers are exactly
+`59900976…9473`. This proves the Unicode-byte-closed correction from tool source
+`7b215b2b…7c8a`, but it is not the final signing parent.
+
+The privacy-minimized preliminary pack is
+`/private/tmp/reach-s34-compile-path-unicode-byte-correction-proof-20260821`;
+its 26-entry manifest hashes to `4f56bb89…f989` and verifies every retained
+source, candidate-backed test transcript, sanitized build-command record,
+comparison, provenance, manifest and independent report. All 27 files including
+the seal are 0600 below 0700 directories. The three earlier path-correction
+packs remain valid only for their recorded ASCII/case boundaries and are
+superseded by this Unicode-byte proof.
+
+Read-only live parity remained exact after the proof: installed reachd is
+`a9660a83…6b790` at PID 21242/run 29; helper is `a784f257…b28ca8` at PID
+20190/run 1; helper generation 37 is ready on `utun0` with one direct peer and
+relay configured false/ready true. No installed byte, receipt, state, service,
+identity, Keeper target or network configuration moved. The retained genuine
+authenticated result remains joined to those exact installed bytes; this
+compile-tool correction did not substitute a new diagnostic retry for it.
+
+**Authority ruling.** The original `d41040ad…` executable,
+`a969fef4…` semantic digest, `c8d7896e…` candidate and `a3559ff5…` evidence
+remain valid historical S34 evidence but are superseded as P2 signing
+authority. S35 stays stopped. After this correction is separately committed
+and `HEAD == main == origin/main`, the same three-process/six-build gate must
+run from that synchronized correction commit and seal one new U1 authority
+before any identity resolution, signing, timestamp or Apple submission.

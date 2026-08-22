@@ -22,6 +22,35 @@ derives a content-bound UUID before ad-hoc signing. It requires the exact
 ordinary and 32-byte fast-stub shapes and refuses small or unknown stubs, so
 reproducibility does not select the linker's size-first dispatch mode.
 
+Swift escaping-closure diagnostics also encode the UTF-8 byte length of their
+compiler-visible source filename. Prefix mapping rewrites the filename but not
+that immediate operand. The builder therefore pads each private build root to
+exactly 240 UTF-8 bytes before invoking Swift; an overlong caller root fails
+before compilation. This is compile-path authority, not another post-link
+normalization class.
+
+Every release-tool path must use its physical, canonical spelling. Empty,
+`.` and `..` components, repeated or trailing separators, and any existing
+symlink ancestor are refused before the work or output root is created. The
+deepest existing prefix is resolved with `realpath(3)` and must byte-match the
+caller's spelling, so case-folded aliases are also refused on case-insensitive
+volumes. That comparison uses `utf8.elementsEqual`, not Swift's
+Unicode-canonical `String` equality, so composed/decomposed aliases are refused
+too. On macOS use `/private/tmp/...`, with its exact on-disk bytes and case, not
+the `/tmp` symlink or `/PRIVATE/TMP/...`. The core rechecks mutable roots
+independently of CLI parsing so a programmatic caller cannot calculate the
+240-byte authority from one spelling while SwiftPM compiles through another.
+
+One `build` invocation still performs the local A/B comparison. A release U1
+authority additionally requires three separate `build` processes whose
+caller `--work` paths have deliberately different UTF-8 lengths. Compare all
+three schema-v2 `release-build-comparison.json` files: all six
+`reachdSHA256` values and all three `normalizedSemanticSHA256` values must be
+identical, while every record must name the fixed-length authority and report
+`compilerVisibleRootUTF8Length` as 240. Differing outer package hashes remain
+acceptable only when independent expansion attributes them solely to XAR
+creation time.
+
 Build the tool in an explicit scratch product:
 
 ```sh

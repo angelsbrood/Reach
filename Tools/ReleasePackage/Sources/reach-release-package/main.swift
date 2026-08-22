@@ -27,18 +27,15 @@ struct Arguments {
   }
 
   func require(_ key: String) throws -> URL {
-    guard let value = values["--\(key)"], value.hasPrefix("/") else {
+    guard let value = values["--\(key)"] else {
       throw ReleasePackageError.invalidArgument("--\(key) requires an absolute path")
     }
-    return URL(fileURLWithPath: value)
+    return try ReleasePathAuthority.absoluteURL(value, label: "--\(key)")
   }
 
   func optional(_ key: String) throws -> URL? {
     guard let value = values["--\(key)"] else { return nil }
-    guard value.hasPrefix("/") else {
-      throw ReleasePackageError.invalidArgument("--\(key) requires an absolute path")
-    }
-    return URL(fileURLWithPath: value)
+    return try ReleasePathAuthority.absoluteURL(value, label: "--\(key)")
   }
 
   func validateKeys(_ allowed: Set<String>) throws {
