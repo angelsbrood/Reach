@@ -7,6 +7,7 @@ let package = Package(
   products: [
     .library(name: "ReleasePackageCore", targets: ["ReleasePackageCore"]),
     .executable(name: "reach-release-package", targets: ["reach-release-package"]),
+    .executable(name: "reach-release-acceptance", targets: ["reach-release-acceptance"]),
   ],
   targets: [
     .target(
@@ -14,10 +15,15 @@ let package = Package(
       linkerSettings: [
         .linkedFramework("LocalAuthentication"),
         .linkedFramework("Security"),
+        .linkedFramework("Virtualization"),
       ]
     ),
     .executableTarget(
       name: "reach-release-package",
+      dependencies: ["ReleasePackageCore"]
+    ),
+    .executableTarget(
+      name: "reach-release-acceptance",
       dependencies: ["ReleasePackageCore"]
     ),
     .testTarget(

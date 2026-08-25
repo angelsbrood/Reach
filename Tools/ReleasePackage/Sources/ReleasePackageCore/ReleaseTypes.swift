@@ -97,18 +97,38 @@ public struct ReleaseConfiguration: Codable, Equatable, Sendable {
   public let product: Product
   public let components: Components
   public let compatibility: Compatibility
+  public let lineage: ReleaseLineage?
+  public let consumedProductVersions: [DottedVersion]?
   public let consumedVersions: [String: [DottedVersion]]
   public let hostBundles: [String]
   public let untrackedAllowlist: [String]
 
   public static func load(from url: URL) throws -> Self {
     let data = try Data(contentsOf: url, options: [.mappedIfSafe])
-    let object = try requireObjectKeys(
-      data,
-      expected: [
+    guard let raw = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+      let schemaVersion = raw["schemaVersion"] as? Int
+    else {
+      throw ReleasePackageError.invalidConfiguration(
+        "release configuration schema version is missing")
+    }
+    let expectedTopLevel: Set<String>
+    switch schemaVersion {
+    case 1:
+      expectedTopLevel = [
         "schemaVersion", "product", "components", "compatibility", "consumedVersions",
         "hostBundles", "untrackedAllowlist",
-      ], label: "release configuration")
+      ]
+    case 2:
+      expectedTopLevel = [
+        "schemaVersion", "product", "components", "compatibility", "lineage",
+        "consumedProductVersions", "consumedVersions", "hostBundles", "untrackedAllowlist",
+      ]
+    default:
+      throw ReleasePackageError.invalidConfiguration(
+        "unsupported schema version \(schemaVersion)")
+    }
+    let object = try requireObjectKeys(
+      raw, expected: expectedTopLevel, label: "release configuration")
     try requireObjectKeys(
       object["product"],
       expected: ["name", "version", "architecture", "minimumMacOS"],
@@ -130,30 +150,27 @@ public struct ReleaseConfiguration: Codable, Equatable, Sendable {
       object["consumedVersions"],
       expected: ["systems.reach.host", "systems.reach.meshd"],
       label: "consumed versions")
+    if schemaVersion == 2 {
+      try validateLineageObject(object["lineage"])
+    }
     let decoded = try JSONDecoder().decode(Self.self, from: data)
     try decoded.validate()
     return decoded
   }
 
   public func validate() throws {
-    guard schemaVersion == 1 else {
-      throw ReleasePackageError.invalidConfiguration("unsupported schema version \(schemaVersion)")
-    }
     guard product.name == "Reach",
-      product.version.description == "0.0.1",
       product.architecture == "arm64",
       product.minimumMacOS.description == "27.0.0"
     else {
       throw ReleasePackageError.invalidConfiguration(
-        "the first product authority must remain Reach 0.0.1 arm64 for macOS 27.0.0")
+        "product authority must remain Reach arm64 for macOS 27.0.0")
     }
     guard components.host.identifier == "systems.reach.host",
-      components.host.version.description == "0.0.1",
-      components.helper.identifier == "systems.reach.meshd",
-      components.helper.version.description == "1.0.1"
+      components.helper.identifier == "systems.reach.meshd"
     else {
       throw ReleasePackageError.invalidConfiguration(
-        "component identifiers or frozen first versions changed")
+        "component identifiers changed")
     }
     guard compatibility.wireDialects == [1, 0],
       compatibility.helperStatusVersions == [1, 2],
@@ -164,7 +181,7 @@ public struct ReleaseConfiguration: Codable, Equatable, Sendable {
       compatibility.helperMaximum == components.helper.version
     else {
       throw ReleasePackageError.invalidConfiguration(
-        "compatibility must bind the exact first component pair and the existing protocol ranges")
+        "compatibility must bind the exact component pair and the existing protocol ranges")
     }
     let expectedBundles = [
       "mlx-swift_Cmlx.bundle",
@@ -182,19 +199,183 @@ public struct ReleaseConfiguration: Codable, Equatable, Sendable {
       throw ReleasePackageError.invalidConfiguration(
         "only tasks/ may be an untracked release-source exclusion")
     }
-    let consumedHelper = try DottedVersion("1.0.0")
     guard
       Set(consumedVersions.keys)
-        == Set([components.host.identifier, components.helper.identifier]),
+        == Set([components.host.identifier, components.helper.identifier])
+    else {
+      throw ReleasePackageError.invalidConfiguration("consumed-version component set changed")
+    }
+    switch schemaVersion {
+    case 1: try validateHistoricalFirstRelease()
+    case 2: try validateMultiRelease()
+    default:
+      throw ReleasePackageError.invalidConfiguration("unsupported schema version \(schemaVersion)")
+    }
+  }
+
+  private func validateHistoricalFirstRelease() throws {
+    let consumedHelper = try DottedVersion("1.0.0")
+    guard product.version.description == "0.0.1",
+      components.host.version.description == "0.0.1",
+      components.helper.version.description == "1.0.1",
+      lineage == nil,
+      consumedProductVersions == nil,
       consumedVersions[components.host.identifier] == [],
-      consumedVersions[components.helper.identifier] == [consumedHelper],
-      consumedHelper < components.helper.version,
-      consumedVersions[components.helper.identifier]?.contains(components.helper.version) != true,
-      consumedVersions[components.host.identifier]?.contains(components.host.version) != true
+      consumedVersions[components.helper.identifier] == [consumedHelper]
     else {
       throw ReleasePackageError.invalidConfiguration(
-        "consumed-version authority is inconsistent with the first package")
+        "historical schema-1 first-release authority changed")
     }
+  }
+
+  private func validateMultiRelease() throws {
+    guard let lineage, let consumedProductVersions else {
+      throw ReleasePackageError.invalidConfiguration(
+        "schema-2 releases require explicit lineage and consumed product versions")
+    }
+    try requireCanonicalConsumedVersions(consumedProductVersions, current: product.version)
+    guard consumedProductVersions.contains(lineage.predecessor.product) else {
+      throw ReleasePackageError.invalidConfiguration(
+        "the predecessor product version is absent from consumed authority")
+    }
+    try validateComponentLineage(
+      current: components.host.version,
+      predecessor: lineage.predecessor.host,
+      disposition: lineage.components.host,
+      consumed: consumedVersions[components.host.identifier] ?? [],
+      label: "host")
+    try validateComponentLineage(
+      current: components.helper.version,
+      predecessor: lineage.predecessor.helper,
+      disposition: lineage.components.helper,
+      consumed: consumedVersions[components.helper.identifier] ?? [],
+      label: "helper")
+
+    switch lineage {
+    case .replacement(let replacement):
+      let historical = ReleaseVersionMap(
+        product: try DottedVersion("0.0.1"),
+        host: try DottedVersion("0.0.1"),
+        helper: try DottedVersion("1.0.1"))
+      guard product.version.description == "0.0.2",
+        components.host.version.description == "0.0.2",
+        components.helper.version.description == "1.0.2",
+        replacement.predecessor == historical,
+        replacement.historicalP5Reference
+          == "sha256-abbrev:97397473…6389f;size:13741205",
+        replacement.components
+          == .init(host: .changed, helper: .changed)
+      else {
+        throw ReleasePackageError.invalidConfiguration(
+          "replacement authority does not match the founder-selected S35 successor")
+      }
+    case .successor(let successor):
+      let replacement = ReleaseVersionMap(
+        product: try DottedVersion("0.0.2"),
+        host: try DottedVersion("0.0.2"),
+        helper: try DottedVersion("1.0.2"))
+      guard product.version.description == "0.0.3",
+        components.host.version.description == "0.0.3",
+        components.helper.version.description == "1.0.2",
+        successor.parent == replacement,
+        successor.components == .init(host: .changed, helper: .unchanged),
+        validSHA256(successor.parentP5SHA256),
+        validSHA256(successor.parentProvenanceSHA256)
+      else {
+        throw ReleasePackageError.invalidConfiguration(
+          "successor authority does not match the founder-selected replacement update")
+      }
+    }
+  }
+
+  private func validateComponentLineage(
+    current: DottedVersion,
+    predecessor: DottedVersion,
+    disposition: ReleaseComponentDisposition,
+    consumed: [DottedVersion],
+    label: String
+  ) throws {
+    try requireCanonicalConsumedVersions(
+      consumed, current: current, allowCurrent: disposition == .unchanged)
+    guard consumed.contains(predecessor) else {
+      throw ReleasePackageError.invalidConfiguration(
+        "the predecessor \(label) version is absent from consumed authority")
+    }
+    switch disposition {
+    case .changed:
+      guard predecessor < current else {
+        throw ReleasePackageError.invalidConfiguration(
+          "changed \(label) bytes require a higher component version")
+      }
+    case .unchanged:
+      guard predecessor == current else {
+        throw ReleasePackageError.invalidConfiguration(
+          "unchanged \(label) bytes must retain the parent component version")
+      }
+    }
+  }
+
+  private func requireCanonicalConsumedVersions(
+    _ versions: [DottedVersion], current: DottedVersion, allowCurrent: Bool = false
+  ) throws {
+    guard versions == versions.sorted(), Set(versions).count == versions.count,
+      versions.allSatisfy({ $0 < current || (allowCurrent && $0 == current) }),
+      !versions.isEmpty
+    else {
+      throw ReleasePackageError.invalidConfiguration(
+        "consumed versions must be unique, ordered, and precede the selected version")
+    }
+  }
+
+  private func validSHA256(_ value: String) -> Bool {
+    value.count == 64 && value.allSatisfy(\.isHexDigit)
+  }
+
+  private static func validateLineageObject(_ value: Any?) throws {
+    let lineage = try requireObjectKeys(
+      value,
+      allowed: [
+        "kind", "predecessor", "historicalP5Reference", "parent", "parentP5SHA256",
+        "parentProvenanceSHA256", "components",
+      ],
+      required: ["kind", "components"],
+      label: "release lineage")
+    guard let kind = lineage["kind"] as? String else {
+      throw ReleasePackageError.invalidConfiguration("release lineage kind is malformed")
+    }
+    switch kind {
+    case "replacement":
+      guard
+        Set(lineage.keys)
+          == Set([
+            "kind", "predecessor", "historicalP5Reference", "components",
+          ])
+      else {
+        throw ReleasePackageError.invalidConfiguration(
+          "replacement lineage fields are incomplete or unknown")
+      }
+      try requireObjectKeys(
+        lineage["predecessor"], expected: ["product", "host", "helper"],
+        label: "replacement predecessor")
+    case "successor":
+      guard
+        Set(lineage.keys)
+          == Set([
+            "kind", "parent", "parentP5SHA256", "parentProvenanceSHA256", "components",
+          ])
+      else {
+        throw ReleasePackageError.invalidConfiguration(
+          "successor lineage fields are incomplete or unknown")
+      }
+      try requireObjectKeys(
+        lineage["parent"], expected: ["product", "host", "helper"],
+        label: "successor parent")
+    default:
+      throw ReleasePackageError.invalidConfiguration("unknown release lineage kind")
+    }
+    try requireObjectKeys(
+      lineage["components"], expected: ["host", "helper"],
+      label: "release component dispositions")
   }
 }
 
@@ -294,6 +475,20 @@ private func requireObjectKeys(_ value: Any?, expected: Set<String>, label: Stri
   -> [String: Any]
 {
   guard let object = value as? [String: Any], Set(object.keys) == expected else {
+    throw ReleasePackageError.invalidConfiguration(
+      "\(label) contains unknown or missing fields")
+  }
+  return object
+}
+
+@discardableResult
+private func requireObjectKeys(
+  _ value: Any?, allowed: Set<String>, required: Set<String>, label: String
+) throws -> [String: Any] {
+  guard let object = value as? [String: Any],
+    Set(object.keys).isSubset(of: allowed),
+    required.isSubset(of: Set(object.keys))
+  else {
     throw ReleasePackageError.invalidConfiguration(
       "\(label) contains unknown or missing fields")
   }

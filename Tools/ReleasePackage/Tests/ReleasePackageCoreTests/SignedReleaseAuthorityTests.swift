@@ -5,13 +5,13 @@ import Testing
 
 private let authorityTimestamp = "2026-08-22T00:00:00.000Z"
 
-private func releaseArtifact(_ path: String, hash: Character = "a")
+func releaseArtifact(_ path: String, hash: Character = "a")
   -> ReleaseProvenance.Artifact
 {
   .init(path: path, size: 1, sha256: String(repeating: hash, count: 64))
 }
 
-private func signingAuthority(
+func signingAuthority(
   _ certificateClass: DeveloperIDClass,
   teamID: String = "ABCDEFGHIJ",
   validFrom: String = "2025-01-01T00:00:00.000Z",
@@ -28,7 +28,7 @@ private func signingAuthority(
     chainSHA256: [String(repeating: "c", count: 64), String(repeating: "d", count: 64)])
 }
 
-private func signedLeaf(
+func signedLeaf(
   path: String,
   identifier: String,
   authority: SigningCertificateAuthority,
@@ -51,7 +51,7 @@ private func signedLeaf(
     entitlementsSHA256: entitlementsSHA256)
 }
 
-private func signedProvenanceFixture(
+func signedProvenanceFixture(
   application: SigningCertificateAuthority = signingAuthority(.application),
   installer: SigningCertificateAuthority = signingAuthority(.installer),
   runtime: Bool = true,

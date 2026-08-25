@@ -3734,3 +3734,253 @@ upload and after notarization, an exact non-credential argument grammar,
 truthful candidate-test accounting, a runnable retained-source verification
 command, and one independently checkable external sidecar. No new Now item
 follows.
+
+### S36 / 8C offline clean-Mac lifecycle implementation checkpoint (23 August 2026)
+
+Historical S35 P5 authority could not be restored after its private scratch
+roots disappeared. Its hashes remain evidence, not usable package bytes. The
+founder selected a new exact sequence: replacement A is product/host `0.0.2`
+and helper `1.0.2`; B is product/host `0.0.3`, with helper `1.0.2` only if the
+complete signed A helper component is carried forward without re-signing.
+Each release retains a separate exact-P3 checkpoint before either of the two
+possible future Apple submissions. This checkpoint did not exercise either
+one.
+
+The release configuration now has a strict schema 2 while historical schema 1
+remains readable. Signed provenance schema 3 binds the exact predecessor,
+component disposition, complete parent authority, and P0–P5 lineage. A
+successor may retain an unchanged helper version only after its complete
+component bytes and executed Mach-O content match the retained parent; the
+parent helper is then carried forward exactly rather than signed again. A
+caller-supplied hash, reconstructed historical package, missing parent tree,
+version reuse, changed bytes without a bump, or incompatible pair refuses.
+
+The nonshipping `reach-release-acceptance` executable implements only the
+private acceptance boundary. Host authority is confined to two exact Tart VM
+names, pinned SSH, fixed commands, host storage floors, an Apple restore-image
+record, and durable rig/evidence teardown journals. Guest authority is confined
+to exact retained P5 catalogs, two receipts, immutable payloads, running inode,
+one selected login owner, root-helper status/routes, and a privacy-safe retained
+state baseline. Its fsynced transaction states cover install, unmanaged
+migration, update, an observed real-Installer interruption, recovery, explicit
+rollback, uninstall, retained-state reinstall, and verification. Three-phase
+real-user contention and supervised daemon/helper crash probes prevent a
+scripted fixture from standing in for those future cells. Uninstall enumerates
+the complete immutable package root and refuses any member outside the signed
+allowlist before removing package bytes or receipts; login-owned state remains
+separate.
+
+Final offline verification, after the teardown correction, passed:
+
+- ReleasePackage **129/129 three times**, each with exactly six explicit
+  signed-candidate skips because replacement A authority does not yet exist;
+- warnings-as-errors builds of `reach-release-package`
+  (`742b9f46…d6b84`) and `reach-release-acceptance`
+  (`2810ae10…f724`);
+- ReachKit **95/95** from fresh scratch;
+- reachd **250/250 across 36 suites** from fresh scratch; and
+- mesh-helper full and race suites plus vet and offline module verification.
+
+The first sandboxed ReachKit run failed only because Keychain access was
+denied, and the first sandboxed helper run failed only because Unix-domain
+socket creation was denied; both passed unchanged outside that sandbox. Two
+fresh reachd attempts exposed a separate Xcode 27 beta tool-discovery defect:
+the Metal component was not installed, then the default wrapper still failed
+to discover it. Apple's supported component install produced build
+`27A5237l`, toolchain identifier
+`com.apple.dt.toolchain.Metal.32023.921.1`; explicitly selecting that installed
+toolchain let the unchanged suite compile its metallib and pass. This is a
+developer-tool correction, not a Reach runtime or release result.
+
+The privacy-minimized offline pack is
+`/private/tmp/reach-s36-offline-authority-20260823`. Its direct nine-entry
+manifest verifies; `SHA256SUMS` seals at `e7482e1a…c3e3`. The 59-file
+implementation/configuration manifest hashes to `44a176b5…c865`. Directories
+are mode `0700`, files `0600`, JSON parses, and the retained text contains no
+home path, account address, key, credential, or numeric endpoint.
+
+Read-only parity remained exact after the pass: refs were still synchronized
+at `8028082`; reachd `a9660a83…6b790` was PID 85664/run 1; helper
+`a784f257…b28ca8` was PID 543/run 1 with receipt `1.0.0`; generation 37 was
+direct-ready with one peer and relay configured false/ready true. The four
+identity artifact classes retained combined digest `0033884c…d5f3`. No live
+Reach byte, receipt, service, state, route, CA, Keeper artifact, or installed
+package changed, and no fresh diagnostic displaced the retained authenticated
+exact-byte result.
+
+**Checkpoint verdict: S36 REMAINS OPEN.** Offline implementation is ready for
+independent review. Replacement-A final varied-root U1 may be minted only after
+separate commit/push synchronization. Identity resolution, signing,
+timestamping, notary-profile use, Apple submission, stapling, Tart
+installation, IPSW download, VM creation, Installer use, lifecycle acceptance,
+publication, automatic updates, and Keeper remain unearned.
+
+### S36 offline authority correction (24 August 2026)
+
+Independent review reproduced the first offline checkpoint but found six
+acceptance gaps. The corrected candidate now:
+
+- carries the complete signed A helper component byte-for-byte into B instead
+  of rebuilding it, and checks the retained component artifact itself;
+- obtains the running host/helper executable device and inode from each
+  process's live `txt` vnode, requires exact login/root launch definitions,
+  binds retained-state owner/group/mode/link/size/hash metadata, and enumerates
+  the complete `/Library/Application Support/Reach` package root;
+- reloads the local IPSW through `VZMacOSRestoreImage.load` during verification
+  and refuses any changed product, build, support, resource, or hardware-model
+  result;
+- treats service-definition, bootstrap, or unobservable second-user failures
+  as inconclusive rather than safe owner contention; and
+- freezes the two credential files and complete S36 tooling root, including
+  their device/inode authority, after evidence sealing and before teardown.
+  Later absence claims are bound to that run and cannot name after-the-fact
+  paths.
+
+The active PLAN now labels its unavailable historical S35/default-B sequence
+as superseded and non-executable. The founder-selected replacement sequence at
+the top remains the only authority.
+
+Focused correction coverage passed **38/38**. The complete ReleasePackage
+suite then passed **135/135 three complete times**, each with exactly six
+explicit signed-candidate skips. Fresh ReachKit passed **95/95**; reachd passed
+**250/250 across 36 suites**; mesh-helper full/race/vet/offline gates passed;
+and both private executables built release with warnings-as-errors. Their
+hashes are `0a35ed4d…c5d2` (`reach-release-package`) and
+`5bdc6a24…a829` (`reach-release-acceptance`).
+
+The initial nine-entry pack remains honest historical evidence but is
+superseded for this source candidate. The corrected authority is
+`/private/tmp/reach-s36-offline-authority-corrected-20260824`: its direct
+**11-entry** manifest verifies and seals at `18b62096…4d9b`; its exact
+**60-file** implementation/configuration manifest verifies and hashes to
+`b89216ed…4a0b`. Directories are `0700`, files `0600`, JSON parses, and privacy
+searches found no home path, account address, private key, credential argument,
+or numeric private endpoint.
+
+Read-only parity remained exact: refs stayed synchronized at `8028082`;
+reachd `a9660a83…6b790` stayed PID 85664/run 1; helper
+`a784f257…b28ca8` stayed PID 543/run 1 with receipt `1.0.0`; generation 37
+remained direct-ready with one peer and relay configured false/ready true; and
+the four identity artifact classes retained combined digest
+`0033884c…d5f3`. No fresh diagnostic displaced the retained authenticated
+exact-byte result.
+
+**Corrected checkpoint verdict: S36 REMAINS OPEN.** This candidate is ready
+for independent review, not for credentials or VM execution. Commit/push
+synchronization and replacement-A varied-root U1 remain prerequisites to the
+first exact-P3 checkpoint. No identity resolution, signing, timestamping,
+notary profile use, submission, stapling, Tart/IPSW/VM, Installer, publication,
+live-host mutation, or Keeper action occurred.
+
+### S36 final offline authority correction (24 August 2026)
+
+A second independent review found four remaining acceptance-authority gaps.
+The final offline candidate now:
+
+- recognizes safe owner exclusion only from a loaded contender job that ran,
+  exited nonzero, emitted the exact bounded selected-owner refusal, and created
+  neither state nor a CA; the complete primary -> refused contender -> restored
+  primary journal path is covered, while a different future physical outcome
+  remains an honest `OWNER-CONTENTION` stop;
+- binds the exact pinned-SSH identity, known-hosts file, and complete S36-owned
+  tooling root to the live rig, freezes every vnode after evidence sealing,
+  rechecks each opened member immediately before coordinator-owned deletion,
+  and records recoverable credential/tooling destruction phases;
+- requires exact `0700` mutable retained-state directories and `0600`
+  single-link mutable files across enrollment tokens, staged mesh authority,
+  the intent lock, and reachability state; and
+- records unmanaged migration's process text vnode rather than the pathname's
+  current inode. The later vnode-authority correction below supersedes this
+  checkpoint's acceptance claim for replaced or unlinked live images.
+
+The focused four-boundary spine passed **32/32**. Three separately retained
+complete ReleasePackage runs each completed a **146-test** suite with exactly
+six explicit signed-candidate skips because replacement A remains absent.
+The joined unchanged-product gates remain ReachKit **95/95**, reachd **250/250
+across 36 suites**, and mesh-helper full/race/vet/offline PASS. Fresh
+warnings-as-errors executables hash to `169b3bf5…4577`
+(`reach-release-package`) and `71532b56…9d68`
+(`reach-release-acceptance`).
+
+The preceding corrected pack remains honest but is superseded for this source
+candidate. The final privacy-minimized authority is
+`/private/tmp/reach-s36-offline-authority-final-correction-20260824`: its
+direct **11-entry** manifest verifies and seals at `00c815ae…dcb2`; its exact
+**62-file** implementation/configuration manifest verifies and hashes to
+`89e26d2c…b4a1`. Directories are `0700`, files `0600`, JSON parses, and privacy
+searches found no home path, account address, private key, credential argument,
+or numeric private endpoint.
+
+Read-only parity remained exact: refs stayed synchronized at `8028082` and the
+submodule at `6dfd5389…6797b`; reachd `a9660a83…6b790` stayed PID 85664/run 1;
+helper `a784f257…b28ca8` stayed PID 543/run 1 with receipt `1.0.0`; generation
+37 remained direct-ready with one peer and relay configured false/ready true;
+the four identity artifact classes and one device record remained exact, with
+zero observed CA creation. No fresh diagnostic displaced the retained
+authenticated exact-byte result.
+
+**Final offline checkpoint verdict: S36 REMAINS OPEN.** This candidate is ready
+for independent review and later commit/push synchronization, not for
+credentials or VM execution. Replacement-A varied-root U1 remains the next
+gate. No identity resolution, signing, timestamping, notary profile use,
+submission, stapling, Tart/IPSW/VM, Installer, publication, live-host mutation,
+or Keeper action occurred.
+
+### S36 vnode-authority correction (24 August 2026)
+
+Independent review found four false-proof paths in the final offline
+checkpoint. This source candidate now closes them without changing product or
+installed bytes:
+
+- the owner-contention observer waits for state or a stopped launch decision
+  rather than treating transient execution as final. After bootout and
+  confirmed unload, it re-observes the contender and records refusal only when
+  state remains absent and CA creation remains zero;
+- credential files and the complete tooling root are atomically claimed into
+  deterministic same-volume tombstones. The coordinator verifies the exact
+  open vnode through each claim, durably records the complete claim, then holds
+  and verifies every claimed vnode through deletion. Missing tombstones count
+  as removed only behind durable per-vnode progress; unclaimed disappearance
+  or substitution fails closed;
+- output, absence inventory, both journals and teardown authority must be
+  distinct and disjoint in both directions from every original and claimed
+  deletion path before any mutation begins; and
+- unmanaged migration opens and verifies the exact retained-A `reachd` path,
+  then requires the running text vnode to have that same device/inode. A
+  replaced or deleted live image refuses.
+
+The focused correction spine passed **25/25 three times**. Three isolated
+complete ReleasePackage runs each passed **152/152**, with exactly six explicit
+signed-candidate skips because replacement A remains absent. Fresh
+warnings-as-errors executables hash to `76252cdb…9bcbe`
+(`reach-release-package`) and `23008f9a…8d3c6`
+(`reach-release-acceptance`). An initial sandboxed package build stopped only
+at an attributed `dsymutil` permission failure; its unchanged rerun passed
+outside that restriction. No product source changed, so the preceding pack's
+sealed ReachKit **95/95**, reachd **250/250 across 36 suites**, and mesh-helper
+full/race/vet/offline gates remain the unchanged-product authority.
+
+The privacy-minimized correction pack is
+`/private/tmp/reach-s36-offline-authority-vnode-correction-authoritative-20260824`.
+Its direct **11-entry** manifest verifies and seals at `d2e49779…c5776`; its
+exact **62-file** source manifest verifies and hashes to `1ab020dd…75b2e`.
+Directories are `0700`, files are `0600`, JSON parses, and privacy searches
+found no home path, account data, private key, credential argument or numeric
+private endpoint.
+
+Read-only parity remained exact at synchronized `8028082` with submodule
+`6dfd5389…6797b`: reachd `a9660a83…6b790` stayed PID 85664/run 1; helper
+`a784f257…b28ca8` stayed PID 543/run 1 with receipt `1.0.0`; generation 37
+remained direct-ready on `utun0` with one peer and relay configured false/ready
+true. Registry, host public key, CA certificate and server certificate remain
+`75d9dbf9…0def`, `99526d11…a1d`, `03a08c64…c737` and
+`15302bb6…d5af`; one device remains and the current daemon log records zero CA
+creation events. No fresh diagnostic displaced the retained authenticated
+exact-byte result.
+
+**Vnode-corrected checkpoint verdict: S36 REMAINS OPEN.** This candidate is
+ready for independent review, not credentials or VM execution. Separate
+commit/push synchronization and replacement-A varied-root U1 still precede any
+identity resolution, signing, timestamping, notary-profile use, Apple
+submission, stapling, Tart/IPSW/VM, Installer, publication, live-host mutation
+or Keeper action.

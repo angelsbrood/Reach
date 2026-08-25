@@ -1,19 +1,19 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "product": {
     "name": "Reach",
-    "version": "0.0.1",
+    "version": "0.0.2",
     "architecture": "arm64",
     "minimumMacOS": "27.0.0"
   },
   "components": {
     "host": {
       "identifier": "systems.reach.host",
-      "version": "0.0.1"
+      "version": "0.0.2"
     },
     "helper": {
       "identifier": "systems.reach.meshd",
-      "version": "1.0.1"
+      "version": "1.0.2"
     }
   },
   "compatibility": {
@@ -29,15 +29,34 @@
       1,
       2
     ],
-    "hostMinimum": "0.0.1",
-    "hostMaximum": "0.0.1",
-    "helperMinimum": "1.0.1",
-    "helperMaximum": "1.0.1"
+    "hostMinimum": "0.0.2",
+    "hostMaximum": "0.0.2",
+    "helperMinimum": "1.0.2",
+    "helperMaximum": "1.0.2"
   },
+  "lineage": {
+    "kind": "replacement",
+    "predecessor": {
+      "product": "0.0.1",
+      "host": "0.0.1",
+      "helper": "1.0.1"
+    },
+    "historicalP5Reference": "sha256-abbrev:97397473…6389f;size:13741205",
+    "components": {
+      "host": "changed",
+      "helper": "changed"
+    }
+  },
+  "consumedProductVersions": [
+    "0.0.1"
+  ],
   "consumedVersions": {
-    "systems.reach.host": [],
+    "systems.reach.host": [
+      "0.0.1"
+    ],
     "systems.reach.meshd": [
-      "1.0.0"
+      "1.0.0",
+      "1.0.1"
     ]
   },
   "hostBundles": [

@@ -21,6 +21,18 @@ enum RetainedU1AuthorityBinder {
     signed provenance: SignedReleaseProvenance,
     authorityRoot: URL
   ) throws -> ReleaseProvenance {
+    try verify(
+      signed: .init(
+        schemaVersion: provenance.schemaVersion, lineage: nil,
+        p0: provenance.p0, p1: provenance.p1, u1: provenance.u1,
+        p2: provenance.p2, p3: provenance.p3, p4: provenance.p4, p5: provenance.p5),
+      authorityRoot: authorityRoot)
+  }
+
+  static func verify(
+    signed provenance: SignedProvenanceView,
+    authorityRoot: URL
+  ) throws -> ReleaseProvenance {
     let url = authorityRoot.appendingPathComponent("u1-release-provenance.json")
     let data = try Data(contentsOf: url, options: [.mappedIfSafe])
     let retained = try JSONDecoder().decode(ReleaseProvenance.self, from: data)
@@ -64,13 +76,29 @@ public struct SignedReleaseVerifier {
     try SecureFiles.createPrivateDirectory(scratch)
     let logs = scratch.appendingPathComponent("logs")
     try SecureFiles.createPrivateDirectory(logs)
-    let provenance = try SignedReleaseProvenance.load(from: provenanceURL)
+    let envelope = try AnySignedReleaseProvenance.load(from: provenanceURL)
+    let provenance = envelope.view
     let authorityRoot = provenanceURL.deletingLastPathComponent()
     _ = try RetainedU1AuthorityBinder.verify(
       signed: provenance, authorityRoot: authorityRoot)
+    let configuration = try ReleaseConfiguration.load(from: configurationURL)
+    let expectedUnsignedToolDigest: String
+    let expectedSemanticDigest: String
+    if let lineage = provenance.lineage {
+      try lineage.validate(configuration: configuration, configurationURL: configurationURL)
+      expectedUnsignedToolDigest = lineage.unsignedToolSourceSHA256
+      expectedSemanticDigest = lineage.normalizedSemanticSHA256
+    } else {
+      guard configuration.schemaVersion == 1 else {
+        throw ReleasePackageError.verification(
+          "multi-release verification requires schema-3 lineage authority")
+      }
+      expectedUnsignedToolDigest = SignedReleaseContract.unsignedToolSourceSHA256
+      expectedSemanticDigest = SignedReleaseContract.unsignedSemanticSHA256
+    }
     guard
       try SourceInspector().canonicalTreeDigest(unsignedToolSource)
-        == SignedReleaseContract.unsignedToolSourceSHA256,
+        == expectedUnsignedToolDigest,
       try SourceInspector().canonicalTreeDigest(finalizerToolSource)
         == provenance.p2.finalizerToolSourceSHA256
     else {
@@ -84,13 +112,13 @@ public struct SignedReleaseVerifier {
       configurationURL: configurationURL,
       noticeAuthorityURL: noticeAuthorityURL,
       dependencyDepot: dependencyDepot,
-      expectedReleaseToolSourceSHA256: SignedReleaseContract.unsignedToolSourceSHA256,
+      expectedReleaseToolSourceSHA256: expectedUnsignedToolDigest,
       provenanceURL: authorityRoot.appendingPathComponent("u1-release-provenance.json"),
       noticeManifestURL: authorityRoot.appendingPathComponent("notice-manifest.json"),
       scratch: scratch.appendingPathComponent("u1"),
       logDirectory: scratch.appendingPathComponent("u1/logs")
     )
-    guard u1Report.normalizedSemanticSHA256 == SignedReleaseContract.unsignedSemanticSHA256 else {
+    guard u1Report.normalizedSemanticSHA256 == expectedSemanticDigest else {
       throw ReleasePackageError.verification("retained U1 semantic authority changed")
     }
 
@@ -185,7 +213,7 @@ public struct SignedReleaseVerifier {
     return report
   }
 
-  private func verifyRetainedArtifacts(_ value: SignedReleaseProvenance, root: URL) throws {
+  private func verifyRetainedArtifacts(_ value: SignedProvenanceView, root: URL) throws {
     var artifacts = [value.p1.embeddedManifest, value.p1.notices]
     artifacts.append(contentsOf: value.p1.hostComponents)
     artifacts.append(contentsOf: value.p1.helperComponents)
@@ -193,6 +221,14 @@ public struct SignedReleaseVerifier {
     artifacts.append(contentsOf: value.p1.helperBOMs)
     artifacts.append(contentsOf: value.u1.containers)
     artifacts.append(value.u1.selectedContainer)
+    if value.lineage != nil {
+      let lineageURL = root.appendingPathComponent("release-lineage.json")
+      let lineage = try ReleaseLineageAuthority.load(from: lineageURL)
+      guard lineage == value.lineage else {
+        throw ReleasePackageError.verification(
+          "retained release lineage does not match schema-3 provenance")
+      }
+    }
     artifacts.append(contentsOf: [
       value.p2.unsignedParent, value.p2.embeddedManifest, value.p2.hostComponent,
       value.p2.helperComponent, value.p2.hostBOM, value.p2.helperBOM,

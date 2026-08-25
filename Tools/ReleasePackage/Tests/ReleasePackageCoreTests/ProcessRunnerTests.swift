@@ -55,6 +55,27 @@ private func expectProcessGone(_ process: pid_t) {
   #expect(record.exitStatus != 0)
 }
 
+@Test func processRunnerLandsAndCleansAnObservableInterruption() throws {
+  let root = try makeTemporaryDirectory("process-observed-interruption")
+  defer { removeTemporaryDirectory(root) }
+  var polls = 0
+  let started = ContinuousClock().now
+  let result = try ProcessRunner().runUntilObservation(
+    "/bin/sleep", ["30"], timeout: 2,
+    logURL: root.appendingPathComponent("observed.log")
+  ) {
+    polls += 1
+    return polls >= 3
+  }
+  #expect(polls == 3)
+  #expect(result.exitStatus != 0)
+  #expect(started.duration(to: ContinuousClock().now) < .seconds(2))
+  let record = try JSONDecoder().decode(
+    CommandRecord.self,
+    from: Data(contentsOf: root.appendingPathComponent("observed.log.command.json")))
+  #expect(!record.timedOut)
+}
+
 @Test func processRunnerTimeoutKillsEveryDescendantInItsDedicatedGroup() throws {
   let root = try makeTemporaryDirectory("process-descendants")
   defer { removeTemporaryDirectory(root) }
@@ -133,6 +154,59 @@ private func expectProcessGone(_ process: pid_t) {
   }
   #expect(throws: ReleasePackageError.self) {
     try ProcessRunner().run("ls", [])
+  }
+}
+
+@Test func installerGrammarAllowsOnlyExactTrustedPackageAndDeselectionForms() {
+  let package = "/private/tmp/reach-s36-authority/Reach-0.0.2.pkg"
+  let choice = "/private/tmp/reach-s36-cell/helper-deselection.plist"
+  #expect(
+    ProcessRunner.installerInvocationIsAllowed([
+      "-pkg", package, "-target", "/",
+    ]))
+  #expect(
+    ProcessRunner.installerInvocationIsAllowed([
+      "-applyChoiceChangesXML", choice, "-pkg", package, "-target", "/",
+    ]))
+  for arguments in [
+    ["-pkg", package, "-target", "/", "-allowUntrusted"],
+    [
+      "-applyChoiceChangesXML", "/private/tmp/other.plist", "-pkg", package,
+      "-target", "/",
+    ],
+    ["-pkg", "/", "-target", "/"],
+  ] {
+    #expect(!ProcessRunner.installerInvocationIsAllowed(arguments))
+  }
+}
+
+@Test func processRunnerDeliversSensitiveInputWithoutPersistingIt() throws {
+  let root = try makeTemporaryDirectory("process-sensitive-input")
+  defer { removeTemporaryDirectory(root) }
+  let script = root.appendingPathComponent("consume-secret.sh")
+  try SecureFiles.atomicWrite(
+    Data(
+      """
+      #!/bin/sh
+      IFS= read -r ignored
+      /usr/bin/printf 'accepted\\n'
+      """.utf8),
+    to: script, mode: 0o700)
+  var secret = Data("guest-password-fixture\n".utf8)
+  defer { secret.resetBytes(in: 0..<secret.count) }
+  let log = root.appendingPathComponent("sensitive.log")
+  let result = try ProcessRunner(testExecutables: ["/bin/sh"])
+    .runWithSensitiveStandardInput(
+      "/bin/sh", [script.path], sensitiveStandardInput: secret,
+      timeout: 2, logURL: log)
+  #expect(result.output == "accepted\n")
+  for url in [
+    log, URL(fileURLWithPath: log.path + ".stderr"),
+    URL(fileURLWithPath: log.path + ".command.json"),
+  ] {
+    #expect(
+      !String(decoding: try Data(contentsOf: url), as: UTF8.self)
+        .contains("guest-password-fixture"))
   }
 }
 

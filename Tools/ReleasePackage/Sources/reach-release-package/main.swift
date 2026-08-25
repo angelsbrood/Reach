@@ -62,9 +62,11 @@ struct Arguments {
       reach-release-package snapshot-dependencies --repository PATH --swift-checkouts PATH --go-module-cache PATH --go-root PATH --notices PATH --output PATH --logs PATH
       reach-release-package build --repository PATH --release-tool-source PATH --configuration PATH --notices PATH --depot PATH --work PATH --output PATH
       reach-release-package verify --package PATH --release-tool-source PATH --configuration PATH --notices PATH --depot PATH --scratch PATH [--provenance PATH] [--notice-manifest PATH] [--report PATH]
-      reach-release-package sign --unsigned-authority PATH --unsigned-tool-source PATH --finalizer-tool-source PATH --configuration PATH --notices PATH --depot PATH --work PATH --output PATH
+      reach-release-package freeze-lineage --unsigned-authority PATH --unsigned-tool-source PATH --configuration PATH --notices PATH --depot PATH --scratch PATH --output PATH [--parent-authority PATH]
+      reach-release-package sign --unsigned-authority PATH --unsigned-tool-source PATH --finalizer-tool-source PATH --configuration PATH --notices PATH --depot PATH --work PATH --output PATH [--lineage PATH] [--parent-authority PATH]
       reach-release-package notarize --signed-authority PATH --configuration PATH --notices PATH --depot PATH --keychain-profile PROFILE --state PATH --output PATH [--recover-submission UUID]
       reach-release-package verify-release --package PATH --provenance PATH --unsigned-tool-source PATH --finalizer-tool-source PATH --configuration PATH --notices PATH --depot PATH --scratch PATH --report PATH
+      reach-release-package seal-authority --signed-authority PATH --unsigned-tool-source PATH --finalizer-tool-source PATH --configuration PATH --notices PATH --depot PATH --scratch PATH --output PATH
     """
 }
 
@@ -128,7 +130,7 @@ do {
   case "sign":
     try arguments.validateKeys([
       "unsigned-authority", "unsigned-tool-source", "finalizer-tool-source", "configuration",
-      "notices", "depot", "work", "output",
+      "notices", "depot", "work", "output", "lineage", "parent-authority",
     ])
     let result = try SignedReleaseFinalizer().sign(
       unsignedAuthority: arguments.require("unsigned-authority"),
@@ -138,7 +140,24 @@ do {
       noticeAuthorityURL: arguments.require("notices"),
       dependencyDepot: arguments.require("depot"),
       workRoot: arguments.require("work"),
-      outputRoot: arguments.require("output"))
+      outputRoot: arguments.require("output"),
+      lineageURL: try arguments.optional("lineage"),
+      parentAuthority: try arguments.optional("parent-authority"))
+    FileHandle.standardOutput.write(try CanonicalJSON.encode(result))
+  case "freeze-lineage":
+    try arguments.validateKeys([
+      "unsigned-authority", "unsigned-tool-source", "configuration", "notices", "depot",
+      "scratch", "output", "parent-authority",
+    ])
+    let result = try ReleaseLineageFreezer().freeze(
+      unsignedAuthority: arguments.require("unsigned-authority"),
+      unsignedToolSource: arguments.require("unsigned-tool-source"),
+      configurationURL: arguments.require("configuration"),
+      noticeAuthorityURL: arguments.require("notices"),
+      dependencyDepot: arguments.require("depot"),
+      scratch: arguments.require("scratch"),
+      output: arguments.require("output"),
+      parentAuthority: try arguments.optional("parent-authority"))
     FileHandle.standardOutput.write(try CanonicalJSON.encode(result))
   case "notarize":
     try arguments.validateKeys([
@@ -171,6 +190,21 @@ do {
       scratch: arguments.require("scratch"),
       reportURL: arguments.require("report"))
     FileHandle.standardOutput.write(try CanonicalJSON.encode(report))
+  case "seal-authority":
+    try arguments.validateKeys([
+      "signed-authority", "unsigned-tool-source", "finalizer-tool-source", "configuration",
+      "notices", "depot", "scratch", "output",
+    ])
+    let result = try RetainedReleaseAuthoritySealer().seal(
+      signedAuthority: arguments.require("signed-authority"),
+      unsignedToolSource: arguments.require("unsigned-tool-source"),
+      finalizerToolSource: arguments.require("finalizer-tool-source"),
+      configurationURL: arguments.require("configuration"),
+      noticeAuthorityURL: arguments.require("notices"),
+      dependencyDepot: arguments.require("depot"),
+      scratch: arguments.require("scratch"),
+      output: arguments.require("output"))
+    FileHandle.standardOutput.write(try CanonicalJSON.encode(result))
   default:
     throw ReleasePackageError.invalidArgument(Arguments.usage)
   }

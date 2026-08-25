@@ -67,7 +67,16 @@ public struct ReleaseNotarizer {
     return try store.withExclusiveLock {
       try SecureFiles.createPrivateDirectory(outputRoot)
       let signedProvenanceURL = signedAuthority.appendingPathComponent("release-provenance.json")
-      let signedProvenance = try SignedReleaseProvenance.load(from: signedProvenanceURL)
+      let signedEnvelope = try AnySignedReleaseProvenance.load(from: signedProvenanceURL)
+      let signedProvenance = signedEnvelope.view
+      let configuration = try ReleaseConfiguration.load(from: configurationURL)
+      if let lineage = signedProvenance.lineage {
+        try lineage.validate(configuration: configuration, configurationURL: configurationURL)
+      } else if configuration.schemaVersion != 1 {
+        throw ReleasePackageError.verification(
+          "multi-release notarization requires schema-3 lineage authority")
+      }
+      let p5Name = "Reach-\(configuration.product.version).pkg"
       let verificationInputs = SignedPackageVerificationInputs(
         configurationURL: configurationURL,
         noticeAuthorityURL: noticeAuthorityURL,
@@ -144,7 +153,7 @@ public struct ReleaseNotarizer {
         let recoveredP5 = try recoverCompletedP5IfPresent(
           outputRoot: outputRoot,
           signedAuthority: signedAuthority,
-          signedProvenance: signedProvenance,
+          signedProvenance: signedEnvelope,
           journal: journal,
           verificationInputs: verificationInputs,
           logRoot: stateURL.deletingLastPathComponent())
@@ -164,10 +173,10 @@ public struct ReleaseNotarizer {
         try SecureFiles.createPrivateDirectory(p5Attempt)
         try materializeAcceptedAuthority(
           source: signedAuthority, destination: outputRoot,
-          signedProvenance: signedProvenance,
+          signedProvenance: signedEnvelope,
           journal: journal,
           logRoot: stateURL.deletingLastPathComponent())
-        let p5Scratch = p5Attempt.appendingPathComponent("Reach-0.0.1.pkg")
+        let p5Scratch = p5Attempt.appendingPathComponent(p5Name)
         try SecureFiles.copyRegularFile(from: p3, to: p5Scratch, mode: 0o600)
         let staple = try runner.run(
           "/usr/bin/xcrun", ["stapler", "staple", p5Scratch.path],
@@ -209,39 +218,30 @@ public struct ReleaseNotarizer {
         try SecureFiles.createDirectory(p5Directory, mode: 0o700)
         let nestedURL = p5Directory.appendingPathComponent("nested-verification.json")
         try SecureFiles.copyRegularFile(from: nestedScratch, to: nestedURL, mode: 0o600)
-        let p5 = outputRoot.appendingPathComponent("Reach-0.0.1.pkg")
+        let p5 = outputRoot.appendingPathComponent(p5Name)
         try SecureFiles.copyRegularFile(from: p5Scratch, to: p5, mode: 0o600)
 
-        let currentProvenance = try SignedReleaseProvenance.load(
+        let currentEnvelope = try AnySignedReleaseProvenance.load(
           from: outputRoot.appendingPathComponent("release-provenance.json"))
-        let p5Provenance = SignedReleaseProvenance(
-          schemaVersion: currentProvenance.schemaVersion,
-          p0: currentProvenance.p0,
-          p1: currentProvenance.p1,
-          u1: currentProvenance.u1,
-          p2: currentProvenance.p2,
-          p3: currentProvenance.p3,
-          p4: currentProvenance.p4,
+        let p5Provenance = try currentEnvelope.adding(
           p5: .init(
             name: "P5-stapled-candidate",
             p3ParentSHA256: p3SHA256,
-            stapledContainer: try artifact(path: "Reach-0.0.1.pkg", url: p5),
+            stapledContainer: try artifact(path: p5Name, url: p5),
             stapleValidation: try retainedStapleValidation(
               staple: staple, validate: validate, directory: p5Directory),
             nestedVerification: try artifact(
               path: "p5/nested-verification.json", url: nestedURL),
-            localAssessment: assessmentAuthority(assessment))
-        )
-        try p5Provenance.validate()
+            localAssessment: assessmentAuthority(assessment)))
         try SecureFiles.atomicWrite(
-          try CanonicalJSON.encode(p5Provenance),
+          try p5Provenance.canonicalData(),
           to: outputRoot.appendingPathComponent("release-provenance.json"))
         try writeSHA256SUMS(outputRoot)
         journal = try NotarizationStateMachine.stapled(
           journal, p5SHA256: try Digests.sha256(file: p5))
         try store.write(journal)
       }
-      let p5 = outputRoot.appendingPathComponent("Reach-0.0.1.pkg")
+      let p5 = outputRoot.appendingPathComponent(p5Name)
       guard let p5SHA256 = journal.p5SHA256,
         try Digests.sha256(file: p5) == p5SHA256
       else {
@@ -250,13 +250,13 @@ public struct ReleaseNotarizer {
       _ = try verifyCompletedP5(
         outputRoot: outputRoot,
         signedAuthority: signedAuthority,
-        signedProvenance: signedProvenance,
+        signedProvenance: signedEnvelope,
         expectedSubmissionID: submissionID,
         expectedP5SHA256: p5SHA256,
         verificationInputs: verificationInputs,
         logRoot: stateURL.deletingLastPathComponent())
       return NotarizedReleaseResult(
-        schemaVersion: 1,
+        schemaVersion: signedProvenance.lineage == nil ? 1 : 2,
         submissionID: submissionID,
         p3SHA256: p3SHA256,
         p5Package: p5.path,
@@ -518,26 +518,29 @@ public struct ReleaseNotarizer {
   private func materializeAcceptedAuthority(
     source: URL,
     destination: URL,
-    signedProvenance: SignedReleaseProvenance,
+    signedProvenance: AnySignedReleaseProvenance,
     journal: NotarizationJournal,
     logRoot: URL
   ) throws {
+    let signedView = signedProvenance.view
     if !(try FileManager.default.contentsOfDirectory(atPath: destination.path).isEmpty) {
-      let existing = try SignedReleaseProvenance.load(
+      let existing = try AnySignedReleaseProvenance.load(
         from: destination.appendingPathComponent("release-provenance.json"))
-      guard existing.p0 == signedProvenance.p0,
-        existing.p1 == signedProvenance.p1,
-        existing.u1 == signedProvenance.u1,
-        existing.p2 == signedProvenance.p2,
-        existing.p3 == signedProvenance.p3,
-        existing.p4 != nil,
-        existing.p5 == nil,
-        existing.p4?.submissionID == journal.submissionID
+      let existingView = existing.view
+      guard existingView.lineage == signedView.lineage,
+        existingView.p0 == signedView.p0,
+        existingView.p1 == signedView.p1,
+        existingView.u1 == signedView.u1,
+        existingView.p2 == signedView.p2,
+        existingView.p3 == signedView.p3,
+        existingView.p4 != nil,
+        existingView.p5 == nil,
+        existingView.p4?.submissionID == journal.submissionID
       else {
         throw ReleasePackageError.verification(
           "notarized output contains a different or incomplete lineage")
       }
-      try verifyAcceptedArtifacts(existing, root: destination)
+      try verifyAcceptedArtifacts(existingView, root: destination)
       return
     }
     try SecureFiles.copyTree(
@@ -557,16 +560,10 @@ public struct ReleaseNotarizer {
     try SecureFiles.copyRegularFile(
       from: logRoot.appendingPathComponent("accepted-notary-log.json"),
       to: logDestination, mode: 0o600)
-    let p4 = SignedReleaseProvenance(
-      schemaVersion: signedProvenance.schemaVersion,
-      p0: signedProvenance.p0,
-      p1: signedProvenance.p1,
-      u1: signedProvenance.u1,
-      p2: signedProvenance.p2,
-      p3: signedProvenance.p3,
+    let p4 = try signedProvenance.adding(
       p4: .init(
         name: "P4-notary-accepted",
-        signedContainerSHA256: signedProvenance.p3.signedContainer.sha256,
+        signedContainerSHA256: signedView.p3.signedContainer.sha256,
         submissionID: try requireSubmissionID(journal),
         status: "Accepted",
         submissionEvidence: try artifact(
@@ -574,13 +571,11 @@ public struct ReleaseNotarizer {
         waitResponse: try artifact(path: "p4/wait-response.json", url: waitDestination),
         notaryLog: try artifact(path: "p4/notary-log.json", url: logDestination),
         acceptedAtUTC: journal.acceptedAtUTC ?? "",
-        issueCount: 0)
-    )
-    try p4.validate()
+        issueCount: 0))
     try SecureFiles.atomicWrite(
-      try CanonicalJSON.encode(p4),
+      try p4.canonicalData(),
       to: destination.appendingPathComponent("release-provenance.json"))
-    try verifyAcceptedArtifacts(p4, root: destination)
+    try verifyAcceptedArtifacts(p4.view, root: destination)
     try writeSHA256SUMS(destination)
   }
 
@@ -600,7 +595,7 @@ public struct ReleaseNotarizer {
   }
 
   private func verifyAcceptedArtifacts(
-    _ provenance: SignedReleaseProvenance,
+    _ provenance: SignedProvenanceView,
     root: URL
   ) throws {
     guard let p4 = provenance.p4, p4.submissionID != "" else {
@@ -621,22 +616,25 @@ public struct ReleaseNotarizer {
   private func recoverCompletedP5IfPresent(
     outputRoot: URL,
     signedAuthority: URL,
-    signedProvenance: SignedReleaseProvenance,
+    signedProvenance: AnySignedReleaseProvenance,
     journal: NotarizationJournal,
     verificationInputs: SignedPackageVerificationInputs,
     logRoot: URL
   ) throws -> NotarizationJournal? {
     let provenanceURL = outputRoot.appendingPathComponent("release-provenance.json")
     guard FileManager.default.fileExists(atPath: provenanceURL.path) else { return nil }
-    let value = try SignedReleaseProvenance.load(from: provenanceURL)
-    guard value.p5 != nil else { return nil }
-    guard value.p0 == signedProvenance.p0,
-      value.p1 == signedProvenance.p1,
-      value.u1 == signedProvenance.u1,
-      value.p2 == signedProvenance.p2,
-      value.p3 == signedProvenance.p3,
-      value.p4?.submissionID == journal.submissionID,
-      let p5 = value.p5
+    let value = try AnySignedReleaseProvenance.load(from: provenanceURL)
+    let actual = value.view
+    let expected = signedProvenance.view
+    guard actual.p5 != nil else { return nil }
+    guard actual.lineage == expected.lineage,
+      actual.p0 == expected.p0,
+      actual.p1 == expected.p1,
+      actual.u1 == expected.u1,
+      actual.p2 == expected.p2,
+      actual.p3 == expected.p3,
+      actual.p4?.submissionID == journal.submissionID,
+      let p5 = actual.p5
     else {
       throw ReleasePackageError.verification("completed P5 belongs to a different lineage")
     }
@@ -656,26 +654,29 @@ public struct ReleaseNotarizer {
   private func verifyCompletedP5(
     outputRoot: URL,
     signedAuthority: URL,
-    signedProvenance: SignedReleaseProvenance,
+    signedProvenance: AnySignedReleaseProvenance,
     expectedSubmissionID: String,
     expectedP5SHA256: String,
     verificationInputs: SignedPackageVerificationInputs,
     logRoot: URL
-  ) throws -> SignedReleaseProvenance {
-    let provenance = try SignedReleaseProvenance.load(
+  ) throws -> AnySignedReleaseProvenance {
+    let provenance = try AnySignedReleaseProvenance.load(
       from: outputRoot.appendingPathComponent("release-provenance.json"))
-    guard provenance.p0 == signedProvenance.p0,
-      provenance.p1 == signedProvenance.p1,
-      provenance.u1 == signedProvenance.u1,
-      provenance.p2 == signedProvenance.p2,
-      provenance.p3 == signedProvenance.p3,
-      provenance.p4?.submissionID == expectedSubmissionID,
-      let p5 = provenance.p5,
+    let actual = provenance.view
+    let expected = signedProvenance.view
+    guard actual.lineage == expected.lineage,
+      actual.p0 == expected.p0,
+      actual.p1 == expected.p1,
+      actual.u1 == expected.u1,
+      actual.p2 == expected.p2,
+      actual.p3 == expected.p3,
+      actual.p4?.submissionID == expectedSubmissionID,
+      let p5 = actual.p5,
       p5.stapledContainer.sha256 == expectedP5SHA256
     else {
       throw ReleasePackageError.verification("completed P5 authority changed")
     }
-    try verifyAcceptedArtifacts(provenance, root: outputRoot)
+    try verifyAcceptedArtifacts(actual, root: outputRoot)
     for value in [p5.stapledContainer, p5.stapleValidation, p5.nestedVerification] {
       try verifyArtifact(value, below: outputRoot)
     }
@@ -688,7 +689,7 @@ public struct ReleaseNotarizer {
       logURL: check.appendingPathComponent("stapler-validate.log"))
     _ = try SignedPackageStaticPreflight(runner: runner).verify(
       package: p5Package,
-      provenance: signedProvenance,
+      provenance: expected,
       authorityRoot: signedAuthority,
       configurationURL: verificationInputs.configurationURL,
       noticeAuthorityURL: verificationInputs.noticeAuthorityURL,

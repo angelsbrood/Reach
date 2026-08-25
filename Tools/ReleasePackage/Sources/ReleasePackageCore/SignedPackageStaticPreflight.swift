@@ -16,6 +16,28 @@ struct SignedPackageStaticPreflight {
     dependencyDepot: URL,
     scratch: URL
   ) throws -> SignedReleaseVerificationReport {
+    try verifyP3BeforeSubmission(
+      package: package,
+      provenance: .init(
+        schemaVersion: provenance.schemaVersion, lineage: nil,
+        p0: provenance.p0, p1: provenance.p1, u1: provenance.u1,
+        p2: provenance.p2, p3: provenance.p3, p4: provenance.p4, p5: provenance.p5),
+      authorityRoot: authorityRoot,
+      configurationURL: configurationURL,
+      noticeAuthorityURL: noticeAuthorityURL,
+      dependencyDepot: dependencyDepot,
+      scratch: scratch)
+  }
+
+  func verifyP3BeforeSubmission(
+    package: URL,
+    provenance: SignedProvenanceView,
+    authorityRoot: URL,
+    configurationURL: URL,
+    noticeAuthorityURL: URL,
+    dependencyDepot: URL,
+    scratch: URL
+  ) throws -> SignedReleaseVerificationReport {
     _ = try RetainedU1AuthorityBinder.verify(
       signed: provenance, authorityRoot: authorityRoot)
     let payload = try verify(
@@ -53,6 +75,30 @@ struct SignedPackageStaticPreflight {
   func verify(
     package: URL,
     provenance: SignedReleaseProvenance,
+    authorityRoot: URL,
+    configurationURL: URL,
+    noticeAuthorityURL: URL,
+    dependencyDepot: URL,
+    scratch: URL,
+    requireP3Hash: Bool = true
+  ) throws -> VerificationReport {
+    try verify(
+      package: package,
+      provenance: .init(
+        schemaVersion: provenance.schemaVersion, lineage: nil,
+        p0: provenance.p0, p1: provenance.p1, u1: provenance.u1,
+        p2: provenance.p2, p3: provenance.p3, p4: provenance.p4, p5: provenance.p5),
+      authorityRoot: authorityRoot,
+      configurationURL: configurationURL,
+      noticeAuthorityURL: noticeAuthorityURL,
+      dependencyDepot: dependencyDepot,
+      scratch: scratch,
+      requireP3Hash: requireP3Hash)
+  }
+
+  func verify(
+    package: URL,
+    provenance: SignedProvenanceView,
     authorityRoot: URL,
     configurationURL: URL,
     noticeAuthorityURL: URL,

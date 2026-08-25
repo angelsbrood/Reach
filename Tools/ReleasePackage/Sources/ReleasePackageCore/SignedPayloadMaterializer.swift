@@ -10,6 +10,11 @@ struct MaterializedUnsignedAuthority {
   let helperRoot: URL
 }
 
+enum UnsignedReleaseSelection {
+  case historicalS35
+  case lineage(ReleaseLineageAuthority)
+}
+
 struct SignedPayloadMaterializer {
   private let runner: ProcessRunner
 
@@ -23,28 +28,60 @@ struct SignedPayloadMaterializer {
     configurationURL: URL,
     noticeAuthorityURL: URL,
     dependencyDepot: URL,
-    workRoot: URL
+    workRoot: URL,
+    selection: UnsignedReleaseSelection = .historicalS35
   ) throws -> MaterializedUnsignedAuthority {
     let provenanceURL = unsignedAuthority.appendingPathComponent("release-provenance.json")
     let provenanceData = try Data(contentsOf: provenanceURL, options: [.mappedIfSafe])
     let provenance = try JSONDecoder().decode(ReleaseProvenance.self, from: provenanceData)
     guard provenanceData == (try CanonicalJSON.encode(provenance)),
-      provenance.schemaVersion == 1,
-      provenance.p0.authority.commit == SignedReleaseContract.unsignedSourceCommit,
-      provenance.p0.releaseToolSourceSHA256 == SignedReleaseContract.unsignedToolSourceSHA256,
-      provenance.u1.selectedContainer.sha256 == SignedReleaseContract.unsignedPackageSHA256,
-      provenance.u1.normalizedSemanticSHA256 == SignedReleaseContract.unsignedSemanticSHA256
+      provenance.schemaVersion == 1
     else {
-      throw ReleasePackageError.verification("unsigned S34 authority is not the selected U1")
+      throw ReleasePackageError.verification("unsigned authority is not canonical schema 1")
     }
+    let configuration = try ReleaseConfiguration.load(from: configurationURL)
     let unsignedToolDigest = try SourceInspector().canonicalTreeDigest(unsignedToolSource)
-    guard unsignedToolDigest == SignedReleaseContract.unsignedToolSourceSHA256 else {
-      throw ReleasePackageError.verification("unsigned-tool source does not match final U1")
+    let expectedCommit: String
+    let expectedToolDigest: String
+    let expectedPackageDigest: String
+    let expectedSemanticDigest: String
+    switch selection {
+    case .historicalS35:
+      guard configuration.schemaVersion == 1 else {
+        throw ReleasePackageError.verification(
+          "historical S35 selection requires the frozen schema-1 configuration")
+      }
+      expectedCommit = SignedReleaseContract.unsignedSourceCommit
+      expectedToolDigest = SignedReleaseContract.unsignedToolSourceSHA256
+      expectedPackageDigest = SignedReleaseContract.unsignedPackageSHA256
+      expectedSemanticDigest = SignedReleaseContract.unsignedSemanticSHA256
+    case .lineage(let lineage):
+      try lineage.validate(configuration: configuration, configurationURL: configurationURL)
+      guard lineage.unsignedProvenanceSHA256 == (try Digests.sha256(file: provenanceURL)),
+        lineage.unsignedContainer == provenance.u1.selectedContainer,
+        lineage.normalizedSemanticSHA256 == provenance.u1.normalizedSemanticSHA256
+      else {
+        throw ReleasePackageError.verification(
+          "frozen lineage does not bind the supplied unsigned provenance")
+      }
+      expectedCommit = lineage.sourceCommit
+      expectedToolDigest = lineage.unsignedToolSourceSHA256
+      expectedPackageDigest = lineage.unsignedContainer.sha256
+      expectedSemanticDigest = lineage.normalizedSemanticSHA256
+      try verifyLineageComponents(lineage, provenance: provenance, root: unsignedAuthority)
+    }
+    guard provenance.p0.authority.commit == expectedCommit,
+      provenance.p0.releaseToolSourceSHA256 == expectedToolDigest,
+      provenance.u1.selectedContainer.sha256 == expectedPackageDigest,
+      provenance.u1.normalizedSemanticSHA256 == expectedSemanticDigest,
+      unsignedToolDigest == expectedToolDigest
+    else {
+      throw ReleasePackageError.verification("unsigned source or U1 lineage changed")
     }
     try SecureFiles.validateRelativePath(provenance.u1.selectedContainer.path)
     let package = unsignedAuthority.appendingPathComponent(
       provenance.u1.selectedContainer.path)
-    guard try Digests.sha256(file: package) == SignedReleaseContract.unsignedPackageSHA256 else {
+    guard try Digests.sha256(file: package) == expectedPackageDigest else {
       throw ReleasePackageError.verification("selected U1 package bytes changed")
     }
     let verification = try PackageVerifier(runner: runner).verify(
@@ -58,7 +95,7 @@ struct SignedPayloadMaterializer {
       scratch: workRoot.appendingPathComponent("u1-verification"),
       logDirectory: workRoot.appendingPathComponent("u1-verification/logs")
     )
-    guard verification.normalizedSemanticSHA256 == SignedReleaseContract.unsignedSemanticSHA256,
+    guard verification.normalizedSemanticSHA256 == expectedSemanticDigest,
       verification.hostFiles == 50,
       verification.helperFiles == 6,
       !verification.scriptsPresent,
@@ -90,8 +127,8 @@ struct SignedPayloadMaterializer {
       "Library/Application Support/Reach/Release/payload-manifest.json")
     let manifest = try JSONDecoder().decode(
       PayloadManifest.self, from: Data(contentsOf: manifestURL, options: [.mappedIfSafe]))
-    guard manifest.releaseToolSourceSHA256 == SignedReleaseContract.unsignedToolSourceSHA256,
-      manifest.source.commit == SignedReleaseContract.unsignedSourceCommit
+    guard manifest.releaseToolSourceSHA256 == expectedToolDigest,
+      manifest.source.commit == expectedCommit
     else {
       throw ReleasePackageError.verification("embedded U1 manifest authority changed")
     }
@@ -105,7 +142,33 @@ struct SignedPayloadMaterializer {
     )
   }
 
-  private func materializeComponent(
+  private func verifyLineageComponents(
+    _ lineage: ReleaseLineageAuthority,
+    provenance: ReleaseProvenance,
+    root: URL
+  ) throws {
+    let expected = provenance.p1.hostComponents + provenance.p1.helperComponents
+    for component in lineage.components {
+      guard expected.contains(component.unsignedComponent) else {
+        throw ReleasePackageError.verification(
+          "frozen lineage component is absent from unsigned provenance")
+      }
+      try SecureFiles.validateRelativePath(component.unsignedComponent.path)
+      let url = root.appendingPathComponent(component.unsignedComponent.path)
+      var info = stat()
+      guard lstat(url.path, &info) == 0,
+        (info.st_mode & S_IFMT) == S_IFREG,
+        info.st_nlink == 1,
+        UInt64(info.st_size) == component.unsignedComponent.size,
+        try Digests.sha256(file: url) == component.unsignedComponent.sha256
+      else {
+        throw ReleasePackageError.verification(
+          "frozen lineage component bytes changed: \(component.identifier)")
+      }
+    }
+  }
+
+  func materializeComponent(
     _ component: URL,
     destination: URL,
     scratch: URL,
@@ -157,5 +220,40 @@ struct SignedPayloadMaterializer {
         "\(label) payload changed while materializing U1")
     }
     return destination
+  }
+
+  func materializeStandaloneComponent(
+    _ component: URL,
+    destination: URL,
+    scratch: URL,
+    label: String
+  ) throws -> URL {
+    try SecureFiles.createPrivateDirectory(scratch)
+    let expanded = scratch.appendingPathComponent("expanded")
+    try SecureFiles.createPrivateDirectory(expanded)
+    _ = try runner.run(
+      "/usr/bin/xar", ["-xf", component.path], currentDirectory: expanded,
+      logURL: scratch.appendingPathComponent("expand.log"))
+    return try materializeComponent(
+      expanded, destination: destination,
+      scratch: scratch.appendingPathComponent("payload"), label: label)
+  }
+
+  func materializeComponent(
+    named name: String,
+    fromOuterPackage package: URL,
+    destination: URL,
+    scratch: URL,
+    label: String
+  ) throws -> URL {
+    try SecureFiles.createPrivateDirectory(scratch)
+    let expanded = scratch.appendingPathComponent("outer-expanded")
+    try SecureFiles.createPrivateDirectory(expanded)
+    _ = try runner.run(
+      "/usr/bin/xar", ["-xf", package.path], currentDirectory: expanded,
+      logURL: scratch.appendingPathComponent("outer-expand.log"))
+    return try materializeComponent(
+      expanded.appendingPathComponent(name), destination: destination,
+      scratch: scratch.appendingPathComponent("payload"), label: label)
   }
 }

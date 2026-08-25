@@ -226,6 +226,133 @@ it as a release until the separate native clean-Mac install/update/rollback/
 uninstall matrix earns both mandatory receipts, retained state, and complete
 recovery behavior.
 
+## Private clean-Mac lifecycle tooling — not yet an accepted release
+
+S36 adds a nonshipping `reach-release-acceptance` executable and extends the
+release core for exact multi-release lineage. This is test and transaction
+machinery only. It is absent from both package components and creates no
+updater, feed, downloader, telemetry, service, or public install path.
+
+Historical S35 package bytes were lost. Their hashes remain evidence but are
+not usable release authority. The selected replacement sequence is therefore:
+
+- A: product/host `0.0.2`, helper `1.0.2`;
+- B: product/host `0.0.3`, helper `1.0.2` only if the complete signed A helper
+  component is carried forward byte-for-byte without re-signing; and
+- one separately reviewed exact-P3 checkpoint before each of the two possible
+  future Apple submissions.
+
+Schema-1 release configuration and schema-2 signed provenance remain readable
+for historical verification. New schema-2 configuration and schema-3 signed
+provenance bind the complete predecessor, component disposition, P0–P5
+authority, and retained parent. Freeze the lineage only from a complete local
+authority; a caller-supplied parent hash is never sufficient:
+
+```sh
+"$REACH_RELEASE_BIN/reach-release-package" freeze-lineage \
+  --unsigned-authority /private/path/to/verified-u1-authority \
+  --unsigned-tool-source /private/path/to/exact-u1-tool-source \
+  --configuration /absolute/path/to/Reach/release/release.json \
+  --notices /absolute/path/to/Reach/release/notices.json \
+  --depot /private/path/to/sealed-dependency-depot \
+  --scratch /private/tmp/reach-lineage-freeze \
+  --output /private/tmp/reach-lineage.json
+```
+
+For B, add `--parent-authority` naming the complete retained A P5 tree. The
+same parent tree is required again by `sign`; an unchanged helper is accepted
+only after its payload and executable runtime-content digest match A. The
+successor embeds A's complete signed helper component XAR byte-for-byte; it
+does not rebuild or re-sign that unchanged component. Until a replacement U1
+is minted after synchronized review, do not resolve Developer ID identities,
+use a notary profile, sign, timestamp, submit, or staple.
+
+The acceptance driver has two explicit authorities. Host mode may control only
+`reach-s36-macos27-base` and `reach-s36-macos27-acceptance` through exact Tart
+2.35.0 and pinned SSH. Guest mode implements only `inspect`, `migrate`,
+`install`, `update`, `recover`, `rollback`, `uninstall`, and `verify`, plus the
+bounded mandatory-choice, owner-contention, crash-recovery, and reset probes.
+Every destructive operation is journaled, uses exact retained P5 authority,
+and refuses mixed receipts, a mismatched live executable text vnode, altered
+launch definitions, unowned or metadata-weakened state, paths anywhere under
+the complete package root, or changed retained cluster state. Restore-image
+verification reloads the local IPSW through Virtualization.framework rather
+than trusting the recorded product/build claims. The second-user test is a
+three-command ceremony:
+`owner-contention-begin` as the selected owner, `owner-contention-check` as the
+distinct contender, then root-owned `owner-contention-finish`; any second
+service or CA authority fires `OWNER-CONTENTION`. Failure to install the probe
+definition, failure to bootstrap it, or bootstrap without an observable
+ownership result is inconclusive and cannot be reported as a safe refusal. A
+safe refusal additionally requires one failed launchd run and the exact bounded
+daemon line `Error: this Mac is already bound to another Reach login owner`,
+with no state or CA creation. A transiently running contender does not settle
+that decision. After the bounded application result, the driver boots the
+contender out, confirms it is unloaded, re-observes its state, and only then
+records refusal if state is absent and CA creation is still zero. The physical
+cell stops if the installed product does not actually produce that attributable
+result.
+
+After the acceptance clone is running, bind its exact pinned-SSH files and the
+complete S36-owned tooling root to the rig once. Every later SSH operation
+requires this same authority. Before teardown, freeze those exact live vnodes
+into the evidence run. The coordinator atomically renames each credential and
+the complete tooling root to deterministic hidden tombstones on the same
+volume, verifies the exact open vnode through that claim, and durably records
+the complete claim before deletion. It then holds and verifies each claimed
+vnode while deleting it and records per-vnode progress. Recovery accepts a
+missing tombstone only behind that exact durable progress; an unclaimed
+disappearance, moved credential, substituted vnode, weakened mode, or unbound
+path fails closed. Output, inventory, both journals, and teardown authority
+must be distinct and disjoint in both directions from all original and claimed
+paths before any mutation:
+
+```sh
+"$REACH_RELEASE_BIN/reach-release-acceptance" host bind-host-authority \
+  --tart-sha256 "$REACH_TART_SHA256" \
+  --logs /private/path/host-logs \
+  --rig-journal /private/path/rig.json \
+  --identity /private/path/id_ed25519 \
+  --known-hosts /private/path/known_hosts \
+  --tooling-root /private/path/s36-tooling \
+  --host-authority /private/path/host-authority.json \
+  --output /private/path/host-authority-binding.json
+
+"$REACH_RELEASE_BIN/reach-release-acceptance" host evidence-freeze-teardown \
+  --evidence-journal /private/path/evidence.json \
+  --rig-journal /private/path/rig.json \
+  --host-authority /private/path/host-authority.json \
+  --authority /private/path/teardown-authority.json \
+  --output /private/path/freeze-result.json
+
+"$REACH_RELEASE_BIN/reach-release-acceptance" host evidence-destroy \
+  --evidence-journal /private/path/evidence.json \
+  --rig-journal /private/path/rig.json \
+  --kind credentials \
+  --authority /private/path/teardown-authority.json \
+  --inventory /private/path/credentials-absent.json \
+  --output /private/path/credentials-destroyed.json
+```
+
+For unmanaged-layout migration, the retained A payload record is authoritative:
+the driver opens and verifies that exact `reachd` path and requires the running
+process text vnode to be the same device/inode. A replaced or deleted live
+image refuses; merely finding the expected bytes at the pathname is not enough.
+
+The vnode-authority correction completed a **152-test suite three times**, with
+six explicit signed-candidate skips per run, plus a **25/25 focused spine three
+times**. The prior sealed unchanged-product gates remain joined: ReachKit
+95/95, reachd 250/250, and mesh-helper full/race/vet/offline PASS.
+Warnings-as-errors release binaries hash to `76252cdb…9bcbe`
+(`reach-release-package`) and `23008f9a…8d3c6`
+(`reach-release-acceptance`). The current privacy-minimized pack is
+`/private/tmp/reach-s36-offline-authority-vnode-correction-authoritative-20260824`;
+its direct 11-entry manifest seals at `d2e49779…c5776`, and its 62-file source
+manifest hashes to `1ab020dd…75b2e`. These results do not prove Tart, Apple restore-image,
+Installer, Metal-in-VM, update, rollback, uninstall, or real teardown behavior.
+No Tart binary, IPSW, VM, replacement U1/P3/P5, signing identity, Apple
+submission, live-host install, or Keeper change has occurred.
+
 ## The reference relay hub is accepted substrate, not a running Reach service
 
 `relay-hub/` has a measured scriptless package boundary on native Ubuntu 26.04

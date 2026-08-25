@@ -74,7 +74,7 @@ public struct SigningCertificateAuthority: Codable, Equatable, Sendable {
     return notBefore <= date && date <= notAfter
   }
 
-  fileprivate func isValid(atTimestamp value: String) -> Bool {
+  func isValid(atTimestamp value: String) -> Bool {
     guard let date = Self.parseTimestamp(value) else { return false }
     return isValid(at: date)
   }
