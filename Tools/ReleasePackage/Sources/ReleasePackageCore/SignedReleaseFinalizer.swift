@@ -122,10 +122,10 @@ public struct SignedReleaseFinalizer {
     default:
       throw ReleasePackageError.verification("unsupported signing configuration schema")
     }
-    guard finalizerToolDigest != unsignedToolDigest else {
-      throw ReleasePackageError.verification(
-        "unsigned and finalizer tool-source authorities are not separated")
-    }
+    try Self.requireToolSourceBoundary(
+      schemaVersion: configuration.schemaVersion,
+      unsignedToolDigest: unsignedToolDigest,
+      finalizerToolDigest: finalizerToolDigest)
 
     let materialized = try SignedPayloadMaterializer(runner: runner).materialize(
       unsignedAuthority: unsignedAuthority,
@@ -425,6 +425,28 @@ public struct SignedReleaseFinalizer {
       provenance: provenanceURL.path,
       teamID: identities.application.teamID
     )
+  }
+
+  static func requireToolSourceBoundary(
+    schemaVersion: Int,
+    unsignedToolDigest: String,
+    finalizerToolDigest: String
+  ) throws {
+    switch schemaVersion {
+    case 1:
+      guard finalizerToolDigest != unsignedToolDigest else {
+        throw ReleasePackageError.verification(
+          "historical unsigned and finalizer tool-source authorities are not separated")
+      }
+    case 2:
+      // A schema-2 lineage binds the unsigned source through its frozen U1
+      // authority and records the finalizer source independently at P2. The
+      // two roles may come from the same synchronized source tree; equality
+      // does not permit either caller to substitute a different tree.
+      break
+    default:
+      throw ReleasePackageError.verification("unsupported signing configuration schema")
+    }
   }
 
   private func requireLineage(_ value: ReleaseLineageAuthority?) throws

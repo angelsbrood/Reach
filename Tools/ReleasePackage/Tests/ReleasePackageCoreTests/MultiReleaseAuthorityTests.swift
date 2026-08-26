@@ -9,6 +9,26 @@ private func lineageArtifact(_ path: String, _ character: Character = "a")
   .init(path: path, size: 1, sha256: String(repeating: character, count: 64))
 }
 
+@Test func replacementLineageBindsEqualToolSourceRolesWithoutWeakeningHistory() throws {
+  let digest = String(repeating: "a", count: 64)
+  try SignedReleaseFinalizer.requireToolSourceBoundary(
+    schemaVersion: 2,
+    unsignedToolDigest: digest,
+    finalizerToolDigest: digest)
+
+  #expect(throws: ReleasePackageError.self) {
+    try SignedReleaseFinalizer.requireToolSourceBoundary(
+      schemaVersion: 1,
+      unsignedToolDigest: digest,
+      finalizerToolDigest: digest)
+  }
+
+  try SignedReleaseFinalizer.requireToolSourceBoundary(
+    schemaVersion: 1,
+    unsignedToolDigest: digest,
+    finalizerToolDigest: String(repeating: "b", count: 64))
+}
+
 @Test func unchangedHelperComponentIsCopiedAsTheExactRetainedArtifact() throws {
   let root = try makeTemporaryDirectory("retained-helper-component")
   defer { removeTemporaryDirectory(root) }
