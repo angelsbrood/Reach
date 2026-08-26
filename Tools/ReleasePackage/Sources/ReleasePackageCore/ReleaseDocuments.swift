@@ -7,6 +7,25 @@ public struct ToolchainAuthority: Codable, Equatable, Sendable {
   public let sdkVersion: String
   public let macOSBuild: String
   public let go: String
+  public let metal: MetalToolchainAuthority?
+
+  public init(
+    xcode: String,
+    swift: String,
+    sdkPath: String,
+    sdkVersion: String,
+    macOSBuild: String,
+    go: String,
+    metal: MetalToolchainAuthority? = nil
+  ) {
+    self.xcode = xcode
+    self.swift = swift
+    self.sdkPath = sdkPath
+    self.sdkVersion = sdkVersion
+    self.macOSBuild = macOSBuild
+    self.go = go
+    self.metal = metal
+  }
 }
 
 public struct ManifestPayloadMember: Codable, Equatable, Sendable {
@@ -84,6 +103,26 @@ public struct PayloadManifest: Codable, Equatable, Sendable {
   public let bundleTreeSHA256: String
   public let payload: [ManifestPayloadMember]
 
+  public func validatedMetalAuthority(
+    for configuration: ReleaseConfiguration
+  ) throws -> MetalToolchainAuthority? {
+    if configuration.schemaVersion == 1 {
+      guard schemaVersion == 1, toolchain.metal == nil else {
+        throw ReleasePackageError.verification(
+          "historical payload manifest acquired current Metal authority")
+      }
+      return nil
+    }
+    guard configuration.schemaVersion == 2, schemaVersion == 2,
+      let metal = toolchain.metal
+    else {
+      throw ReleasePackageError.verification(
+        "current payload manifest lacks installed Metal authority")
+    }
+    try metal.validate()
+    return metal
+  }
+
   public static func make(
     configuration: ReleaseConfiguration,
     source: SourceAuthority,
@@ -121,8 +160,20 @@ public struct PayloadManifest: Codable, Equatable, Sendable {
       }.map {
         "\($0.path)\t\($0.type)\t\($0.mode)\t\($0.size)\t\($0.sha256 ?? "-")"
       }.joined(separator: "\n") + "\n"
+    if configuration.schemaVersion == 1 {
+      guard toolchain.metal == nil else {
+        throw ReleasePackageError.verification(
+          "historical payload schema cannot acquire Metal authority")
+      }
+    } else {
+      guard configuration.schemaVersion == 2, let metal = toolchain.metal else {
+        throw ReleasePackageError.verification(
+          "current payload schema requires installed Metal authority")
+      }
+      try metal.validate()
+    }
     return Self(
-      schemaVersion: 1,
+      schemaVersion: configuration.schemaVersion == 1 ? 1 : 2,
       product: .init(
         name: configuration.product.name,
         version: configuration.product.version,
@@ -195,6 +246,25 @@ public struct ReleaseProvenance: Codable, Equatable, Sendable {
     public let releaseToolSourceSHA256: String
     public let noticeAuthoritySHA256: String
     public let dependencyDepotSHA256: String
+    public let metalToolchain: MetalToolchainAuthority?
+
+    public init(
+      name: String,
+      authority: SourceAuthority,
+      releaseConfigurationSHA256: String,
+      releaseToolSourceSHA256: String,
+      noticeAuthoritySHA256: String,
+      dependencyDepotSHA256: String,
+      metalToolchain: MetalToolchainAuthority? = nil
+    ) {
+      self.name = name
+      self.authority = authority
+      self.releaseConfigurationSHA256 = releaseConfigurationSHA256
+      self.releaseToolSourceSHA256 = releaseToolSourceSHA256
+      self.noticeAuthoritySHA256 = noticeAuthoritySHA256
+      self.dependencyDepotSHA256 = dependencyDepotSHA256
+      self.metalToolchain = metalToolchain
+    }
   }
 
   public struct PayloadStage: Codable, Equatable, Sendable {

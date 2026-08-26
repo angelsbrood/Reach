@@ -16,6 +16,7 @@ public struct ReleaseBuildComparison: Codable, Equatable, Sendable {
   public let schemaVersion: Int
   public let compilePathAuthority: String
   public let compilerVisibleRootUTF8Length: Int
+  public let metalToolchain: MetalToolchainAuthority?
   public let sourceAuthorityEqual: Bool
   public let reachdSHA256: [String]
   public let helperSHA256: [String]
@@ -79,9 +80,16 @@ public struct ReleaseBuilder {
   }
 
   private let runner: ProcessRunner
+  private let metalResolver: InstalledMetalToolchainResolver
 
   public init(runner: ProcessRunner = .init()) {
     self.runner = runner
+    metalResolver = InstalledMetalToolchainResolver(runner: runner)
+  }
+
+  init(runner: ProcessRunner, metalResolver: InstalledMetalToolchainResolver) {
+    self.runner = runner
+    self.metalResolver = metalResolver
   }
 
   public func build(
@@ -110,8 +118,11 @@ public struct ReleaseBuilder {
     let releaseConfigurationHash = try Digests.sha256(file: configurationURL)
     let noticeAuthorityHash = try Digests.sha256(file: noticeAuthorityURL)
     let releaseToolSourceHash = try SourceInspector().canonicalTreeDigest(releaseToolSource)
-    let toolchain = try inspectToolchain(
-      depot: depot, logs: workRoot.appendingPathComponent("toolchain-logs"))
+    let toolchainLogs = workRoot.appendingPathComponent("toolchain-logs")
+    try SecureFiles.createDirectory(toolchainLogs, mode: 0o700)
+    let metal = try metalResolver.resolve(
+      logURL: toolchainLogs.appendingPathComponent("metal-component-initial.log"))
+    let toolchain = try inspectToolchain(depot: depot, metal: metal, logs: toolchainLogs)
 
     let passAContainer = workRoot.appendingPathComponent("build-a", isDirectory: true)
     let passBContainer = workRoot.appendingPathComponent("build-b", isDirectory: true)
@@ -131,6 +142,7 @@ public struct ReleaseBuilder {
       releaseToolSourceHash: releaseToolSourceHash,
       noticeAuthorityHash: noticeAuthorityHash,
       toolchain: toolchain,
+      metal: metal,
       root: CompilePathAuthority.passRoot(workRoot: workRoot, passName: "build-a")
     )
     let passB = try buildPass(
@@ -147,6 +159,7 @@ public struct ReleaseBuilder {
       releaseToolSourceHash: releaseToolSourceHash,
       noticeAuthorityHash: noticeAuthorityHash,
       toolchain: toolchain,
+      metal: metal,
       root: CompilePathAuthority.passRoot(workRoot: workRoot, passName: "build-b")
     )
     try compare(passA, passB)
@@ -176,14 +189,15 @@ public struct ReleaseBuilder {
     let retained = try retainArtifacts(passA: passA, passB: passB, at: artifacts)
     let semanticDigest = passA.verification.normalizedSemanticSHA256
     let provenance = ReleaseProvenance(
-      schemaVersion: 1,
+      schemaVersion: configuration.schemaVersion == 1 ? 1 : 2,
       p0: .init(
         name: "P0-source",
         authority: passA.source,
         releaseConfigurationSHA256: releaseConfigurationHash,
         releaseToolSourceSHA256: releaseToolSourceHash,
         noticeAuthoritySHA256: noticeAuthorityHash,
-        dependencyDepotSHA256: depotSeal
+        dependencyDepotSHA256: depotSeal,
+        metalToolchain: metal.authority
       ),
       p1: .init(
         name: "P1-payload",
@@ -208,10 +222,11 @@ public struct ReleaseBuilder {
     let provenanceURL = outputRoot.appendingPathComponent("release-provenance.json")
     try SecureFiles.atomicWrite(try CanonicalJSON.encode(provenance), to: provenanceURL)
     let comparison = ReleaseBuildComparison(
-      schemaVersion: 2,
+      schemaVersion: 3,
       compilePathAuthority:
         "unaliased canonical root with fixed UTF-8 byte length before compiler invocation",
       compilerVisibleRootUTF8Length: CompilePathAuthority.rootUTF8Length,
+      metalToolchain: metal.authority,
       sourceAuthorityEqual: passA.source == passB.source,
       reachdSHA256: try [passA.reachd, passB.reachd].map(Digests.sha256(file:)),
       helperSHA256: try [passA.helper, passB.helper].map(Digests.sha256(file:)),
@@ -285,6 +300,7 @@ public struct ReleaseBuilder {
     releaseToolSourceHash: String,
     noticeAuthorityHash: String,
     toolchain: ToolchainAuthority,
+    metal: MountedMetalToolchain,
     root: URL
   ) throws -> BuildPass {
     try SecureFiles.createPrivateDirectory(root)
@@ -308,7 +324,8 @@ public struct ReleaseBuilder {
       sourceTimestamp: source.commitTimestamp,
       root: root.appendingPathComponent("swift-build"),
       output: compiled.appendingPathComponent("reachd"),
-      logs: logs
+      logs: logs,
+      metal: metal
     )
     let helper = try buildHelper(
       export: export,
@@ -330,6 +347,14 @@ public struct ReleaseBuilder {
       root: hostStage
     )
     try stageHelper(export: export, helper: helper, root: helperStage)
+    try SwiftBuildMetalGraphVerifier.rejectPathLeak(
+      below: hostStage, transientPath: metal.root.path)
+    try SwiftBuildMetalGraphVerifier.rejectPathLeak(
+      below: hostStage,
+      transientPath: "/private/var/run/com.apple.security.cryptexd/mnt/")
+    try SwiftBuildMetalGraphVerifier.rejectPathLeak(
+      below: hostStage,
+      transientPath: "/var/run/com.apple.security.cryptexd/mnt/")
     try SecureFiles.scrubExtendedAttributesRecursively(hostStage)
     try SecureFiles.scrubExtendedAttributesRecursively(helperStage)
     let preManifestHost = try PayloadTree.inspect(root: hostStage)
@@ -399,6 +424,8 @@ public struct ReleaseBuilder {
       scratch: root.appendingPathComponent("verification"),
       logDirectory: logs
     )
+    try metalResolver.revalidate(
+      metal, logURL: logs.appendingPathComponent("metal-component-pass-final.log"))
     return BuildPass(
       name: name,
       source: source,
@@ -424,7 +451,8 @@ public struct ReleaseBuilder {
     sourceTimestamp: Int64,
     root: URL,
     output: URL,
-    logs: URL
+    logs: URL,
+    metal: MountedMetalToolchain
   ) throws -> URL {
     try SecureFiles.createPrivateDirectory(root)
     let mirrorsDirectory = export.appendingPathComponent("reachd/.swiftpm/configuration")
@@ -468,14 +496,15 @@ public struct ReleaseBuilder {
     }
     try SecureFiles.atomicWrite(Data(gitConfigText.utf8), to: gitConfig)
     var arguments = [
-      "build", "--disable-sandbox", "--skip-update", "--force-resolved-versions",
+      "build", "--toolchain", metal.root.path,
+      "--disable-sandbox", "--skip-update", "--force-resolved-versions",
       "--disable-prefetching", "--disable-netrc", "--disable-keychain",
       "--disable-dependency-cache",
       "--disable-code-coverage", "--manifest-cache", "local",
       "--jobs", "1",
       "--cache-path", cache.path, "--config-path", config.path, "--security-path", security.path,
       "--package-path", export.appendingPathComponent("reachd").path,
-      "--scratch-path", scratch.path, "--configuration", "release",
+      "--scratch-path", scratch.path, "--configuration", "release", "-v",
       "-Xswiftc", "-warnings-as-errors",
     ]
     for mapping in [
@@ -507,25 +536,75 @@ public struct ReleaseBuilder {
       "GCC_INSTRUMENT_PROGRAM_FLOW_ARCS": "NO",
       "GIT_CONFIG_GLOBAL": gitConfig.path,
       "GIT_CONFIG_NOSYSTEM": "1",
+      // SwiftPM records the physical selection in --toolchain. Its Xcode build
+      // layer independently consults TOOLCHAINS when resolving Metal build
+      // tools, so provide the same authenticated path explicitly rather than
+      // inheriting ambient selection state.
+      "TOOLCHAINS": metal.root.path,
     ]
+    try metalResolver.revalidate(
+      metal, logURL: logs.appendingPathComponent("metal-component-pre-resolve.log"))
+    _ = try runner.run(
+      "/usr/bin/swift",
+      [
+        "package", "--toolchain", metal.root.path,
+        "--disable-sandbox", "--skip-update", "--force-resolved-versions",
+        "--disable-prefetching", "--disable-netrc", "--disable-keychain",
+        "--disable-dependency-cache", "--manifest-cache", "local",
+        "--cache-path", cache.path, "--config-path", config.path, "--security-path", security.path,
+        "--package-path", export.appendingPathComponent("reachd").path,
+        "--scratch-path", scratch.path, "resolve",
+      ],
+      environment: environment,
+      logURL: logs.appendingPathComponent("swift-resolve.log")
+    )
+    try metalResolver.revalidate(
+      metal, logURL: logs.appendingPathComponent("metal-component-post-resolve.log"))
+    try metalResolver.revalidate(
+      metal, logURL: logs.appendingPathComponent("metal-component-pre-bin-path.log"))
+    let binArguments = [
+      "build", "--toolchain", metal.root.path,
+      "--disable-sandbox", "--skip-update", "--force-resolved-versions",
+      "--jobs", "1",
+      "--cache-path", cache.path, "--config-path", config.path, "--security-path", security.path,
+      "--package-path", export.appendingPathComponent("reachd").path,
+      "--scratch-path", scratch.path, "--configuration", "release", "--show-bin-path",
+    ]
+    let preflightBin = try runner.run(
+      "/usr/bin/swift", binArguments,
+      environment: environment,
+      logURL: logs.appendingPathComponent("swift-bin-path-preflight.log")
+    ).output.trimmingCharacters(in: .whitespacesAndNewlines)
+    try metalResolver.revalidate(
+      metal, logURL: logs.appendingPathComponent("metal-component-post-bin-path.log"))
+    try GeneratedMetalSourceNormalizer.normalize(
+      scratch: scratch,
+      reportURL: logs.appendingPathComponent("generated-metal-source-normalization.json"))
+    try metalResolver.revalidate(
+      metal, logURL: logs.appendingPathComponent("metal-component-pre-build.log"))
     _ = try runner.run(
       "/usr/bin/swift", arguments,
       environment: environment,
       timeout: 7_200,
       logURL: logs.appendingPathComponent("swift-build.log")
     )
+    try metalResolver.revalidate(
+      metal, logURL: logs.appendingPathComponent("metal-component-post-build.log"))
     let bin = try runner.run(
-      "/usr/bin/swift",
-      [
-        "build", "--disable-sandbox", "--skip-update", "--force-resolved-versions",
-        "--jobs", "1",
-        "--cache-path", cache.path, "--config-path", config.path, "--security-path", security.path,
-        "--package-path", export.appendingPathComponent("reachd").path,
-        "--scratch-path", scratch.path, "--configuration", "release", "--show-bin-path",
-      ],
+      "/usr/bin/swift", binArguments,
       environment: environment,
-      logURL: logs.appendingPathComponent("swift-bin-path.log")
+      logURL: logs.appendingPathComponent("swift-bin-path-post-build.log")
     ).output.trimmingCharacters(in: .whitespacesAndNewlines)
+    try metalResolver.revalidate(
+      metal, logURL: logs.appendingPathComponent("metal-component-final-bin-path.log"))
+    guard bin.utf8.elementsEqual(preflightBin.utf8) else {
+      throw ReleasePackageError.verification(
+        "Swift build and bin-path resolution selected different output authority")
+    }
+    try SwiftBuildMetalGraphVerifier.verify(
+      scratch: scratch,
+      buildLog: logs.appendingPathComponent("swift-build.log"),
+      mounted: metal)
     let binURL = URL(fileURLWithPath: bin)
     let built = binURL.appendingPathComponent("reachd")
     try SecureFiles.copyRegularFile(from: built, to: output, mode: 0o755)
@@ -560,6 +639,7 @@ public struct ReleaseBuilder {
       label: "reachd",
       forbiddenPaths: [
         export.path, root.path, depotRoot.path,
+        metal.root.path,
         FileManager.default.homeDirectoryForCurrentUser.path,
       ],
       logs: logs)
@@ -586,6 +666,16 @@ public struct ReleaseBuilder {
     else {
       throw ReleasePackageError.verification("MLX metallib is missing")
     }
+    try SwiftBuildMetalGraphVerifier.rejectPathLeak(
+      below: output.deletingLastPathComponent(), transientPath: metal.root.path)
+    try SwiftBuildMetalGraphVerifier.rejectPathLeak(
+      below: output.deletingLastPathComponent(),
+      transientPath: "/private/var/run/com.apple.security.cryptexd/mnt/")
+    try SwiftBuildMetalGraphVerifier.rejectPathLeak(
+      below: output.deletingLastPathComponent(),
+      transientPath: "/var/run/com.apple.security.cryptexd/mnt/")
+    try metalResolver.revalidate(
+      metal, logURL: logs.appendingPathComponent("metal-component-reachd-final.log"))
     guard
       !FileManager.default.fileExists(
         atPath: root.appendingPathComponent("unexpected.profraw").path)
@@ -753,9 +843,11 @@ public struct ReleaseBuilder {
       of: pattern, with: "<creation-time>normalized</creation-time>", options: .regularExpression)
   }
 
-  private func inspectToolchain(depot: DependencyDepotManifest, logs: URL) throws
-    -> ToolchainAuthority
-  {
+  private func inspectToolchain(
+    depot: DependencyDepotManifest,
+    metal: MountedMetalToolchain,
+    logs: URL
+  ) throws -> ToolchainAuthority {
     try SecureFiles.createDirectory(logs, mode: 0o700)
     let xcode = try runner.run(
       "/usr/bin/xcodebuild", ["-version"], logURL: logs.appendingPathComponent("xcode.log")
@@ -780,7 +872,8 @@ public struct ReleaseBuilder {
       sdkPath: sdkPath.trimmingCharacters(in: .whitespacesAndNewlines),
       sdkVersion: sdkVersion.trimmingCharacters(in: .whitespacesAndNewlines),
       macOSBuild: build.trimmingCharacters(in: .whitespacesAndNewlines),
-      go: depot.goVersion
+      go: depot.goVersion,
+      metal: metal.authority
     )
   }
 

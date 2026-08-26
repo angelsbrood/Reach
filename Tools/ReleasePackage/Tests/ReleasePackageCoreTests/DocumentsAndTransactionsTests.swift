@@ -54,7 +54,8 @@ import Testing
     noticeAuthoritySHA256: String(repeating: "3", count: 64),
     dependencyDepotSHA256: String(repeating: "4", count: 64), depot: depot,
     toolchain: .init(
-      xcode: "X", swift: "S", sdkPath: "/SDK", sdkVersion: "27", macOSBuild: "B", go: "G"),
+      xcode: "X", swift: "S", sdkPath: "/SDK", sdkVersion: "27", macOSBuild: "B", go: "G",
+      metal: testMetalToolchainAuthority()),
     linkedSystemLibraries: ["/usr/lib/libSystem.B.dylib"],
     noticeSetSHA256: String(repeating: "5", count: 64),
     hostRecords: tree.records, helperRecords: []

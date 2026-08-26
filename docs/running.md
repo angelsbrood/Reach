@@ -353,6 +353,72 @@ Installer, Metal-in-VM, update, rollback, uninstall, or real teardown behavior.
 No Tart binary, IPSW, VM, replacement U1/P3/P5, signing identity, Apple
 submission, live-host install, or Keeper change has occurred.
 
+### Installed Metal authority for release builds
+
+Do not set `TOOLCHAINS`, use an identifier-only `xcrun --toolchain`, or copy a
+cryptex mount path into release configuration. On this Xcode 27 host the
+installed Metal component is discoverable only through the exact read-only
+`xcodebuild -showComponent MetalToolchain` record, while identifier-only lookup
+still resolves the default wrapper. The release builder therefore owns the
+complete selection:
+
+1. it parses one exact installed record and derives the physical
+   `Metal.xctoolchain` root from its reported search path;
+2. it authenticates that root, its vnode, read-only/root ownership, installed
+   identifier/build, three metadata files, and the `metal` plus
+   `metallib`/`air-lld` executables before and after each build phase;
+3. it passes the authenticated physical root explicitly to both SwiftPM build
+   and `--show-bin-path`, selects exactly one bounded XCBuild manifest beneath
+   that pass's expected scratch authority, and structurally decodes its JSON.
+   Selection is descriptor-anchored from the already authenticated scratch
+   vnode: every `out/Intermediates.noindex/XCBuildData/<32-hex>.xcbuilddata`
+   component and `manifest.json` is opened relative to its parent with
+   no-follow semantics, raw directory-entry bytes, exact on-disk spelling, and
+   before/after vnode checks. A symlinked scratch child or a correct-looking
+   manifest outside that chain therefore cannot satisfy the gate.
+   The current graph must contain exactly nine named MLX `CompileMetalFile`
+   tasks and one AIR `MetalLink` task, with the exact source/AIR/metallib paths;
+   every task's absolute executable must resolve to the frozen physical path
+   and vnode. Decoy text, relative or foreign tools, missing or extra roles,
+   ambiguous manifests, and oversized graphs refuse; and
+4. it persists only stable component identifier/build and metadata/tool
+   hashes/versions. The reboot-variable mount spelling must not enter the
+   payload, package semantics, or provenance.
+
+That live installed-toolchain equality is deliberately limited to build and
+signed-finalization hosts. Generic unsigned verification, signed payload/P3/P5
+verification, and the clean guest's static-trust cell do not run
+`xcodebuild -showComponent` or require Xcode/Metal to be installed. They
+structurally validate the embedded stable Metal authority and join it to the
+retained P0/U1 provenance, reports, configuration, notices, and depot. A
+different or unavailable local compiler therefore cannot block static package
+verification; any changed declared authority still refuses. Historical
+schema-1 material remains the distinct no-Metal compatibility path.
+
+Current replacement releases require this schema-2 Metal authority.
+Historical schema-1 material remains verifiable only through its historical
+no-Metal compatibility path. A package built from an uncommitted correction is
+diagnostic (`admittedU1: false`), even if its independent package verification
+passes. Review, commit/push synchronization and the complete varied-root gate
+are still required before naming U1.
+
+XCBuild graph paths and stable Metal strings are byte authorities, not Swift
+`String` identities. The
+verifier converts every expected and observed source, AIR and metallib path to
+its exact UTF-8 bytes before duplicate detection, membership checks or final
+graph comparison. Canonically equivalent composed/decomposed spellings are
+therefore different and refuse the build. Stable component, metadata, tool,
+resolved-path, hash, and multiline tool-version fields use the same byte-exact
+equality, so Unicode canonical equivalence cannot substitute a retained
+authority. Signed static verification likewise
+requires the retained P5 payload report's stable Metal authority to equal the
+independently reconstructed authority. On a signing host, the live installed-
+Metal equality gate runs after portable U1 materialization but before any
+output-authority file is copied and before the login Keychain is consulted; a
+mismatch leaves the empty output root reusable by a later invocation. The
+materialized work root is still disposable transaction state and is not
+reusable after that failed invocation.
+
 ## The reference relay hub is accepted substrate, not a running Reach service
 
 `relay-hub/` has a measured scriptless package boundary on native Ubuntu 26.04

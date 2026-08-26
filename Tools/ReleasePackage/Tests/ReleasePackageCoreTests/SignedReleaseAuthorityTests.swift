@@ -463,6 +463,171 @@ private func identityCandidate(
   #expect(environment["HF_HUB_CACHE"]?.hasPrefix(environment["HOME"]! + "/") == true)
 }
 
+@Test func finalizationMetalMismatchLeavesOutputEmptyAndIdentityUnconsulted() throws {
+  let root = try makeTemporaryDirectory("finalization-metal-order")
+  defer { removeTemporaryDirectory(root) }
+  let output = root.appendingPathComponent("output")
+  try SecureFiles.createPrivateDirectory(output)
+  var identityConsulted = false
+  var retainCalled = false
+  let metal = testMetalToolchainAuthority()
+
+  #expect(throws: ReleasePackageError.self) {
+    _ = try SignedReleaseFinalizer.establishFinalizationAuthority(
+      declaredMetal: metal,
+      metalLog: root.appendingPathComponent("metal.log"),
+      requireLiveMetalAuthority: { _, _ in
+        throw ReleasePackageError.verification("installed Metal authority changed")
+      },
+      retainUnsignedAuthority: {
+        retainCalled = true
+        try SecureFiles.atomicWrite(
+          Data("should-not-exist".utf8), to: output.appendingPathComponent("authority"))
+      },
+      resolveSigningContext: {
+        identityConsulted = true
+        throw ReleasePackageError.verification("identity boundary was reached")
+      })
+  }
+  #expect(!retainCalled)
+  #expect(!identityConsulted)
+  #expect(try FileManager.default.contentsOfDirectory(atPath: output.path).isEmpty)
+
+  let context = try SignedReleaseFinalizer.establishFinalizationAuthority(
+    declaredMetal: metal,
+    metalLog: root.appendingPathComponent("metal-retry.log"),
+    requireLiveMetalAuthority: { _, _ in },
+    retainUnsignedAuthority: {
+      try SecureFiles.atomicWrite(
+        Data("retained".utf8), to: output.appendingPathComponent("authority"))
+    },
+    resolveSigningContext: {
+      identityConsulted = true
+      return .init(
+        identities: .init(
+          application: signingAuthority(.application),
+          installer: signingAuthority(.installer)),
+        loginKeychainPath: "/Users/fixture/Library/Keychains/login.keychain-db")
+    })
+  #expect(identityConsulted)
+  #expect(context.identities.application.certificateClass == .application)
+  #expect(FileManager.default.fileExists(atPath: output.appendingPathComponent("authority").path))
+}
+
+@Test func p5StaticReportJoinRequiresExactMetalAuthority() throws {
+  let metal = testMetalToolchainAuthority()
+  let exact = VerificationReport(
+    schemaVersion: 2,
+    packageSHA256: String(repeating: "1", count: 64),
+    normalizedSemanticSHA256: String(repeating: "2", count: 64),
+    embeddedManifestSHA256: String(repeating: "3", count: 64),
+    noticeSetSHA256: String(repeating: "4", count: 64),
+    hostFiles: 50,
+    helperFiles: 6,
+    scriptsPresent: false,
+    resourcesPresent: false,
+    metalToolchain: metal)
+  try SignedPackageStaticPreflight.requireRetainedReportAuthority(
+    exact, exact, requireP3Hash: false)
+
+  let changedMetal = MetalToolchainAuthority(
+    componentIdentifier: metal.componentIdentifier,
+    componentBuild: metal.componentBuild,
+    metadata: metal.metadata,
+    tools: metal.tools.enumerated().map { index, tool in
+      index == 0
+        ? .init(
+          path: tool.path, resolvedPath: tool.resolvedPath,
+          sha256: String(repeating: "0", count: 64), version: tool.version)
+        : tool
+    })
+  let decomposedVersion = "Apple metal cafe\u{301}\nAIR tools"
+  let composedVersion = decomposedVersion.precomposedStringWithCanonicalMapping
+  #expect(decomposedVersion == composedVersion)
+  #expect(!decomposedVersion.utf8.elementsEqual(composedVersion.utf8))
+  let versionMetal = MetalToolchainAuthority(
+    componentIdentifier: metal.componentIdentifier,
+    componentBuild: metal.componentBuild,
+    metadata: metal.metadata,
+    tools: metal.tools.enumerated().map { index, tool in
+      index == 0
+        ? .init(
+          path: tool.path, resolvedPath: tool.resolvedPath,
+          sha256: tool.sha256, version: composedVersion)
+        : tool
+    })
+  let exactVersionMetal = MetalToolchainAuthority(
+    componentIdentifier: metal.componentIdentifier,
+    componentBuild: metal.componentBuild,
+    metadata: metal.metadata,
+    tools: metal.tools.enumerated().map { index, tool in
+      index == 0
+        ? .init(
+          path: tool.path, resolvedPath: tool.resolvedPath,
+          sha256: tool.sha256, version: decomposedVersion)
+        : tool
+    })
+  #expect(exactVersionMetal != versionMetal)
+  for mutation in [
+    VerificationReport(
+      schemaVersion: exact.schemaVersion,
+      packageSHA256: exact.packageSHA256,
+      normalizedSemanticSHA256: exact.normalizedSemanticSHA256,
+      embeddedManifestSHA256: exact.embeddedManifestSHA256,
+      noticeSetSHA256: exact.noticeSetSHA256,
+      hostFiles: exact.hostFiles,
+      helperFiles: exact.helperFiles,
+      scriptsPresent: exact.scriptsPresent,
+      resourcesPresent: exact.resourcesPresent,
+      metalToolchain: nil),
+    VerificationReport(
+      schemaVersion: exact.schemaVersion,
+      packageSHA256: exact.packageSHA256,
+      normalizedSemanticSHA256: exact.normalizedSemanticSHA256,
+      embeddedManifestSHA256: exact.embeddedManifestSHA256,
+      noticeSetSHA256: exact.noticeSetSHA256,
+      hostFiles: exact.hostFiles,
+      helperFiles: exact.helperFiles,
+      scriptsPresent: exact.scriptsPresent,
+      resourcesPresent: exact.resourcesPresent,
+      metalToolchain: changedMetal),
+  ] {
+    #expect(throws: ReleasePackageError.self) {
+      try SignedPackageStaticPreflight.requireRetainedReportAuthority(
+        exact, mutation, requireP3Hash: false)
+    }
+  }
+
+  let exactVersionReport = VerificationReport(
+    schemaVersion: exact.schemaVersion,
+    packageSHA256: exact.packageSHA256,
+    normalizedSemanticSHA256: exact.normalizedSemanticSHA256,
+    embeddedManifestSHA256: exact.embeddedManifestSHA256,
+    noticeSetSHA256: exact.noticeSetSHA256,
+    hostFiles: exact.hostFiles,
+    helperFiles: exact.helperFiles,
+    scriptsPresent: exact.scriptsPresent,
+    resourcesPresent: exact.resourcesPresent,
+    metalToolchain: exactVersionMetal)
+  let substitutedVersionReport = VerificationReport(
+    schemaVersion: exact.schemaVersion,
+    packageSHA256: exact.packageSHA256,
+    normalizedSemanticSHA256: exact.normalizedSemanticSHA256,
+    embeddedManifestSHA256: exact.embeddedManifestSHA256,
+    noticeSetSHA256: exact.noticeSetSHA256,
+    hostFiles: exact.hostFiles,
+    helperFiles: exact.helperFiles,
+    scriptsPresent: exact.scriptsPresent,
+    resourcesPresent: exact.resourcesPresent,
+    metalToolchain: versionMetal)
+  try SignedPackageStaticPreflight.requireRetainedReportAuthority(
+    exactVersionReport, exactVersionReport, requireP3Hash: false)
+  #expect(throws: ReleasePackageError.self) {
+    try SignedPackageStaticPreflight.requireRetainedReportAuthority(
+      exactVersionReport, substitutedVersionReport, requireP3Hash: false)
+  }
+}
+
 @Test func realIdentityBoundaryResolvesExactlyOnePairOnlyWhenExplicitlyEnabled() throws {
   guard ProcessInfo.processInfo.environment["REACH_RELEASE_REAL_IDENTITIES"] == "1" else {
     return

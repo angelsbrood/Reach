@@ -147,6 +147,7 @@ func signedCandidatePassesCompleteIndependentP3AndP5Verification() throws {
   #expect(
     sums.contains(
       "\(try Digests.sha256(file: p5Report))  ./p5-independent-verification.json\n"))
+
 }
 
 @Test(

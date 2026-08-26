@@ -88,6 +88,17 @@ private func copyProvenanceAuthority(
   return root.appendingPathComponent("release-provenance.json")
 }
 
+@Test func currentStaticPackageVerificationDoesNotResolveLiveMetal() throws {
+  guard let inputs = CandidateInputs.current() else { return }
+  let root = try makeTemporaryDirectory("candidate-static-no-live-metal")
+  defer { removeTemporaryDirectory(root) }
+  let report = try inputs.verify(root: root)
+  #expect(report.metalToolchain != nil)
+  let forbiddenAmbientLog = root.appendingPathComponent(
+    "scratch/logs/verify-metal-component.log")
+  #expect(!FileManager.default.fileExists(atPath: forbiddenAmbientLog.path))
+}
+
 private func expectReleaseError(
   _ expected: ReleasePackageError,
   performing operation: () throws -> Void
@@ -224,7 +235,8 @@ private func expectReleaseError(
           releaseConfigurationSHA256: zero,
           releaseToolSourceSHA256: original.p0.releaseToolSourceSHA256,
           noticeAuthoritySHA256: original.p0.noticeAuthoritySHA256,
-          dependencyDepotSHA256: original.p0.dependencyDepotSHA256),
+          dependencyDepotSHA256: original.p0.dependencyDepotSHA256,
+          metalToolchain: original.p0.metalToolchain),
         p1: original.p1,
         u1: original.u1),
       .verification("external P0 source provenance changed")
@@ -288,6 +300,96 @@ private func expectReleaseError(
     expectReleaseError(expectedError) {
       _ = try inputs.verify(
         provenance: url, root: root.appendingPathComponent("verification-\(index)"))
+    }
+  }
+}
+
+@Test func candidateRejectsEveryChangedMetalP0AuthorityClass() throws {
+  guard let inputs = CandidateInputs.current() else { return }
+  let root = try makeTemporaryDirectory("candidate-metal-p0-authority")
+  defer { removeTemporaryDirectory(root) }
+  let original = try JSONDecoder().decode(
+    ReleaseProvenance.self, from: Data(contentsOf: inputs.provenance))
+  let metal = try #require(original.p0.metalToolchain)
+  let changed: [MetalToolchainAuthority?] = [
+    nil,
+    .init(
+      schemaVersion: 0,
+      componentIdentifier: metal.componentIdentifier,
+      componentBuild: metal.componentBuild,
+      metadata: metal.metadata,
+      tools: metal.tools),
+    .init(
+      componentIdentifier: "com.apple.dt.toolchain.Metal.changed",
+      componentBuild: metal.componentBuild,
+      metadata: metal.metadata,
+      tools: metal.tools),
+    .init(
+      componentIdentifier: metal.componentIdentifier,
+      componentBuild: "27A9999z",
+      metadata: metal.metadata,
+      tools: metal.tools),
+    .init(
+      componentIdentifier: metal.componentIdentifier,
+      componentBuild: metal.componentBuild,
+      metadata: [
+        .init(path: metal.metadata[0].path, sha256: String(repeating: "0", count: 64))
+      ] + Array(metal.metadata.dropFirst()),
+      tools: metal.tools),
+    .init(
+      componentIdentifier: metal.componentIdentifier,
+      componentBuild: metal.componentBuild,
+      metadata: metal.metadata,
+      tools: [
+        .init(
+          path: metal.tools[0].path,
+          resolvedPath: "usr/bin/metal-substitute",
+          sha256: metal.tools[0].sha256,
+          version: metal.tools[0].version)
+      ] + Array(metal.tools.dropFirst())),
+    .init(
+      componentIdentifier: metal.componentIdentifier,
+      componentBuild: metal.componentBuild,
+      metadata: metal.metadata,
+      tools: [
+        .init(
+          path: metal.tools[0].path,
+          resolvedPath: metal.tools[0].resolvedPath,
+          sha256: String(repeating: "1", count: 64),
+          version: metal.tools[0].version)
+      ] + Array(metal.tools.dropFirst())),
+    .init(
+      componentIdentifier: metal.componentIdentifier,
+      componentBuild: metal.componentBuild,
+      metadata: metal.metadata,
+      tools: [
+        .init(
+          path: metal.tools[0].path,
+          resolvedPath: metal.tools[0].resolvedPath,
+          sha256: metal.tools[0].sha256,
+          version: "changed version")
+      ] + Array(metal.tools.dropFirst())),
+  ]
+  for (index, mutation) in changed.enumerated() {
+    let variant = ReleaseProvenance(
+      schemaVersion: original.schemaVersion,
+      p0: .init(
+        name: original.p0.name,
+        authority: original.p0.authority,
+        releaseConfigurationSHA256: original.p0.releaseConfigurationSHA256,
+        releaseToolSourceSHA256: original.p0.releaseToolSourceSHA256,
+        noticeAuthoritySHA256: original.p0.noticeAuthoritySHA256,
+        dependencyDepotSHA256: original.p0.dependencyDepotSHA256,
+        metalToolchain: mutation),
+      p1: original.p1,
+      u1: original.u1)
+    let authority = root.appendingPathComponent("authority-\(index)")
+    let url = try copyProvenanceAuthority(original, from: inputs, to: authority)
+    try SecureFiles.atomicWrite(try CanonicalJSON.encode(variant), to: url)
+    expectReleaseError(.verification("external P0 source provenance changed")) {
+      _ = try inputs.verify(
+        provenance: url,
+        root: root.appendingPathComponent("verification-\(index)"))
     }
   }
 }

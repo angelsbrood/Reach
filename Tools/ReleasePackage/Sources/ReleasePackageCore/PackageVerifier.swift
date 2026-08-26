@@ -11,6 +11,7 @@ public struct VerificationReport: Codable, Equatable, Sendable {
   public let helperFiles: Int
   public let scriptsPresent: Bool
   public let resourcesPresent: Bool
+  public let metalToolchain: MetalToolchainAuthority?
 }
 
 enum OuterSignatureExpectation {
@@ -196,7 +197,9 @@ public struct PackageVerifier {
       throw ReleasePackageError.verification("embedded payload manifest is missing")
     }
     let manifest = try JSONDecoder().decode(PayloadManifest.self, from: manifestMember.data)
-    guard manifest.schemaVersion == 1,
+    let expectedDocumentSchema = configuration.schemaVersion == 1 ? 1 : 2
+    let verifiedMetal = try manifest.validatedMetalAuthority(for: configuration)
+    guard manifest.schemaVersion == expectedDocumentSchema,
       manifest.product.name == configuration.product.name,
       manifest.product.version == configuration.product.version,
       manifest.product.architecture == configuration.product.architecture,
@@ -309,14 +312,15 @@ public struct PackageVerifier {
         throw ReleasePackageError.verification("external provenance does not match package")
       }
       let expectedProvenance = ReleaseProvenance(
-        schemaVersion: 1,
+        schemaVersion: expectedDocumentSchema,
         p0: .init(
           name: "P0-source",
           authority: manifest.source,
           releaseConfigurationSHA256: try Digests.sha256(file: configurationURL),
           releaseToolSourceSHA256: expectedReleaseToolSourceSHA256,
           noticeAuthoritySHA256: try Digests.sha256(file: noticeAuthorityURL),
-          dependencyDepotSHA256: depotSeal
+          dependencyDepotSHA256: depotSeal,
+          metalToolchain: verifiedMetal
         ),
         p1: .init(
           name: "P1-payload",
@@ -388,7 +392,7 @@ public struct PackageVerifier {
       throw ReleasePackageError.verification("embedded linked-library authority changed")
     }
     return VerificationReport(
-      schemaVersion: 1,
+      schemaVersion: expectedDocumentSchema,
       packageSHA256: packageDigest,
       normalizedSemanticSHA256: semanticDigest,
       embeddedManifestSHA256: Digests.sha256(manifestMember.data),
@@ -396,7 +400,8 @@ public struct PackageVerifier {
       hostFiles: host.members.count,
       helperFiles: helper.members.count,
       scriptsPresent: false,
-      resourcesPresent: false
+      resourcesPresent: false,
+      metalToolchain: verifiedMetal
     )
   }
 

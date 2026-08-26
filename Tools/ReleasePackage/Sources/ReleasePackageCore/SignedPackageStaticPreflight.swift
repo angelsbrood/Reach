@@ -136,14 +136,8 @@ struct SignedPackageStaticPreflight {
     else {
       throw ReleasePackageError.verification("P3 payload verification authority changed")
     }
-    guard Self.samePayloadAuthority(independentlyVerified, report) else {
-      throw ReleasePackageError.verification(
-        "independent signed-package verification does not match retained P3 authority")
-    }
-    if requireP3Hash, independentlyVerified != report {
-      throw ReleasePackageError.verification(
-        "independent P3 verification does not match the retained report")
-    }
+    try Self.requireRetainedReportAuthority(
+      independentlyVerified, report, requireP3Hash: requireP3Hash)
     let inspector = CodeSignatureInspector(runner: runner)
     _ = try inspector.inspectInstallerPackage(
       package,
@@ -171,6 +165,21 @@ struct SignedPackageStaticPreflight {
     return independentlyVerified
   }
 
+  static func requireRetainedReportAuthority(
+    _ independentlyVerified: VerificationReport,
+    _ retained: VerificationReport,
+    requireP3Hash: Bool
+  ) throws {
+    guard samePayloadAuthority(independentlyVerified, retained) else {
+      throw ReleasePackageError.verification(
+        "independent signed-package verification does not match retained P3 authority")
+    }
+    if requireP3Hash, independentlyVerified != retained {
+      throw ReleasePackageError.verification(
+        "independent P3 verification does not match the retained report")
+    }
+  }
+
   private static func samePayloadAuthority(
     _ lhs: VerificationReport,
     _ rhs: VerificationReport
@@ -183,6 +192,7 @@ struct SignedPackageStaticPreflight {
       && lhs.helperFiles == rhs.helperFiles
       && lhs.scriptsPresent == rhs.scriptsPresent
       && lhs.resourcesPresent == rhs.resourcesPresent
+      && lhs.metalToolchain == rhs.metalToolchain
   }
 }
 

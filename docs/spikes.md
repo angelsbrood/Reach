@@ -3984,3 +3984,246 @@ commit/push synchronization and replacement-A varied-root U1 still precede any
 identity resolution, signing, timestamping, notary-profile use, Apple
 submission, stapling, Tart/IPSW/VM, Installer, publication, live-host mutation
 or Keeper action.
+
+### S36 installed-Metal authority correction (25 August 2026)
+
+The synchronized replacement-A gate stopped before U1 at
+`/private/tmp/reach-s36-u1-blocked-metal-selection-20260825`. The installed
+Xcode component query reported Metal build `27A5237l`, identifier
+`com.apple.dt.toolchain.Metal.32023.921.1`, status installed, and a physical
+`Metal.xctoolchain` beneath a reboot-variable cryptex mount. The identifier-only
+`xcrun --toolchain` form still resolved XcodeDefault and failed. The working
+physical path was therefore necessary during compilation but could not become
+stable provenance.
+
+The narrow correction makes that boundary explicit and fail-closed:
+
+- `ProcessRunner` permits only exact read-only `xcodebuild -version` and
+  `xcodebuild -showComponent MetalToolchain` forms and refuses identifier-only,
+  download, install, provisioning and extra-argument variants;
+- one installed record derives a byte-canonical physical root. Root ownership,
+  write protection, read-only filesystem, root/member vnodes, installed
+  identity, and every stable metadata/tool field are revalidated before and
+  after resolve, build, and bin-path selection;
+- stable authority binds three metadata hashes plus `metal`
+  `eaec9b1e…51b2` and `metallib` resolving to `air-lld`
+  `cb7e34e0…adfc4`, with exact version output. The transient root is supplied
+  explicitly through SwiftPM `--toolchain` for both build and
+  `--show-bin-path`; the retained build graph must resolve every Metal-family
+  invocation to those frozen vnodes;
+- current payload/provenance schema 2 requires that stable authority, while
+  exact historical schema 1 remains a separate no-Metal compatibility path;
+  and
+- two exact pinned MLX pre-generated source files contained an older cryptex
+  source-location marker twice each. The build normalizes only that reviewed
+  cardinality to `/Reach/MetalToolchain`, after exact input hashing, so neither
+  the current nor the older ephemeral mount spelling enters release bytes.
+
+Three complete ReleasePackage runs each passed **162/162** with exactly six
+expected signed-authority skips. Three independent diagnostic candidate gates
+each passed **6/6**, including current-schema Metal mutations and independent
+package verification. Fresh warnings-as-errors binaries are
+`29a0ebdfa720a51404056db191a2eca23fdf34bc06cebaac74f61fae5b938a15`
+and
+`061665133979cb0f57321f21fc857334f8058c8a1faf28693f59de5bc3258b8f`.
+
+The bounded real build compiled and linked the MLX Metal resources through the
+authenticated mounted path, then independently verified:
+
+- unsigned diagnostic package
+  `e9bf2c6c83c746504b1c6b9eb36c40c0f0166452fe19b79647af32eeca0bf19b`;
+- normalized semantics
+  `9bab0350fc312ac91cb625a926a22844d9f51d3c745622872ed447c1ed856947`;
+- embedded manifest
+  `1c92109ee325278070e755f2e134aac1f5c3eca47c04b8207df0bd618a4c3b69`;
+- 50 host and 6 helper records, with no Scripts or Resources; and
+- no cryptex mount spelling in the executable, payload or package semantics.
+
+The build came from the dirty correction tree and is explicitly
+`admittedU1: false`. It may not be carried into the final replacement-A gate.
+No identity or credential was resolved, no signing, timestamp, Apple contact,
+submission or staple occurred, no Tart/IPSW/VM or Installer action ran, and no
+live product, receipt, state, network, Keeper or `tasks/` authority changed.
+
+**Metal-corrected checkpoint verdict: S36 REMAINS OPEN.** Independent review,
+commit/push synchronization, and a fresh three-process/six-build replacement-A
+gate remain mandatory before U1 or any credentialed work.
+
+### S36 structured Metal graph and portable static-verification correction (25 August 2026)
+
+Independent review found that the preceding retained-build-graph check could
+be satisfied by a correct path in free text while a real Metal role invoked a
+different executable. It also found that `PackageVerifier` rediscovered the
+installed compiler during every schema-2 verification, which would make the
+vanilla clean guest's P5 static-trust cell depend on an unplanned Xcode/Metal
+installation. The earlier source conclusion was therefore not commit-ready,
+and `/private/tmp/reach-s36-metal-authority-correction-20260825` is superseded
+as correction authority. Its `checks/checks.json` was also mode `0644`, not the
+claimed `0600`.
+
+The narrow correction now selects one bounded physical XCBuild
+`manifest.json` under the expected pass scratch root and decodes it
+structurally. It requires the exact nine current MLX `CompileMetalFile` sources,
+their exact AIR outputs, and one exact `MetalLink` output/input set. Every real
+role must be an XCBuild shell task whose absolute `args[0]` resolves to the
+frozen Metal compiler path and vnode. Correct decoys with wrong real tasks,
+arbitrary absolute or relative executables, substituted source roots, missing
+compile/link roles, extra Metal-family roles, ambiguous manifests, invalid JSON
+and oversized graphs all refuse.
+
+Package verification now consumes only retained stable Metal authority.
+Unsigned verification, signed-payload/P3/P5 verification, and guest static
+trust join the embedded declaration to P0/U1/provenance and reports without a
+live component query. Exact installed-Metal equality remains an explicit
+builder and signed-finalization-host gate. Historical schema 1 remains its
+separate no-Metal path.
+
+The final focused adversarial gate passed **13/13**. Three isolated complete
+ReleasePackage runs each passed **165/165** with exactly six expected absent
+signed-authority skips. Fresh warnings-as-errors executables hash to
+`a153091a…7c06` (`reach-release-package`) and `ee836f32…0bd2`
+(`reach-release-acceptance`). The final real candidate-backed gate passed
+**6/6**.
+
+A final bounded dirty-source A/B diagnostic independently verified:
+
+- identical reachd `6823b583…ed9f` and helper `c66e5386…1d15` bytes;
+- exactly nine compile roles and one link role in each structurally decoded
+  manifest;
+- unsigned package `aef1821c…ac1c`, normalized semantics
+  `8941fb55…2d77`, and embedded manifest `64305835…9111`;
+- 50 host and 6 helper records with no Scripts or Resources; and
+- no live Metal-component query during independent static verification.
+
+The package remains outside the privacy-minimized evidence pack in a disposable
+diagnostic output root. It exists at closeout, but it is explicitly
+`admittedU1: false`, nonselectable, and may not enter the replacement-A gate.
+That precise scoped statement supersedes the earlier pack's inaccurate
+`packageRetained: false` claim.
+
+The superseding evidence pack is
+`/private/tmp/reach-s36-metal-authority-correction-superseding-20260825`.
+All retained files, including checks and both manifests, are written before the
+final mode verification; directories are `0700` and files `0600`. Its final
+seal is recorded inside the pack and in the review handoff.
+
+Read-only parity remained exact at synchronized `cc238493…b1fa` with submodule
+`6dfd5389…6797b`: reachd `a9660a83…6b790` remains PID 1533/run 1; helper
+`a784f257…b28ca8` remains PID 818/run 1 with receipt `1.0.0`; generation 37 is
+direct-ready on `utun0` with one peer and relay configured false/ready true.
+The four identity hashes, one device record, and zero CA-creation events remain
+unchanged.
+
+**Structured-graph checkpoint verdict: S36 REMAINS OPEN.** This dirty-tree
+package is diagnostic only. Independent review, commit/push synchronization,
+and a fresh varied-root replacement-A gate still precede U1, credentials,
+signing, Apple contact, VM work, Installer, publication, live-runtime mutation,
+or Keeper work.
+
+### S36 byte-exact Metal graph and failure-atomic finalization correction (25 August 2026)
+
+The next independent review found three narrower authority gaps. The structured
+manifest used Swift `String`, `Dictionary` and `Set` equality for source, AIR
+and metallib paths, so APFS composed/decomposed spellings could collapse despite
+different bytes. The portable P5 report join omitted the stable Metal field.
+And the signed finalizer copied retained U1 authority into its output before
+refusing a live installed-Metal mismatch, leaving a failed output root
+nonempty and nonretryable.
+
+The correction makes every graph path identity a raw UTF-8 byte key. Compile
+uniqueness, source-to-AIR membership, link inputs, `default.metallib`, the
+command-key/description join and the final exact graph all use those bytes.
+Focused fixtures preserve one genuine exact graph and independently change one
+source, one AIR output/input and the metallib output between canonically
+equivalent NFC/NFD spellings; all three substitutions refuse. The P5/static
+`requireP3Hash: false` report join now requires exact stable Metal authority,
+including nil and substituted-authority refusals, while P3 retains its stricter
+whole-report equality. Signed finalization now performs the live host equality
+gate before copying any retained output or resolving identities; its regression
+proves a mismatch leaves no output entry, never consults identity authority and
+permits an exact retry in the same empty root.
+
+The final focused adversarial gate passed **16/16**. Three isolated complete
+ReleasePackage runs each passed **168/168** with exactly six expected absent
+signed-authority skips. Warnings-as-errors executables hash to
+`201befca…b7fc` (`reach-release-package`) and `32fc29af…bd4`
+(`reach-release-acceptance`). All seven current unsigned candidate/static tests
+passed.
+
+One fresh dirty-source A/B diagnostic at synthetic synchronized commit
+`c383206c…f6bf` independently verified identical reachd
+`6823b583…ed9f` and helper `c66e5386…1d15`, unsigned package
+`1fd77f26…8f54`, normalized semantics `ac19f622…7f07`, embedded manifest
+`ea4744d6…8d11`, and 50 host plus 6 helper records with no Scripts or
+Resources. The package stays outside the evidence pack, is explicitly
+`admittedU1: false` and nonselectable, and cannot enter the synchronized
+replacement-A gate.
+
+The superseding privacy-minimized correction pack is
+`/private/tmp/reach-s36-metal-byte-authority-correction-authoritative-20260825`;
+its final direct seal and source seal are recorded in the review handoff. No
+identity or credential was resolved, no signature/timestamp/Apple/notary
+operation ran, no Tart/IPSW/VM/Installer action ran, and no installed runtime,
+Keeper or `tasks/` authority changed.
+
+**Byte-authority checkpoint verdict: S36 REMAINS OPEN.** Independent review,
+commit/push synchronization and a fresh three-process/six-build replacement-A
+gate still precede U1 or any credentialed, VM, Installer, publication or live-
+runtime work.
+
+### S36 descriptor-anchored graph and byte-exact stable-Metal correction (25 August 2026)
+
+The next review found that the selected `manifest.json` was still reached
+through URL traversal: a symlinked `scratch/out` or deeper ancestor could point
+at a correct decoy tree outside the build pass. It also found that synthesized
+`Equatable` still gave canonically equivalent Unicode tool-version strings the
+same authority even though their UTF-8 bytes differed.
+
+The final narrow correction anchors manifest selection at the exact opened
+scratch vnode. It walks `out`, `Intermediates.noindex`, `XCBuildData`, the one
+bounded `<32-hex>.xcbuilddata` directory, and `manifest.json` with fd-relative
+no-follow opens, raw directory-entry bytes, exact on-disk spelling, strict
+entry/size bounds, and before/after vnode revalidation. A symlink at either
+tested ancestor now refuses before graph decoding. Stable Metal authority,
+including all component, metadata, tool, resolved-path, digest, and multiline
+version strings, now compares exact UTF-8 bytes. NFC/NFD version substitution
+therefore fails live installed-authority checks, revalidation, and the portable
+P5/static report join while the exact retained authority still passes.
+
+The focused authority gate passed **18/18 three times**. Three isolated complete
+ReleasePackage runs each passed **170/170** with exactly six expected absent
+signed-authority skips. Fresh warnings-as-errors executables hash to
+`2d4e977ad2136a395211ca2c53fd625ad1b95ff37668799e8d053fec4f49f5ea`
+(`reach-release-package`) and
+`26106c5cc79f0e63ce4fe49328f8b4bcc3f9fd45b1e72e147ed20dd129496221`
+(`reach-release-acceptance`). The exact unsigned candidate/static gate passed
+**7/7**.
+
+One bounded dirty-source A/B diagnostic at synthetic commit
+`15eb0691c3ee43c401769844d8af0f9a82bfbd61` independently verified identical
+reachd `6823b583ddf3b3e54a1ad8f581c6ccd84c6c1abba29a9f1876f65f39bba6ed9f`
+and helper `c66e5386223a223d516d83656514b11b6fb5e50a4b947ab8d4c5064569971d15`
+bytes, unsigned package
+`11ea6a53d9fb9333326ae2fd2f69d97b88196d741bf0d8693c93aa9f03f482c9`,
+normalized semantics
+`6bcbeefc1fd224bb805a930358ec7d69ab1a76f8d5b83e56c3ec14ba62d94474`,
+embedded manifest
+`099da7a8250123458aab984096707423cfa83eddde6ee90881f0cf19bc544736`,
+and 50 host plus 6 helper records with no Scripts or Resources. Static
+verification performed no live Metal-component query. The package remains
+outside the evidence pack, explicitly `admittedU1: false`, nonselectable, and
+cannot enter the synchronized replacement-A gate.
+
+The superseding privacy-minimized correction pack is
+`/private/tmp/reach-s36-metal-anchor-authority-correction-authoritative-20260825`.
+It supersedes the byte-authority pack only as correction authority; its direct
+and source seals are recorded in the independent-review handoff. The live
+runtime remains generation 37, direct-ready and relay-verified-absent on the
+unchanged installed reachd/helper bytes, receipt, identities, PIDs, and run
+counts.
+
+**Descriptor-anchored checkpoint verdict: S36 REMAINS OPEN.** Review,
+commit/push synchronization, and a fresh varied-root replacement-A gate still
+precede U1. No identity or credential was resolved; no signature, timestamp,
+Apple/notary, Tart/IPSW/VM, Installer, publication, live-runtime, Keeper, or
+`tasks/` action occurred.

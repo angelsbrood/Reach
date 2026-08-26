@@ -34,10 +34,8 @@ struct SignedPayloadMaterializer {
     let provenanceURL = unsignedAuthority.appendingPathComponent("release-provenance.json")
     let provenanceData = try Data(contentsOf: provenanceURL, options: [.mappedIfSafe])
     let provenance = try JSONDecoder().decode(ReleaseProvenance.self, from: provenanceData)
-    guard provenanceData == (try CanonicalJSON.encode(provenance)),
-      provenance.schemaVersion == 1
-    else {
-      throw ReleasePackageError.verification("unsigned authority is not canonical schema 1")
+    guard provenanceData == (try CanonicalJSON.encode(provenance)) else {
+      throw ReleasePackageError.verification("unsigned authority is not canonical")
     }
     let configuration = try ReleaseConfiguration.load(from: configurationURL)
     let unsignedToolDigest = try SourceInspector().canonicalTreeDigest(unsignedToolSource)
@@ -47,7 +45,10 @@ struct SignedPayloadMaterializer {
     let expectedSemanticDigest: String
     switch selection {
     case .historicalS35:
-      guard configuration.schemaVersion == 1 else {
+      guard configuration.schemaVersion == 1,
+        provenance.schemaVersion == 1,
+        provenance.p0.metalToolchain == nil
+      else {
         throw ReleasePackageError.verification(
           "historical S35 selection requires the frozen schema-1 configuration")
       }
@@ -56,6 +57,14 @@ struct SignedPayloadMaterializer {
       expectedPackageDigest = SignedReleaseContract.unsignedPackageSHA256
       expectedSemanticDigest = SignedReleaseContract.unsignedSemanticSHA256
     case .lineage(let lineage):
+      guard configuration.schemaVersion == 2,
+        provenance.schemaVersion == 2,
+        let metal = provenance.p0.metalToolchain
+      else {
+        throw ReleasePackageError.verification(
+          "current unsigned lineage requires schema-2 Metal authority")
+      }
+      try metal.validate()
       try lineage.validate(configuration: configuration, configurationURL: configurationURL)
       guard lineage.unsignedProvenanceSHA256 == (try Digests.sha256(file: provenanceURL)),
         lineage.unsignedContainer == provenance.u1.selectedContainer,

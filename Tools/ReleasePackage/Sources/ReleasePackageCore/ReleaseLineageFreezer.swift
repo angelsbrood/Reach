@@ -199,11 +199,14 @@ public struct ReleaseLineageFreezer {
   private func loadUnsignedProvenance(_ url: URL) throws -> ReleaseProvenance {
     let data = try Data(contentsOf: url, options: [.mappedIfSafe])
     let provenance = try JSONDecoder().decode(ReleaseProvenance.self, from: data)
-    guard provenance.schemaVersion == 1,
+    guard provenance.schemaVersion == 2,
+      provenance.p0.metalToolchain != nil,
       data == (try CanonicalJSON.encode(provenance))
     else {
-      throw ReleasePackageError.verification("unsigned provenance is not canonical schema 1")
+      throw ReleasePackageError.verification(
+        "replacement unsigned provenance is not canonical schema 2")
     }
+    try provenance.p0.metalToolchain?.validate()
     return provenance
   }
 

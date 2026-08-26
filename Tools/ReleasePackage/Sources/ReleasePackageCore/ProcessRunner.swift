@@ -38,10 +38,22 @@ public struct ProcessRunner: Sendable {
   ]
 
   private let testExecutables: Set<String>
+  private let authenticatedMetalExecutables: Set<String>
 
-  public init() { testExecutables = [] }
+  public init() {
+    testExecutables = []
+    authenticatedMetalExecutables = []
+  }
 
-  init(testExecutables: Set<String>) { self.testExecutables = testExecutables }
+  init(testExecutables: Set<String>) {
+    self.testExecutables = testExecutables
+    authenticatedMetalExecutables = []
+  }
+
+  init(authenticatedMetalExecutables: Set<String>) {
+    testExecutables = []
+    self.authenticatedMetalExecutables = authenticatedMetalExecutables
+  }
 
   @discardableResult
   public func run(
@@ -428,7 +440,11 @@ public struct ProcessRunner: Sendable {
     guard executable.hasPrefix("/"), !executable.contains("\0") else {
       throw ReleasePackageError.invalidArgument("executable path must be absolute")
     }
-    if Self.fixedExecutables.contains(executable) || testExecutables.contains(executable) { return }
+    if Self.fixedExecutables.contains(executable) || testExecutables.contains(executable)
+      || authenticatedMetalExecutables.contains(executable)
+    {
+      return
+    }
     throw ReleasePackageError.invalidArgument(
       "executable is outside the fixed tool allowlist: \(executable)")
   }
@@ -439,7 +455,22 @@ public struct ProcessRunner: Sendable {
     environment: [String: String],
     redactedArguments: [Int: String]
   ) throws {
+    if authenticatedMetalExecutables.contains(executable) {
+      guard arguments == ["--version"], environment.isEmpty, redactedArguments.isEmpty else {
+        throw ReleasePackageError.invalidArgument(
+          "authenticated Metal tool invocation is outside version inspection")
+      }
+      return
+    }
     switch executable {
+    case "/usr/bin/xcodebuild":
+      guard Self.xcodebuildInvocationIsAllowed(arguments),
+        environment.isEmpty, redactedArguments.isEmpty
+      else {
+        throw ReleasePackageError.invalidArgument(
+          "xcodebuild invocation is outside read-only release authority")
+      }
+      return
     case "/usr/bin/sudo":
       let prefix = ["-u", arguments.count > 1 ? arguments[1] : "", "-H", "--"]
       let tail = arguments.count >= 4 ? Array(arguments.dropFirst(4)) : []
@@ -553,6 +584,10 @@ public struct ProcessRunner: Sendable {
       && arguments[3] != "/"
       && arguments[4...] == ["-target", "/"][...]
     return ordinary || choice
+  }
+
+  static func xcodebuildInvocationIsAllowed(_ arguments: [String]) -> Bool {
+    arguments == ["-version"] || arguments == ["-showComponent", "MetalToolchain"]
   }
 
   private static func launchctlInvocationIsAllowed(_ arguments: [String]) -> Bool {

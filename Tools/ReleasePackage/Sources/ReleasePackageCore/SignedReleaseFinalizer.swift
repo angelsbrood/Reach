@@ -14,16 +14,36 @@ public struct SignedReleaseResult: Codable, Equatable, Sendable {
 
 public struct SignedReleaseFinalizer {
   private let runner: ProcessRunner
-  private let identityResolver: DeveloperIDIdentityResolver
+  private let resolveSigningContext: () throws -> DeveloperIDSigningContext
+  private let requireLiveMetalAuthority: (MetalToolchainAuthority, URL) throws -> Void
 
   public init() {
     runner = ProcessRunner()
-    identityResolver = DeveloperIDIdentityResolver()
+    let runner = runner
+    resolveSigningContext = { try DeveloperIDIdentityResolver().resolveSigningContext() }
+    requireLiveMetalAuthority = { authority, logURL in
+      _ = try InstalledMetalToolchainResolver(runner: runner).requireAuthority(
+        authority, logURL: logURL)
+    }
   }
 
   init(runner: ProcessRunner, identityResolver: DeveloperIDIdentityResolver) {
     self.runner = runner
-    self.identityResolver = identityResolver
+    resolveSigningContext = { try identityResolver.resolveSigningContext() }
+    requireLiveMetalAuthority = { authority, logURL in
+      _ = try InstalledMetalToolchainResolver(runner: runner).requireAuthority(
+        authority, logURL: logURL)
+    }
+  }
+
+  init(
+    runner: ProcessRunner,
+    requireLiveMetalAuthority: @escaping (MetalToolchainAuthority, URL) throws -> Void,
+    resolveSigningContext: @escaping () throws -> DeveloperIDSigningContext
+  ) {
+    self.runner = runner
+    self.requireLiveMetalAuthority = requireLiveMetalAuthority
+    self.resolveSigningContext = resolveSigningContext
   }
 
   public func sign(
@@ -116,11 +136,18 @@ public struct SignedReleaseFinalizer {
       workRoot: workRoot,
       selection: selection
     )
-    try retainUnsignedAuthority(
-      materialized.provenance, from: unsignedAuthority, at: outputRoot)
-
-    // U1 is completely verified before the login Keychain is queried.
-    let signingContext = try identityResolver.resolveSigningContext()
+    // Static U1 verification is portable. Finalization deliberately adds the
+    // stronger build-host gate before output authority changes or the login
+    // Keychain is queried.
+    let signingContext = try Self.establishFinalizationAuthority(
+      declaredMetal: materialized.manifest.validatedMetalAuthority(for: configuration),
+      metalLog: logs.appendingPathComponent("metal-component-finalization-host.log"),
+      requireLiveMetalAuthority: requireLiveMetalAuthority,
+      retainUnsignedAuthority: {
+        try retainUnsignedAuthority(
+          materialized.provenance, from: unsignedAuthority, at: outputRoot)
+      },
+      resolveSigningContext: resolveSigningContext)
     let identities = signingContext.identities
     try identities.application.validate()
     try identities.installer.validate()
@@ -627,6 +654,20 @@ public struct SignedReleaseFinalizer {
       "HF_HUB_CACHE": loginHome.appendingPathComponent(".cache/huggingface/hub").path,
       "TMPDIR": workRoot.path,
     ]
+  }
+
+  static func establishFinalizationAuthority(
+    declaredMetal: MetalToolchainAuthority?,
+    metalLog: URL,
+    requireLiveMetalAuthority: (MetalToolchainAuthority, URL) throws -> Void,
+    retainUnsignedAuthority: () throws -> Void,
+    resolveSigningContext: () throws -> DeveloperIDSigningContext
+  ) throws -> DeveloperIDSigningContext {
+    if let declaredMetal {
+      try requireLiveMetalAuthority(declaredMetal, metalLog)
+    }
+    try retainUnsignedAuthority()
+    return try resolveSigningContext()
   }
 
   private func retainUnsignedAuthority(

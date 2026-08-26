@@ -21,6 +21,34 @@ func repositoryRoot() -> URL {
   return value
 }
 
+func testMetalToolchainAuthority(
+  identifier: String = "com.apple.dt.toolchain.Metal.32023.921.1",
+  build: String = "27A5237l"
+) -> MetalToolchainAuthority {
+  .init(
+    componentIdentifier: identifier,
+    componentBuild: build,
+    metadata: [
+      .init(path: "ToolchainInfo.plist", sha256: String(repeating: "1", count: 64)),
+      .init(
+        path: "usr/metal/32023/ToolchainInfo.json",
+        sha256: String(repeating: "2", count: 64)),
+      .init(
+        path: "usr/metal/32023/ToolchainInfo.plist",
+        sha256: String(repeating: "3", count: 64)),
+    ],
+    tools: [
+      .init(
+        path: "usr/bin/metal", resolvedPath: "usr/bin/metal",
+        sha256: String(repeating: "4", count: 64),
+        version: "Apple metal 32023.921"),
+      .init(
+        path: "usr/bin/metallib", resolvedPath: "usr/bin/air-lld",
+        sha256: String(repeating: "5", count: 64),
+        version: "AIR-LLD 32023.921"),
+    ])
+}
+
 func canonicalPayloadFixture(at root: URL, includeAlias: Bool = true) throws -> URL {
   let payload = root.appendingPathComponent("payload")
   try SecureFiles.createDirectory(payload, mode: 0o755)
