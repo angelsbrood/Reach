@@ -6,11 +6,13 @@ public struct RetainedReleaseAuthorityManifest: Codable, Equatable, Sendable {
     public let path: String
     public let size: UInt64
     public let sha256: String
+    public let mode: String?
 
-    public init(path: String, size: UInt64, sha256: String) {
+    public init(path: String, size: UInt64, sha256: String, mode: String? = nil) {
       self.path = path
       self.size = size
       self.sha256 = sha256
+      self.mode = mode
     }
   }
 
@@ -160,9 +162,10 @@ public struct RetainedReleaseAuthoritySealer {
       }
 
       let manifestURL = output.appendingPathComponent("retained-authority.json")
-      let files = try fileRecords(below: output, excluding: [manifestURL.lastPathComponent])
+      let files = try fileRecords(
+        below: output, excluding: [manifestURL.lastPathComponent], includeModes: true)
       let manifest = RetainedReleaseAuthorityManifest(
-        schemaVersion: 1,
+        schemaVersion: 2,
         release: lineage.release,
         p5SHA256: p5.stapledContainer.sha256,
         provenanceSHA256: try Digests.sha256(
@@ -200,7 +203,7 @@ public struct RetainedReleaseAuthoritySealer {
     let data = try Data(contentsOf: manifestURL, options: [.mappedIfSafe])
     let manifest = try JSONDecoder().decode(RetainedReleaseAuthorityManifest.self, from: data)
     let shaPattern = #"^[0-9a-f]{64}$"#
-    guard data == (try CanonicalJSON.encode(manifest)), manifest.schemaVersion == 1,
+    guard data == (try CanonicalJSON.encode(manifest)), [1, 2].contains(manifest.schemaVersion),
       manifest.p5SHA256.range(of: shaPattern, options: .regularExpression) != nil,
       manifest.provenanceSHA256.range(of: shaPattern, options: .regularExpression) != nil,
       manifest.verificationReportSHA256.range(
@@ -210,10 +213,14 @@ public struct RetainedReleaseAuthoritySealer {
         (try? SecureFiles.validateRelativePath(file.path)) != nil
           && file.path != "retained-authority.json" && file.size > 0
           && file.sha256.range(of: shaPattern, options: .regularExpression) != nil
+          && (manifest.schemaVersion == 1
+            ? file.mode == nil
+            : file.mode?.range(of: #"^[0-7]{4}$"#, options: .regularExpression) != nil)
       }),
       manifest.files
         == (try fileRecords(
-          below: authorityRoot, excluding: [manifestURL.lastPathComponent])),
+          below: authorityRoot, excluding: [manifestURL.lastPathComponent],
+          includeModes: manifest.schemaVersion == 2)),
       manifest.files.filter({ $0.sha256 == manifest.p5SHA256 }).count == 1
     else {
       throw ReleasePackageError.verification("retained release manifest changed")
@@ -233,7 +240,8 @@ public struct RetainedReleaseAuthoritySealer {
 
   private func copyTree(_ source: URL, to destination: URL) throws {
     try SecureFiles.copyTree(
-      from: source, to: destination, directoryMode: 0o700, fileMode: 0o600)
+      from: source, to: destination, directoryMode: 0o700, fileMode: 0o600,
+      preserveSourceModes: true)
   }
 
   private func copyInput(_ source: URL, to destination: URL) throws {
@@ -283,7 +291,9 @@ public struct RetainedReleaseAuthoritySealer {
     }
   }
 
-  private func fileRecords(below root: URL, excluding: Set<String>) throws
+  private func fileRecords(
+    below root: URL, excluding: Set<String>, includeModes: Bool = false
+  ) throws
     -> [RetainedReleaseAuthorityManifest.File]
   {
     try SecureFiles.enumerateTree(root).compactMap { url in
@@ -294,22 +304,38 @@ public struct RetainedReleaseAuthoritySealer {
         throw ReleasePackageError.verification("cannot inspect retained authority member")
       }
       if (info.st_mode & S_IFMT) == S_IFDIR {
-        guard (info.st_mode & 0o7777) == 0o700 else {
+        let mode = info.st_mode & 0o7777
+        guard
+          isBoundInput(relative)
+            ? info.st_uid == getuid() && mode & 0o7022 == 0
+            : mode == 0o700
+        else {
           throw ReleasePackageError.unsafePath(
-            "retained authority directory must be mode 0700: \(relative)")
+            "retained authority directory has an unsafe mode: \(relative)")
         }
         return nil
       }
+      let mode = info.st_mode & 0o7777
       guard (info.st_mode & S_IFMT) == S_IFREG, info.st_nlink == 1,
-        info.st_uid == getuid(), (info.st_mode & 0o7777) == 0o600
+        info.st_uid == getuid(),
+        isBoundInput(relative)
+          ? mode & 0o7022 == 0 && mode & S_IRUSR != 0
+          : mode == 0o600
       else {
         throw ReleasePackageError.unsafePath(
-          "retained authority file must be a mode-0600 single-link file: \(relative)")
+          "retained authority file has an unsafe mode: \(relative)")
       }
       return .init(
-        path: relative, size: UInt64(info.st_size), sha256: try Digests.sha256(file: url))
+        path: relative, size: UInt64(info.st_size), sha256: try Digests.sha256(file: url),
+        mode: includeModes ? String(format: "%04o", mode) : nil)
     }.sorted { lhs, rhs in
       lhs.path.utf8.lexicographicallyPrecedes(rhs.path.utf8)
+    }
+  }
+
+  private func isBoundInput(_ relative: String) -> Bool {
+    ["unsigned-tool-source", "finalizer-tool-source", "dependency-depot"].contains {
+      relative == $0 || relative.hasPrefix($0 + "/")
     }
   }
 }

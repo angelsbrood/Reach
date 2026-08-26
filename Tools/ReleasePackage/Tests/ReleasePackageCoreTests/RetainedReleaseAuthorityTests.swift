@@ -111,3 +111,31 @@ private func retainedFixture() throws -> (
     try RetainedReleaseAuthoritySealer.uniqueArtifacts([first, conflicting])
   }
 }
+
+@Test func retainedAuthorityPreservesSafeBoundInputModesExactly() throws {
+  let root = try makeTemporaryDirectory("retained-input-modes")
+  defer { removeTemporaryDirectory(root) }
+  let source = root.appendingPathComponent("source")
+  let nested = source.appendingPathComponent("Sources")
+  try SecureFiles.createDirectory(source, mode: 0o755)
+  try SecureFiles.createDirectory(nested, mode: 0o755)
+  let file = nested.appendingPathComponent("Authority.swift")
+  try SecureFiles.atomicWrite(Data("authority\n".utf8), to: file, mode: 0o644)
+
+  let copy = root.appendingPathComponent("copy")
+  try SecureFiles.copyTree(from: source, to: copy, preserveSourceModes: true)
+  var sourceInfo = stat()
+  var copyInfo = stat()
+  #expect(lstat(file.path, &sourceInfo) == 0)
+  #expect(lstat(copy.appendingPathComponent("Sources/Authority.swift").path, &copyInfo) == 0)
+  #expect(sourceInfo.st_mode & 0o7777 == copyInfo.st_mode & 0o7777)
+  #expect(
+    try SourceInspector().canonicalTreeDigest(source)
+      == SourceInspector().canonicalTreeDigest(copy))
+
+  #expect(chmod(file.path, 0o666) == 0)
+  #expect(throws: ReleasePackageError.self) {
+    try SecureFiles.copyTree(
+      from: source, to: root.appendingPathComponent("unsafe"), preserveSourceModes: true)
+  }
+}

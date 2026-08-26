@@ -141,13 +141,19 @@ public enum SecureFiles {
   }
 
   public static func copyTree(
-    from source: URL, to destination: URL, directoryMode: mode_t = 0o755, fileMode: mode_t = 0o644
+    from source: URL, to destination: URL, directoryMode: mode_t = 0o755,
+    fileMode: mode_t = 0o644, preserveSourceModes: Bool = false
   ) throws {
     var info = stat()
     guard lstat(source.path, &info) == 0, (info.st_mode & S_IFMT) == S_IFDIR else {
       throw ReleasePackageError.unsafePath("tree source is not a directory: \(source.path)")
     }
-    try createDirectory(destination, mode: directoryMode)
+    let sourceRootMode = info.st_mode & 0o7777
+    if preserveSourceModes {
+      try requireSafeRetainedMode(sourceRootMode, path: source.path)
+    }
+    try createDirectory(
+      destination, mode: preserveSourceModes ? sourceRootMode : directoryMode)
     let keys: [URLResourceKey] = [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey]
     let entries = try enumerateTree(source, includingPropertiesForKeys: keys)
       .sorted { $0.path < $1.path }
@@ -165,14 +171,32 @@ public enum SecureFiles {
       guard lstat(entry.path, &entryInfo) == 0 else { throw posix("lstat", entry) }
       switch entryInfo.st_mode & S_IFMT {
       case S_IFDIR:
-        try createDirectory(target, mode: directoryMode)
+        let mode = entryInfo.st_mode & 0o7777
+        if preserveSourceModes { try requireSafeRetainedMode(mode, path: entry.path) }
+        try createDirectory(target, mode: preserveSourceModes ? mode : directoryMode)
       case S_IFREG:
-        try createDirectory(target.deletingLastPathComponent(), mode: directoryMode)
-        try copyRegularFile(from: entry, to: target, mode: fileMode)
+        var parentInfo = stat()
+        let parent = target.deletingLastPathComponent()
+        guard lstat(parent.path, &parentInfo) == 0,
+          (parentInfo.st_mode & S_IFMT) == S_IFDIR
+        else {
+          throw ReleasePackageError.unsafePath(
+            "tree destination parent is not a physical directory: \(parent.path)")
+        }
+        let mode = entryInfo.st_mode & 0o7777
+        if preserveSourceModes { try requireSafeRetainedMode(mode, path: entry.path) }
+        try copyRegularFile(from: entry, to: target, mode: preserveSourceModes ? mode : fileMode)
       default:
         throw ReleasePackageError.unsafePath(
           "bundle contains a symlink or special file: \(entry.path)")
       }
+    }
+  }
+
+  private static func requireSafeRetainedMode(_ mode: mode_t, path: String) throws {
+    guard mode & 0o7022 == 0 else {
+      throw ReleasePackageError.unsafePath(
+        "retained authority input has an unsafe mode: \(path)")
     }
   }
 
