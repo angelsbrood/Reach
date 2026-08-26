@@ -249,26 +249,36 @@ it as a release until the separate native clean-Mac install/update/rollback/
 uninstall matrix earns both mandatory receipts, retained state, and complete
 recovery behavior.
 
-## Private clean-Mac lifecycle tooling — not yet an accepted release
+## Private clean-Mac lifecycle tooling — evidenced stop, not an accepted release
 
 S36 adds a nonshipping `reach-release-acceptance` executable and extends the
 release core for exact multi-release lineage. This is test and transaction
 machinery only. It is absent from both package components and creates no
 updater, feed, downloader, telemetry, service, or public install path.
 
-Historical S35 package bytes were lost. Their hashes remain evidence but are
-not usable release authority. The selected replacement sequence is therefore:
+Historical S35 package bytes were lost. S36 selected this replacement sequence:
 
 - A: product/host `0.0.2`, helper `1.0.2`;
 - B: product/host `0.0.3`, helper `1.0.2` only if the complete signed A helper
   component is carried forward byte-for-byte without re-signing; and
-- one separately reviewed exact-P3 checkpoint before each of the two possible
-  future Apple submissions.
+- one separately reviewed exact-P3 checkpoint before each possible Apple
+  submission.
+
+Only replacement A ran. Its exact private authority is P2 `d7a2f296…b9d13`,
+P3 `d426499f…c022`, one accepted zero-issue Apple submission, and stapled P5
+`042f1543…1b41b`. The self-contained retained P5 remains owner-private. It is
+not an installed, published, or clean-Mac-accepted release. Successor B and
+every guest lifecycle cell remained unstarted because the supported final
+macOS 27 restore-image resolver failed its initial call and two bounded
+repeats before any IPSW or VM authority existed.
 
 Schema-1 release configuration and schema-2 signed provenance remain readable
 for historical verification. New schema-2 configuration and schema-3 signed
 provenance bind the complete predecessor, component disposition, P0–P5
-authority, and retained parent. Freeze the lineage only from a complete local
+authority, and retained parent. Schema-2 configuration permits the unsigned
+and finalizer roles to bind the same source digest; both fields remain
+independently present and verified in schema-3 provenance. Historical schema 1
+still requires distinct digests. Freeze the lineage only from a complete local
 authority; a caller-supplied parent hash is never sufficient:
 
 ```sh
@@ -285,10 +295,11 @@ authority; a caller-supplied parent hash is never sufficient:
 For B, add `--parent-authority` naming the complete retained A P5 tree. The
 same parent tree is required again by `sign`; an unchanged helper is accepted
 only after its payload and executable runtime-content digest match A. The
-successor embeds A's complete signed helper component XAR byte-for-byte; it
-does not rebuild or re-sign that unchanged component. Until a replacement U1
-is minted after synchronized review, do not resolve Developer ID identities,
-use a notary profile, sign, timestamp, submit, or staple.
+successor would embed A's complete signed helper component XAR byte-for-byte
+without rebuilding or re-signing it. S36 stopped before that path began; any
+future successor or clean-Mac pass requires a new ruling and fresh authority.
+Never infer installability, publication, or lifecycle acceptance from the
+retained private P5 alone.
 
 The acceptance driver has two explicit authorities. Host mode may control only
 `reach-s36-macos27-base` and `reach-s36-macos27-acceptance` through exact Tart
@@ -441,6 +452,23 @@ output-authority file is copied and before the login Keychain is consulted; a
 mismatch leaves the empty output root reusable by a later invocation. The
 materialized work root is still disposable transaction state and is not
 reusable after that failed invocation.
+
+### S36 closeout boundary
+
+Replacement A's private P5 remains a verification authority only. Native
+static verification rejoins its 5,264-entry retained manifest, 50 host files,
+6 helper files, Developer ID chains and timestamps, stapled ticket, and local
+Installer assessment. It does not prove installation, owner selection, model
+execution, dialing, update, rollback, uninstall, or retained-state reinstall.
+
+The decisive rig stop occurred before any guest was created:
+`VZMacOSRestoreImage.latestSupported` failed once and then failed in two
+bounded repeats. No restore-image record or IPSW existed, so the final-build
+validator was never invoked. The host's seed-suffixed build is only contextual
+runner drift; it was not passed to or rejected by the image validator. A future
+clean-Mac or physical-hardware pass must begin with new, independently reviewed
+rig authority. S36 created no install instructions, updater, feed, publication,
+or live-host mutation.
 
 ## The reference relay hub is accepted substrate, not a running Reach service
 

@@ -4280,3 +4280,75 @@ submission, staple, Tart/IPSW/VM, Installer, publication, receipt, live-runtime,
 network, Keeper or `tasks/` action occurred. The next gate is separately
 authorized replacement-A signing/notarization; clean-Mac acceptance follows
 only after exact A passes.
+
+### S36 private replacement-A P5 and restore-image evidenced stop (26 August 2026)
+
+The credentialed continuation bound the admitted replacement-A U1 and stable
+Metal authority before identity use. It produced one complete private lineage:
+
+- P2 `d7a2f296d4f3fbc3d5dda40051d1f658e64e55a6046d072ac3bcc5fac71b9d13`;
+- P3 `d426499fa144d9b74f809f8fde79f932b439062b7072a1d7647411e45310c022`;
+- one submission, `c12dd980-76be-44f9-b666-6b199498f43b`, accepted with
+  status code zero and no issues; matching log
+  `7b22ae25448ddd144f182280a16c0725328a7d226d2fa8ba332e50c497ceec37`;
+- stapled P5
+  `042f1543aa019226f931ce4f476e9726b85a6e71a30163855b49fbd59f1b41b6`;
+  provenance `8113170f…5482`; independent retained report
+  `19ad0db…3225`; and 5,264-entry direct manifest
+  `67f48c7e…ae90`.
+
+A final native read-only recheck passed `pkgutil --check-signature`,
+`stapler validate`, and Installer-type Gatekeeper assessment. The complete
+portable/static verifier also passed with 50 host files, 6 helper files, no
+Scripts or Resources, exact P5 hash, staple true and local assessment true;
+its privacy-safe report hashes to `9dae36ca…867324`. The package remains
+private, uninstalled and unpublished. No second signature, submission, Apple
+query or staple occurred during closeout.
+
+The narrow forward correction resolves the last schema contract inconsistency.
+Replacement configuration schema 2 may bind unsigned and finalizer roles to
+the same source digest; schema-3 provenance still carries and verifies both
+fields independently through its shared retained/static envelope. Malformed
+and substituted digest mutations refuse. Historical schema 1 continues to
+require unequal digests. The earned replacement-A lineage already used
+distinct digests and its bytes did not change.
+
+The focused equal-source/historical-boundary spine passed **2/2 in 3/3 fresh
+runs**. Three complete isolated ReleasePackage runs each passed **173/173**
+with exactly six expected absent signed-authority skips. Warnings-as-errors
+release binaries hash to
+`64e36c8a0c62c5c710787a92f240541b824d3a1bfd2bd119b7906a76b245b347`
+and
+`fe205bb966358c3587fc6825fa3024a0e22d6bf030636f9b29b91ed629b9f564`.
+Strict Swift formatting and both diff checks passed.
+
+The decisive clean-Mac authority gate failed before provisioning. The initial
+`VZMacOSRestoreImage.latestSupported` call and two bounded repeats all failed,
+so no final macOS 27 restore-image record, IPSW, base VM, clone, guest
+credential, Installer run or package cell existed. The final-build regex was
+never reached; the seed-suffixed host build is only contextual runner drift and
+was not supplied to or rejected by the restore-image validator. Raw terminal
+captures remain unchanged while allowlisted summaries remove the literal
+control-prefix ambiguity. The corrected 13-file stop pack verifies directly at
+`/private/tmp/reach-s36-macos27-image-stop-20260826` and seals at
+`424c4ac87a83497a63bbf91475cc02b13c3fa31749a80669b0472434e7917394`.
+
+The accepted P5 remained untouched. After re-proving exact targets and its
+self-contained authority, closeout removed the empty `incoming-A`, rejected
+provisional `replacement-A-U1.incoming-ff2ab11`, redundant unsigned U1, and
+duplicate signed/notarized finalization copies. The minimal fsynced
+one-submission journal, UUID-bound accepted log and wait response, and
+privacy-safe command/recovery records remain beside the durable P5; no profile
+label or credential entered repository or evidence.
+
+Read-only runtime parity remained exact: installed reachd
+`a9660a83…6b790` at PID/run 1533/1; helper `a784f257…b28ca8` at 818/1 with
+receipt 1.0.0; generation 37 direct-ready on `utun0`, one peer, relay
+configured false/ready true. No service, receipt, route, state, Keeper or
+`tasks/` authority changed.
+
+**S36 verdict: EVIDENCED STOP.** Trusted clean-Mac install/update/interruption/
+rollback/uninstall/reinstall acceptance was not earned; successor B and every
+guest cell remained unstarted. Replacement-A package/signing authority is
+private baseline only. The completed plan is retired, there is no active Now
+item, September adoption remains gated, and Keeper stays Held.

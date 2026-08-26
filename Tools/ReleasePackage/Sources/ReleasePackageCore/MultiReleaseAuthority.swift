@@ -316,7 +316,6 @@ public struct MultiReleaseSignedProvenance: Codable, Equatable, Sendable {
       p2.unsignedParent == lineage.unsignedContainer,
       p2.unsignedToolSourceSHA256 == lineage.unsignedToolSourceSHA256,
       validSHA256(p2.finalizerToolSourceSHA256),
-      p2.finalizerToolSourceSHA256 != p2.unsignedToolSourceSHA256,
       p2.signedLeaves.count == 2,
       p2.signedLeaves.map(\.path).sorted() == expectedIdentifiers.keys.sorted(),
       p2.applicationCertificate.certificateClass == .application,

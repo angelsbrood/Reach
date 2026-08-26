@@ -132,6 +132,31 @@ private func multiReleaseFixture(
     p0: base.p0, p1: base.p1, u1: base.u1, p2: base.p2, p3: base.p3)
 }
 
+private func replacingToolSourceDigests(
+  in value: MultiReleaseSignedProvenance,
+  unsigned: String? = nil,
+  finalizer: String? = nil
+) -> MultiReleaseSignedProvenance {
+  let p2 = SignedReleaseProvenance.SignedPayloadStage(
+    name: value.p2.name,
+    unsignedParent: value.p2.unsignedParent,
+    unsignedToolSourceSHA256: unsigned ?? value.p2.unsignedToolSourceSHA256,
+    finalizerToolSourceSHA256: finalizer ?? value.p2.finalizerToolSourceSHA256,
+    applicationCertificate: value.p2.applicationCertificate,
+    signedLeaves: value.p2.signedLeaves,
+    embeddedManifest: value.p2.embeddedManifest,
+    hostComponent: value.p2.hostComponent,
+    helperComponent: value.p2.helperComponent,
+    hostBOM: value.p2.hostBOM,
+    helperBOM: value.p2.helperBOM,
+    unsignedContainer: value.p2.unsignedContainer,
+    normalizedSemanticSHA256: value.p2.normalizedSemanticSHA256)
+  return MultiReleaseSignedProvenance(
+    schemaVersion: value.schemaVersion, lineage: value.lineage,
+    p0: value.p0, p1: value.p1, u1: value.u1, p2: p2, p3: value.p3,
+    p4: value.p4, p5: value.p5)
+}
+
 @Test func replacementLineageIsCanonicalAndCannotAuthorizeRollback() throws {
   let configurationURL = repositoryRoot().appendingPathComponent("release/release.json")
   let configuration = try ReleaseConfiguration.load(from: configurationURL)
@@ -233,6 +258,37 @@ private func multiReleaseFixture(
     to: nullURL)
   #expect(throws: ReleasePackageError.self) {
     try MultiReleaseSignedProvenance.load(from: nullURL)
+  }
+}
+
+@Test func schemaThreeProvenancePermitsEqualIndependentlyBoundToolSources() throws {
+  let original = try multiReleaseFixture()
+  let equal = replacingToolSourceDigests(
+    in: original, finalizer: original.p2.unsignedToolSourceSHA256)
+  try equal.validateStructure()
+
+  let root = try makeTemporaryDirectory("equal-tool-source-provenance")
+  defer { removeTemporaryDirectory(root) }
+  let canonical = root.appendingPathComponent("canonical.json")
+  try SecureFiles.atomicWrite(try CanonicalJSON.encode(equal), to: canonical)
+  #expect(try MultiReleaseSignedProvenance.load(from: canonical) == equal)
+  switch try AnySignedReleaseProvenance.load(from: canonical) {
+  case .multiRelease(let loaded):
+    #expect(loaded == equal)
+  case .historical:
+    Issue.record("schema-3 equal-source authority decoded through the historical path")
+  }
+
+  let malformedFinalizer = replacingToolSourceDigests(
+    in: equal, finalizer: "not-a-sha256")
+  #expect(throws: ReleasePackageError.self) {
+    try malformedFinalizer.validateStructure()
+  }
+
+  let substitutedUnsigned = replacingToolSourceDigests(
+    in: equal, unsigned: String(repeating: "f", count: 64))
+  #expect(throws: ReleasePackageError.self) {
+    try substitutedUnsigned.validateStructure()
   }
 }
 
