@@ -4227,3 +4227,56 @@ commit/push synchronization, and a fresh varied-root replacement-A gate still
 precede U1. No identity or credential was resolved; no signature, timestamp,
 Apple/notary, Tart/IPSW/VM, Installer, publication, live-runtime, Keeper, or
 `tasks/` action occurred.
+
+### S36 synchronized replacement-A U1 authority (26 August 2026)
+
+The reviewed descriptor-anchored Metal correction synchronized at
+`ff2ab11a0ec2cfb580bf00a3c2de722ea53240f0`. The final replacement-A gate
+started again from empty work/output roots. Its first provisional lineage was
+excluded before admission because its release-tool “source” included the local
+`.build` directory. That package `dae10125…3588f`, source digest
+`c8e45056…0415`, and semantics `c31be739…47e8` are non-U1 and were never
+promoted.
+
+The authoritative rerun used a clean 97-entry commit export of
+`Tools/ReleasePackage`, digest `6b24a389…35930`. Three independent physical
+caller roots measured 44, 64, and 83 UTF-8 bytes; each ran a fresh A/B build,
+and every compiler-visible root measured 240 bytes. All six reachd binaries are
+`6823b583ddf3b3e54a1ad8f581c6ccd84c6c1abba29a9f1876f65f39bba6ed9f`;
+all six helpers are
+`c66e5386223a223d516d83656514b11b6fb5e50a4b947ab8d4c5064569971d15`;
+all three normalized semantics are
+`1b9ea43ce96ae4d8841e57352e4306e4f68f737982dcda515493bc58db0a1b09`.
+Stable Metal authority remained build `27A5237l`, component
+`com.apple.dt.toolchain.Metal.32023.921.1`, compiler `eaec9b1e…51b2`, and
+linker `cb7e34e0…adfc4`.
+
+Three independent verifiers each joined schema 2, 50 host records, 6 helper
+records, no Scripts, no Resources, embedded manifest `cbfb8762…7e25`, and the
+same Metal authority. Three complete ReleasePackage runs passed **170/170**
+with exactly six expected absent signed-authority skips each. The clean
+candidate-backed mutation gate passed **7/7** with zero skips. Fresh
+warnings-as-errors executables hash to `25d96a9b…e78` and
+`2ceb60b1…f70`.
+
+The admitted unsigned replacement-A package is
+`Reach-0.0.2-unsigned.pkg`, SHA-256
+`1d9945e1ffc0bb5b54eeab64a2b3e18d93e2850f283ad42aade199c40be3588f`,
+exactly 13,715,965 bytes. It is retained separately under the durable S36
+authority with a verified 5,162-entry manifest. The privacy-minimized external
+pack is
+`/private/tmp/reach-s36-replacement-a-u1-authoritative-20260826`; its 128-entry
+direct seal is `f82239e3…1c7085` and its 93-entry source seal is
+`be56f344…7ba92`.
+
+Read-only parity remained exact: installed reachd `a9660a83…6b790` at PID/run
+1533/1; helper `a784f257…b28ca8` at 818/1 with receipt 1.0.0; generation 37
+direct-ready on `utun0`, one peer, relay verified absent; all four identity
+hashes, one device record and zero CA-creation events unchanged.
+
+**Replacement-A U1 is admitted; S36 remains open.** No identity, certificate,
+credential, Team ID, notary profile, signature, timestamp, Apple contact,
+submission, staple, Tart/IPSW/VM, Installer, publication, receipt, live-runtime,
+network, Keeper or `tasks/` action occurred. The next gate is separately
+authorized replacement-A signing/notarization; clean-Mac acceptance follows
+only after exact A passes.

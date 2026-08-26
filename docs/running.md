@@ -65,6 +65,29 @@ REACH_RELEASE_BIN=$(/usr/bin/swift build \
   --show-bin-path)
 ```
 
+Do not name the live `Tools/ReleasePackage` checkout as
+`--release-tool-source`. Ignored local products such as `.build/` are not
+visible in the repository cleanliness check but do enter the source-authority
+digest. Export the exact synchronized commit into a new private root, and use
+that same commit-only copy for both `build` and `verify`:
+
+```sh
+REACH_REPOSITORY=/absolute/path/to/clean/Reach
+REACH_RELEASE_TOOL_EXPORT_ROOT=$(/usr/bin/mktemp -d \
+  /private/tmp/reach-release-tool-source.XXXXXX)
+/bin/chmod 0700 "$REACH_RELEASE_TOOL_EXPORT_ROOT"
+/usr/bin/git -C "$REACH_REPOSITORY" archive \
+  --format=tar \
+  --output="$REACH_RELEASE_TOOL_EXPORT_ROOT/Tools.ReleasePackage.tar" \
+  HEAD Tools/ReleasePackage
+/usr/bin/tar -xf "$REACH_RELEASE_TOOL_EXPORT_ROOT/Tools.ReleasePackage.tar" \
+  -C "$REACH_RELEASE_TOOL_EXPORT_ROOT"
+REACH_RELEASE_TOOL_SOURCE="$REACH_RELEASE_TOOL_EXPORT_ROOT/Tools/ReleasePackage"
+```
+
+The export is authority for that exact commit only. Create a new export after
+`HEAD` changes; never carry one forward by editing it in place.
+
 Create the depot from explicit already-cached inputs. The paths below are
 placeholders; the operation refuses missing, changed, or unclassified source
 and license inputs:
@@ -87,8 +110,8 @@ no untracked entry except `tasks/`:
 
 ```sh
 "$REACH_RELEASE_BIN/reach-release-package" build \
-  --repository /absolute/path/to/clean/Reach \
-  --release-tool-source /absolute/path/to/Reach/Tools/ReleasePackage \
+  --repository "$REACH_REPOSITORY" \
+  --release-tool-source "$REACH_RELEASE_TOOL_SOURCE" \
   --configuration /absolute/path/to/Reach/release/release.json \
   --notices /absolute/path/to/Reach/release/notices.json \
   --depot /private/tmp/reach-release-depot \
@@ -100,8 +123,8 @@ Verify the selected candidate in a new scratch root:
 
 ```sh
 "$REACH_RELEASE_BIN/reach-release-package" verify \
-  --package /private/tmp/reach-release-output/Reach-0.0.1-unsigned.pkg \
-  --release-tool-source /absolute/path/to/Reach/Tools/ReleasePackage \
+  --package /private/tmp/reach-release-output/Reach-0.0.2-unsigned.pkg \
+  --release-tool-source "$REACH_RELEASE_TOOL_SOURCE" \
   --configuration /absolute/path/to/Reach/release/release.json \
   --notices /absolute/path/to/Reach/release/notices.json \
   --depot /private/tmp/reach-release-depot \
