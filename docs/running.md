@@ -384,8 +384,11 @@ Warnings-as-errors release binaries hash to `76252cdb…9bcbe`
 its direct 11-entry manifest seals at `d2e49779…c5776`, and its 62-file source
 manifest hashes to `1ab020dd…75b2e`. These results do not prove Tart, Apple restore-image,
 Installer, Metal-in-VM, update, rollback, uninstall, or real teardown behavior.
-No Tart binary, IPSW, VM, replacement U1/P3/P5, signing identity, Apple
-submission, live-host install, or Keeper change has occurred.
+At that 24 August offline checkpoint, no Tart binary, IPSW, VM, replacement
+U1/P3/P5, signing identity, Apple submission, live-host install, or Keeper
+change had occurred. This is historical checkpoint evidence; the later S36
+closeout below supersedes its release-authority state without changing its
+unchanged-product verdict.
 
 ### Installed Metal authority for release builds
 
