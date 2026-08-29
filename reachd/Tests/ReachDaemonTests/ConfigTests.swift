@@ -90,6 +90,140 @@ import Testing
         #expect(loaded.enrollPort == 1235)
         #expect(loaded.meshEndpoint == "203.0.113.7:51820")
     }
+
+    @Test func preV2FixtureReencodesByteExactlyAndKeepsMLXSelectionAndCopy() throws {
+        let fixture = #"""
+        {
+          "clusterID" : "11111111-2222-3333-4444-555555555555",
+          "clusterName" : "Studio",
+          "enrollPort" : 1235,
+          "meshEndpoint" : "203.0.113.7:51820",
+          "modelID" : "legacy-model",
+          "port" : 1234
+        }
+        """#
+        let config = try JSONDecoder().decode(DaemonConfig.self, from: Data(fixture.utf8))
+        #expect(config.exo == nil)
+        #expect(config.providerKind == .mlx)
+        #expect(config.modelID == "legacy-model")
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        #expect(try encoder.encode(config) == Data(fixture.utf8))
+
+        let filling = try config.makeFilling()
+        #expect(filling is MLXFilling)
+        #expect(filling.modelID == "legacy-model")
+        #expect(config.statusDescription(version: "test") == "reachd test — cluster \"Studio\", model legacy-model, port 1234")
+        #expect(config.startupDescription(addresses: [[127, 0, 0, 1], [192, 168, 1, 4]]) == "[reachd] Studio serving legacy-model on :1234 (127.0.0.1, 192.168.1.4)")
+        #expect(config.prewarmSuccessDescription == "[reachd] model prewarmed")
+    }
+
+    @Test func exactEXOFixtureRoundTripsSelectsEXOAndStartsNoRequest() throws {
+        let fixture = #"""
+        {
+          "clusterID" : "11111111-2222-3333-4444-555555555555",
+          "clusterName" : "Studio",
+          "enrollPort" : 1235,
+          "exo" : {
+            "endpoint" : "http:\/\/127.0.0.1:52415"
+          },
+          "modelID" : "cluster-model",
+          "port" : 1234
+        }
+        """#
+        let config = try JSONDecoder().decode(DaemonConfig.self, from: Data(fixture.utf8))
+        let expectedEXO = try EXOConfiguration(endpoint: "http://127.0.0.1:52415")
+        #expect(config.exo == expectedEXO)
+        #expect(config.providerKind == .exo(authority: "127.0.0.1:52415"))
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        #expect(try encoder.encode(config) == Data(fixture.utf8))
+
+        let filling = try #require(try config.makeFilling() as? EXOFilling)
+        #expect(filling.modelID == "cluster-model")
+        #expect(filling.loaderStartCount == 0)
+        #expect(config.statusDescription(version: "test") == "reachd test — cluster \"Studio\", model cluster-model via EXO at 127.0.0.1:52415, port 1234")
+        #expect(config.startupDescription(addresses: [[127, 0, 0, 1]]) == "[reachd] Studio serving cluster-model via EXO at 127.0.0.1:52415 on :1234 (127.0.0.1)")
+        #expect(config.prewarmSuccessDescription == "[reachd] EXO catalog check passed")
+        #expect(filling.loaderStartCount == 0)
+    }
+
+    @Test func modelOverrideAppliesBeforeEitherProviderFactory() throws {
+        var mlx = DaemonConfig()
+        let ignoredOverride = mlx.applyModelOverride(nil)
+        #expect(!ignoredOverride)
+        let appliedMLXOverride = mlx.applyModelOverride("mlx-override")
+        #expect(appliedMLXOverride)
+        let mlxFilling = try mlx.makeFilling()
+        #expect(mlxFilling is MLXFilling)
+        #expect(mlxFilling.modelID == "mlx-override")
+
+        var exo = DaemonConfig()
+        exo.exo = try EXOConfiguration(endpoint: "http://[::1]:65535")
+        let appliedEXOOverride = exo.applyModelOverride("exo-override")
+        #expect(appliedEXOOverride)
+        let exoFilling = try #require(try exo.makeFilling() as? EXOFilling)
+        #expect(exoFilling.modelID == "exo-override")
+        #expect(exoFilling.endpoint.authority == "[::1]:65535")
+        #expect(exoFilling.loaderStartCount == 0)
+    }
+
+    @Test func missingEXOIsOmittedButExplicitNullAndMalformedEndpointsRefuse() throws {
+        var config = DaemonConfig()
+        config.clusterID = UUID(uuidString: "11111111-2222-3333-4444-555555555555")!
+        let encoded = try JSONEncoder().encode(config)
+        let object = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        #expect(object["exo"] == nil)
+
+        let base = #"""
+        {
+          "clusterID":"11111111-2222-3333-4444-555555555555",
+          "clusterName":"Studio",
+          "port":1234,
+          "enrollPort":1235,
+          "modelID":"model",
+          "exo":REPLACEMENT
+        }
+        """#
+        for replacement in [
+            "null",
+            #"{"endpoint":"http://localhost:52415"}"#,
+            #"{"endpoint":"http://127.0.0.1:052415"}"#,
+            #"{"endpoint":"http://127.0.0.1:52415/"}"#,
+            #"{"endpoint":"https://127.0.0.1:52415"}"#,
+            "{}",
+        ] {
+            let data = Data(base.replacingOccurrences(of: "REPLACEMENT", with: replacement).utf8)
+            #expect(throws: DecodingError.self) {
+                try JSONDecoder().decode(DaemonConfig.self, from: data)
+            }
+        }
+    }
+
+    @Test func loadSaveSelectionAndCopyNeverProbeEXO() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        var config = DaemonConfig()
+        config.clusterName = "No Probe"
+        config.modelID = "offline-model"
+        config.exo = try EXOConfiguration(endpoint: "http://127.0.0.1:52415")
+        try config.save(to: directory)
+        let loaded = try DaemonConfig.load(from: directory)
+        let filling = try #require(try loaded.makeFilling() as? EXOFilling)
+        #expect(filling.loaderStartCount == 0)
+
+        _ = loaded.providerKind
+        _ = loaded.statusDescription(version: "test")
+        _ = loaded.startupDescription(addresses: [])
+        _ = loaded.prewarmSuccessDescription
+        let encoder = JSONEncoder()
+        _ = try encoder.encode(loaded)
+        try loaded.save(to: directory)
+        #expect(filling.loaderStartCount == 0)
+    }
 }
 
 /// Where the phone is told to send packets, and whether anyone can tell that

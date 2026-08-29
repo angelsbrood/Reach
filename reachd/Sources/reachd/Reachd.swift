@@ -47,10 +47,8 @@ struct Serve: AsyncParsableCommand {
         // anyone can see it.
         let isFirstRun = !DaemonConfig.exists()
         var config = try DaemonConfig.load()
-        if let model {
-            config.modelID = model
-        }
-        if isFirstRun || model != nil {
+        let didOverrideModel = config.applyModelOverride(model)
+        if isFirstRun || didOverrideModel {
             try config.save()
         }
 
@@ -84,7 +82,7 @@ struct Serve: AsyncParsableCommand {
         let identity = try IdentityMaterializer.materialize(server, label: "reachd-server")
         let caCert = try IdentityStore.certificate(fromDER: ca.certificateDER())
 
-        let filling = MLXFilling(modelID: config.modelID)
+        let filling = try config.makeFilling()
         let reachability = ReachabilityCoordinator(
             sessionPort: config.port,
             stateDirectory: DaemonInfo.stateDirectory
@@ -129,12 +127,12 @@ struct Serve: AsyncParsableCommand {
         try await daemon.startEnrollment(service: enrollment, advertise: !noAdvertise)
         print("[reachd] enrollment listening on :\(config.enrollPort), \(mesh.summary)")
         print("[reachd] grant desk open — app approvals surface on the keeper")
-        print("[reachd] \(config.clusterName) serving \(config.modelID) on :\(config.port) (\(addresses.map { $0.map(String.init).joined(separator: ".") }.joined(separator: ", ")))")
+        print(config.startupDescription(addresses: addresses))
 
         let prewarm = Task {
             do {
                 try await filling.prewarm()
-                print("[reachd] model prewarmed")
+                print(config.prewarmSuccessDescription)
             } catch {
                 print("[reachd] prewarm failed: \(error)")
             }
@@ -157,7 +155,7 @@ struct Status: AsyncParsableCommand {
         // thing you ran status to find out about.
         do {
             let config = try DaemonConfig.load()
-            print("reachd \(DaemonInfo.version) — cluster \"\(config.clusterName)\", model \(config.modelID), port \(config.port)")
+            print(config.statusDescription())
         } catch {
             print("reachd \(DaemonInfo.version) — config unreadable:\n\(error)")
         }
