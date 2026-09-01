@@ -1089,6 +1089,86 @@ process, `utun` address, and connected `10.86.0.0/24` route are gone. This
 leaves the login-owned cluster state, host key, registry, intent and preserved
 legacy file untouched.
 
+## Exact two-node EXO lifecycle package
+
+The repository's `exo-runtime/` subtree defines one inert reference bundle for
+EXO 0.3.70, official MLX 0.32.0 on Linux/arm64 CPU, and the immutable
+`mlx-community/Qwen3-0.6B-4bit` snapshot at
+`73e3e38d981303bc594367cd910ea6eb48349da8`. It is not a general EXO installer
+or model manager. Repository bytes contain declarations and tests only; the
+provider source, Python closure, model, images, credentials, certificates and
+generated payload remain external and hash-bound during materialization.
+
+Install is offline and inert: it creates immutable `/opt/reach-exo` program
+bytes, the unprivileged `reach-exo` identity, and separate writable
+`/var/lib/reach-exo` and `/run/reach-exo` roots, but leaves the systemd units
+disabled and stopped. The operator separately owns `/etc/reach-exo` config/TLS
+and the read-only `/srv/reach-exo-models` view. Configuration must name exactly
+two private IPv4 nodes, their exact interface/MAC pairing, the connector
+authority, the selected model, and the
+global `0..<14` / `14..<28` ranges. Unknown fields, hostnames in address
+positions, duplicate identities, wider networks, changed ranges, wrong file
+ownership/modes, or model/hash drift refuse before EXO starts.
+For this exact selected closure, the worker owns `0..<14` and the coordinator
+owns `14..<28`; readiness authenticates those measured associations.
+
+On explicit enable/start, the worker waits for a mutually authenticated
+coordinator. A fresh coordinator handshake owns both provider process groups;
+only then does it start EXO, verify an empty exact two-node CPU topology, create
+one exact pipeline instance, and wait for both runners. The package's nftables
+guard blocks EXO's broad API listener on every non-loopback interface and
+seals service-identity egress to loopback, the exact peer, the declared
+connector address, and private discovery only.
+
+For Lima VZ's isolated two-guest Ethernet, a mutually bound companion service
+holds only `CAP_NET_RAW` and rewrites only the Ethernet destination of this
+node's exact EXO IPv6 discovery frames to the configured peer MAC. Each rank's
+EXO process retains its API listener only so the opposite authenticated rank
+can prove `/node_id` and form the two directed topology edges; nftables admits
+that port only from the one configured peer and rejects every other
+non-loopback source. The provider
+does not inherit that capability, and either service exiting tears down the
+other. A root pre-start helper installs the corresponding exact IPv6 link-local
+neighbor only after recording root-owned intent outside the service account's
+writable runtime directory; post-stop removes only the marker-authenticated
+kernel tuple. The two exact rank identities may probe one another's frozen EXO
+Zenoh and API ports for topology measurement, while every other non-loopback
+API source remains rejected.
+
+The operator runs the bundled Darwin/arm64 connector as the same login account
+that owns the development or installed `reachd`. It binds exactly
+`127.0.0.1:52415` as unauthenticated plain HTTP and authenticates the private
+coordinator gateway with TLS 1.3 client credentials. On VM systems whose
+private Ethernet is intentionally unroutable from the host, the connector may
+instead use the exact account-owned `127.0.0.1:53422` SSH tunnel endpoint to
+the same gateway; mTLS remains mandatory through the tunnel, which must itself
+bind only numeric host loopback. Only `GET /v1/models` and
+`POST /v1/chat/completions` are published. Direct guest APIs, host nonloopback
+addresses, dashboards, `/state`, instance/control routes and independent-peer
+paths refuse. Set Reach's EXO endpoint to exactly
+`http://127.0.0.1:52415`; no cluster credential belongs in Reach config.
+
+The connector refuses until one fresh epoch has exactly two expected friendly
+identities, two `MlxCpu` backends, one selected model instance, exactly two
+ready runners, exact 14/14 ranges and no prior generation task. Peer heartbeat
+loss, provider death, or any later topology/identity/backend/range/model/runner
+drift closes active connector streams and destroys the whole epoch. Recovery
+is a new epoch; one-node continuation and stale readiness are never published.
+The systemd restart window is bounded to three starts per two minutes.
+MLX CPU's generated shared objects use the package-owned
+`/var/lib/reach-exo/tmp` directory because Linux mounts `/run` `noexec`; that
+directory remains under the unprivileged service identity and is removed with
+all service-created state.
+
+`systemctl disable --now reach-exo-node` removes publication and provider work;
+disabled state persists across reboot. The bundle remove command deletes its
+unit, immutable program, writable state, runtime files and service-created
+caches while preserving operator config, TLS and model bytes. Explicit purge
+can remove only the package-created `node.json` after its exact root-owned
+single-link marker is proved; it still preserves TLS and models. See
+`exo-runtime/README.md` for the reproducible build, schemas, commands and exact
+claim limits.
+
 ## What a restart costs
 
 Identity, grants, the CA and the mesh are on disk and survive. Sessions are

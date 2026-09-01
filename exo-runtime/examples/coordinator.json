@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "role": "coordinator",
+  "node_name": "reach-exo-a",
+  "peer_name": "reach-exo-b",
+  "private_address": "192.168.108.2",
+  "peer_address": "192.168.108.3",
+  "connector_address": "192.168.108.1",
+  "private_network_cidr": "192.168.108.0/24",
+  "network_interface": "eth0",
+  "peer_mac": "52:55:55:00:00:03",
+  "expected_range": {"start": 14, "end": 28},
+  "expected_peer_range": {"start": 0, "end": 14},
+  "model_id": "mlx-community/Qwen3-0.6B-4bit",
+  "model_snapshot": "73e3e38d981303bc594367cd910ea6eb48349da8",
+  "model_manifest_sha256": "b8bbc65028022f822f9234e04137470d7c6b56fa5bebe32285b7217e47d21629",
+  "namespace_prefix": "reach-exo-s47",
+  "tls": {
+    "ca": "/etc/reach-exo/tls/ca.pem",
+    "certificate": "/etc/reach-exo/tls/coordinator.pem",
+    "private_key": "/etc/reach-exo/tls/coordinator-key.pem"
+  }
+}

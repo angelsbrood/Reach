@@ -1,0 +1,36 @@
+[Unit]
+Description=Reach EXO bounded two-node discovery relay
+Requires=nftables.service
+BindsTo=nftables.service
+PartOf=reach-exo-node.service
+Before=reach-exo-node.service
+After=nftables.service network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/reach-exo/node.json
+
+[Service]
+Type=simple
+User=reach-exo
+Group=reach-exo
+UMask=0077
+ExecStartPre=/opt/reach-exo/bin/reach-exo-node validate /etc/reach-exo/node.json
+ExecStart=/opt/reach-exo/bin/reach-exo-node relay /etc/reach-exo/node.json
+Restart=no
+TimeoutStopSec=10s
+KillMode=control-group
+NoNewPrivileges=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_PACKET AF_NETLINK
+ReadOnlyPaths=/opt/reach-exo /etc/reach-exo
+CapabilityBoundingSet=CAP_NET_RAW
+AmbientCapabilities=CAP_NET_RAW

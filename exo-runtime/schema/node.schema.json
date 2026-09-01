@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reach.dev/schema/exo-runtime/node-v1.json",
+  "title": "Reach EXO exact two-node lifecycle configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "role", "node_name", "peer_name", "private_address",
+    "peer_address", "connector_address", "private_network_cidr",
+    "network_interface", "peer_mac",
+    "expected_range", "expected_peer_range", "model_id", "model_snapshot",
+    "model_manifest_sha256", "namespace_prefix", "tls"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "role": {"enum": ["coordinator", "worker"]},
+    "node_name": {"type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"},
+    "peer_name": {"type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"},
+    "private_address": {"type": "string", "format": "ipv4"},
+    "peer_address": {"type": "string", "format": "ipv4"},
+    "connector_address": {"type": "string", "format": "ipv4"},
+    "private_network_cidr": {"type": "string"},
+    "network_interface": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,15}$"},
+    "peer_mac": {"type": "string", "pattern": "^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$"},
+    "expected_range": {"$ref": "#/$defs/range"},
+    "expected_peer_range": {"$ref": "#/$defs/range"},
+    "model_id": {"const": "mlx-community/Qwen3-0.6B-4bit"},
+    "model_snapshot": {"const": "73e3e38d981303bc594367cd910ea6eb48349da8"},
+    "model_manifest_sha256": {"const": "b8bbc65028022f822f9234e04137470d7c6b56fa5bebe32285b7217e47d21629"},
+    "namespace_prefix": {"type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$", "maxLength": 48},
+    "tls": {"$ref": "#/$defs/tls"}
+  },
+  "$defs": {
+    "range": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start", "end"],
+      "properties": {"start": {"type": "integer"}, "end": {"type": "integer"}}
+    },
+    "tls": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ca", "certificate", "private_key"],
+      "properties": {
+        "ca": {"type": "string"},
+        "certificate": {"type": "string"},
+        "private_key": {"type": "string"}
+      }
+    }
+  }
+}

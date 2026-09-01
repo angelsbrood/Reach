@@ -1,0 +1,51 @@
+[Unit]
+Description=Reach EXO exact two-rank lifecycle node
+After=network-online.target
+Wants=network-online.target
+Requires=nftables.service
+BindsTo=nftables.service
+After=nftables.service
+Requires=reach-exo-relay.service
+BindsTo=reach-exo-relay.service
+After=reach-exo-relay.service
+ConditionPathExists=/etc/reach-exo/node.json
+StartLimitIntervalSec=120
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=reach-exo
+Group=reach-exo
+UMask=0027
+ExecStartPre=/opt/reach-exo/bin/reach-exo-node validate /etc/reach-exo/node.json
+ExecStartPre=+/opt/reach-exo/bin/reach-exo-node netguard-apply /etc/reach-exo/node.json
+ExecStartPre=+/opt/reach-exo/bin/reach-exo-node neighbor-apply /etc/reach-exo/node.json
+ExecStart=/opt/reach-exo/bin/reach-exo-node run /etc/reach-exo/node.json
+ExecStopPost=+/opt/reach-exo/bin/reach-exo-node neighbor-remove /etc/reach-exo/node.json
+ExecStopPost=+/opt/reach-exo/bin/reach-exo-node netguard-remove /etc/reach-exo/node.json
+ExecStopPost=+/usr/bin/systemctl --no-block stop reach-exo-relay.service
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=20min
+TimeoutStopSec=45s
+KillMode=control-group
+NoNewPrivileges=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=no
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+ReadOnlyPaths=/opt/reach-exo /etc/reach-exo /srv/reach-exo-models
+ReadWritePaths=/var/lib/reach-exo /run/reach-exo
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

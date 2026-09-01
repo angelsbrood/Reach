@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://reach.dev/schema/exo-runtime/connector-v1.json",
+  "title": "Reach EXO host-user connector configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "listen_address", "gateway_address", "server_name", "tls"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "listen_address": {"const": "127.0.0.1:52415"},
+    "gateway_address": {
+      "type": "string",
+      "description": "A numeric RFC1918 address on port 53421, or the canonical account-owned loopback tunnel 127.0.0.1:53422"
+    },
+    "server_name": {"const": "reach-exo-gateway"},
+    "tls": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ca", "certificate", "private_key"],
+      "properties": {
+        "ca": {"type": "string"},
+        "certificate": {"type": "string"},
+        "private_key": {"type": "string"}
+      }
+    }
+  }
+}
