@@ -1,5 +1,6 @@
 #!/bin/sh
 set -eu
+umask 022
 
 usage() {
   echo "usage: materialize.sh MODE SOURCE DERIVATIVE NORMALIZED_JSON MODEL_ROOT UV_CACHE PYTHON_ROOT BINARIES OUTPUT" >&2
@@ -59,13 +60,14 @@ rm -rf -- "$provider/.git" "$provider/.venv"
 rm -rf -- "$provider/python"
 cp -a "$python_root" "$provider/python"
 cp "$binaries/reach-exo-node" "$stage/root/opt/reach-exo/bin/reach-exo-node"
+cp "$binaries/reach-exo-package" "$stage/root/opt/reach-exo/bin/reach-exo-package"
 cp "$binaries/reach-exo-connector" "$stage/root/opt/reach-exo/host/reach-exo-connector-darwin-arm64"
 cp "$runtime_root/authority/model.MANIFEST.sha256" "$stage/root/opt/reach-exo/share/model.MANIFEST.sha256"
 cp "$runtime_root/packaging/root/usr/lib/systemd/system/reach-exo-node.service" "$stage/root/usr/lib/systemd/system/"
 cp "$runtime_root/packaging/root/usr/lib/systemd/system/reach-exo-relay.service" "$stage/root/usr/lib/systemd/system/"
 cp "$runtime_root/packaging/root/usr/lib/sysusers.d/reach-exo.conf" "$stage/root/usr/lib/sysusers.d/"
 cp "$runtime_root/packaging/root/usr/lib/tmpfiles.d/reach-exo.conf" "$stage/root/usr/lib/tmpfiles.d/"
-cp "$runtime_root/scripts/install.sh" "$runtime_root/scripts/remove.sh" "$runtime_root/scripts/purge-created-config.sh" "$runtime_root/scripts/configure-node.sh" "$stage/scripts/"
+cp "$runtime_root/scripts/install.sh" "$runtime_root/scripts/remove.sh" "$runtime_root/scripts/purge-created-config.sh" "$runtime_root/scripts/configure-node.sh" "$runtime_root/scripts/update.sh" "$runtime_root/scripts/recover.sh" "$runtime_root/scripts/rollback.sh" "$stage/scripts/"
 cp "$runtime_root/schema/node.schema.json" "$runtime_root/schema/connector.schema.json" "$stage/schema/"
 
 chmod -R u+rwX "$provider"
@@ -128,21 +130,22 @@ cp "$runtime_root/licenses/python-3.13.7/LICENSE" "$stage/root/opt/reach-exo/sha
 cp "$binaries/GO-LICENSE" "$stage/root/opt/reach-exo/share/licenses/GO-LICENSE"
 
 cat > "$stage/metadata/package.json" <<'EOF'
-{"bundle_version":"0.1.0","architecture":"linux-arm64","exo_version":"0.3.70","exo_commit":"21a54c5ea0230a3bec1e1a786d200126c7e34ec6","exo_tree":"ff0204b2a02506a15cda8abbdcbed25663c89403","derivative_sha256":"6c3094908c689789ac02b9bd126d05b6fe2f6baa74502a05446899a775266bb7","model_id":"mlx-community/Qwen3-0.6B-4bit","model_snapshot":"73e3e38d981303bc594367cd910ea6eb48349da8","model_included":false,"install_starts_service":false}
+{"bundle_version":"0.2.0","architecture":"linux-arm64","exo_version":"0.3.70","exo_commit":"21a54c5ea0230a3bec1e1a786d200126c7e34ec6","exo_tree":"ff0204b2a02506a15cda8abbdcbed25663c89403","derivative_sha256":"6c3094908c689789ac02b9bd126d05b6fe2f6baa74502a05446899a775266bb7","model_id":"mlx-community/Qwen3-0.6B-4bit","model_snapshot":"73e3e38d981303bc594367cd910ea6eb48349da8","model_included":false,"install_starts_service":false,"package_generation":"reach-exo-lifecycle/0.2.0/linux-arm64/parent-0.1.0","parent_bundle_version":"0.1.0","parent_node_sha256":"e6d04335313d8949bec2362abc8701de0fe24f9547377a8d43024e8ea8bd033f","parent_connector_sha256":"53797f562dd5a8331d04b171b5b1fcb9fdb656a4f5193a68f2750b9026657e0e","parent_package_sha256":"fe3a5e334ea89f30487bba02bfbd749ad9a8c51736cda35699aedc7b1eb5e138","parent_payload_manifest_sha256":"2e8ac39eb950212dd6bb6200459ef15c16d94d88a5194556780f7e033b2a2e27","parent_metadata_sha256":"2549bb3dc7d368b7b6fd9fdb62b1c940f7166ba2c1648a56a67321e6b3a54ef4"}
 EOF
 
 find "$stage" -type f -exec chmod 0644 {} +
-chmod 0755 "$stage/root/opt/reach-exo/bin/reach-exo-node" "$stage/root/opt/reach-exo/host/reach-exo-connector-darwin-arm64" "$stage/scripts/install.sh" "$stage/scripts/remove.sh" "$stage/scripts/purge-created-config.sh" "$stage/scripts/configure-node.sh"
+chmod 0755 "$stage/root/opt/reach-exo/bin/reach-exo-node" "$stage/root/opt/reach-exo/bin/reach-exo-package" "$stage/root/opt/reach-exo/host/reach-exo-connector-darwin-arm64" "$stage/scripts/install.sh" "$stage/scripts/remove.sh" "$stage/scripts/purge-created-config.sh" "$stage/scripts/configure-node.sh" "$stage/scripts/update.sh" "$stage/scripts/recover.sh" "$stage/scripts/rollback.sh"
 chmod 0555 "$stage/root/opt/reach-exo/provider/python/bin/python3.13"
 chmod 0555 "$stage/root/opt/reach-exo/provider/.venv/bin/exo"
 find "$stage" -type d -exec chmod 0755 {} +
 find "$stage" -exec touch -h -d '@0' {} +
 "$python_root/bin/python3.13" "$runtime_root/scripts/payload_manifest.py" "$stage" "$stage/PAYLOAD-MANIFEST.tsv"
 (cd "$stage" && find . -type f ! -name MANIFEST.sha256 -print0 | LC_ALL=C sort -z | xargs -0 sha256sum > MANIFEST.sha256)
+chmod 0644 "$stage/MANIFEST.sha256"
 find "$stage" -exec touch -h -d '@0' {} +
 
 mkdir -p "$output"
 chmod 700 "$output"
-(cd "$stage" && tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner -cf - . | gzip -n > "$output/reach-exo-lifecycle-0.1.0-linux-arm64.tar.gz")
+(cd "$stage" && tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner -cf - . | gzip -n > "$output/reach-exo-lifecycle-0.2.0-linux-arm64.tar.gz")
 cp "$stage/PAYLOAD-MANIFEST.tsv" "$stage/metadata/package.json" "$output/"
-(cd "$output" && sha256sum reach-exo-lifecycle-0.1.0-linux-arm64.tar.gz PAYLOAD-MANIFEST.tsv package.json > OUTPUT.sha256)
+(cd "$output" && sha256sum reach-exo-lifecycle-0.2.0-linux-arm64.tar.gz PAYLOAD-MANIFEST.tsv package.json > OUTPUT.sha256)

@@ -13,13 +13,15 @@ import (
 const MaxMessageBytes = 16 * 1024
 
 type Message struct {
-	Type        string `json:"type"`
-	Epoch       string `json:"epoch,omitempty"`
-	ClosureHash string `json:"closure_hash,omitempty"`
-	BootID      string `json:"boot_id,omitempty"`
-	ProviderPID int    `json:"provider_pid,omitempty"`
-	Reason      string `json:"reason,omitempty"`
-	Sequence    uint64 `json:"sequence,omitempty"`
+	Type              string `json:"type"`
+	Epoch             string `json:"epoch,omitempty"`
+	ClosureHash       string `json:"closure_hash,omitempty"`
+	PackageVersion    string `json:"package_version,omitempty"`
+	PackageGeneration string `json:"package_generation,omitempty"`
+	BootID            string `json:"boot_id,omitempty"`
+	ProviderPID       int    `json:"provider_pid,omitempty"`
+	Reason            string `json:"reason,omitempty"`
+	Sequence          uint64 `json:"sequence,omitempty"`
 }
 
 func (m Message) ValidateInbound(allowed ...string) error {
@@ -30,7 +32,7 @@ func (m Message) ValidateInbound(allowed ...string) error {
 	if !found {
 		return fmt.Errorf("control type %q is not allowed", m.Type)
 	}
-	if len(m.Epoch) > 96 || len(m.ClosureHash) > 128 || len(m.BootID) > 128 || len(m.Reason) > 256 {
+	if len(m.Epoch) > 96 || len(m.ClosureHash) > 128 || len(m.PackageVersion) > 32 || len(m.PackageGeneration) > 192 || len(m.BootID) > 128 || len(m.Reason) > 256 {
 		return errors.New("control field exceeds bound")
 	}
 	return nil

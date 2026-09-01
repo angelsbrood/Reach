@@ -14,6 +14,7 @@ StartLimitBurst=3
 
 [Service]
 Type=simple
+ExecStartPre=+/opt/reach-exo/bin/reach-exo-package verify-installed
 User=reach-exo
 Group=reach-exo
 UMask=0027

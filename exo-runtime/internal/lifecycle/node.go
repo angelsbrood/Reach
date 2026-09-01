@@ -26,6 +26,7 @@ import (
 	"reach.dev/exo-runtime/internal/control"
 	"reach.dev/exo-runtime/internal/gateway"
 	"reach.dev/exo-runtime/internal/mtls"
+	"reach.dev/exo-runtime/internal/packageupdate"
 	"reach.dev/exo-runtime/internal/provider"
 	"reach.dev/exo-runtime/internal/readiness"
 	"reach.dev/exo-runtime/internal/status"
@@ -66,6 +67,9 @@ func NewNode(value config.Node) *Node {
 }
 
 func (n *Node) Run(ctx context.Context) error {
+	if err := packageupdate.VerifyServiceRuntimeAuthority(packageupdate.DefaultPaths()); err != nil {
+		return fmt.Errorf("package runtime authority: %w", err)
+	}
 	if err := config.ValidateTLSFileModes(n.Config.TLS, true); err != nil {
 		return err
 	}
@@ -160,9 +164,9 @@ func (n *Node) handleWorkerConnection(ctx context.Context, connection net.Conn) 
 	if err := message.ValidateInbound("start"); err != nil {
 		return err
 	}
-	if !validEpoch(message.Epoch) || message.ClosureHash != authority.DerivativeSHA256 {
-		_ = codec.Send(control.Message{Type: "refused", Reason: "invalid epoch or closure authority"})
-		return errors.New("coordinator supplied invalid epoch authority")
+	if !validEpoch(message.Epoch) || message.ClosureHash != authority.DerivativeSHA256 || !exactPackageIdentity(message.PackageVersion, message.PackageGeneration) {
+		_ = codec.Send(control.Message{Type: "refused", Reason: "invalid epoch, closure, or package authority"})
+		return errors.New("coordinator supplied invalid epoch, closure, or package authority")
 	}
 	epoch := message.Epoch
 	pid, err := n.Provider.Start(message.Epoch, "worker", n.Config.NamespacePrefix)
@@ -177,7 +181,7 @@ func (n *Node) handleWorkerConnection(ctx context.Context, connection net.Conn) 
 	}
 	bootID := readBootID()
 	_ = n.Status.Write(status.Document{Role: "worker", State: "running", Epoch: message.Epoch, ProviderPID: pid})
-	if err := codec.Send(control.Message{Type: "started", Epoch: message.Epoch, ClosureHash: authority.DerivativeSHA256, BootID: bootID, ProviderPID: pid}); err != nil {
+	if err := codec.Send(control.Message{Type: "started", Epoch: message.Epoch, ClosureHash: authority.DerivativeSHA256, PackageVersion: authority.BundleVersion, PackageGeneration: authority.PackageGeneration, BootID: bootID, ProviderPID: pid}); err != nil {
 		_ = n.Provider.Stop(providerStopWait)
 		return err
 	}
@@ -280,14 +284,14 @@ func (n *Node) runEpoch(parent context.Context) (bool, error) {
 	}
 	defer connection.Close()
 	codec := control.NewCodec(connection)
-	if err := codec.Send(control.Message{Type: "start", Epoch: epoch, ClosureHash: authority.DerivativeSHA256}); err != nil {
+	if err := codec.Send(control.Message{Type: "start", Epoch: epoch, ClosureHash: authority.DerivativeSHA256, PackageVersion: authority.BundleVersion, PackageGeneration: authority.PackageGeneration}); err != nil {
 		return false, err
 	}
 	ack, err := codec.Receive(time.Now().Add(heartbeatTimeout), connection.SetReadDeadline)
 	if err != nil {
 		return false, err
 	}
-	if err := ack.ValidateInbound("started"); err != nil || ack.Epoch != epoch || ack.ClosureHash != authority.DerivativeSHA256 || ack.ProviderPID <= 0 || ack.BootID == "" {
+	if !validStartedAcknowledgement(ack, epoch) {
 		return false, errors.New("worker did not authenticate a fresh provider start")
 	}
 	controlCtx, cancelControl := context.WithCancel(context.Background())
@@ -571,6 +575,14 @@ func validEpoch(value string) bool {
 	}
 	_, err := hex.DecodeString(value)
 	return err == nil && strings.ToLower(value) == value
+}
+
+func exactPackageIdentity(version, generation string) bool {
+	return version == authority.BundleVersion && generation == authority.PackageGeneration
+}
+
+func validStartedAcknowledgement(message control.Message, epoch string) bool {
+	return message.ValidateInbound("started") == nil && message.Epoch == epoch && message.ClosureHash == authority.DerivativeSHA256 && exactPackageIdentity(message.PackageVersion, message.PackageGeneration) && message.ProviderPID > 0 && message.BootID != ""
 }
 
 func providerExitReason(err error) string {

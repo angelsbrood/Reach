@@ -31,10 +31,31 @@ python3 -m json.tool "$root/examples/connector.json" >/dev/null
 
 grep -F 'b8bbc65028022f822f9234e04137470d7c6b56fa5bebe32285b7217e47d21629' "$root/scripts/materialize.sh" >/dev/null
 grep -F '6c3094908c689789ac02b9bd126d05b6fe2f6baa74502a05446899a775266bb7' "$root/scripts/materialize.sh" >/dev/null
+grep -F '"bundle_version":"0.2.0"' "$root/scripts/materialize.sh" >/dev/null
+grep -F '"parent_bundle_version":"0.1.0"' "$root/scripts/materialize.sh" >/dev/null
+grep -F 'fe3a5e334ea89f30487bba02bfbd749ad9a8c51736cda35699aedc7b1eb5e138' "$root/scripts/materialize.sh" "$root/internal/authority/authority.go" >/dev/null
+grep -F 'reach-exo-lifecycle-0.2.0-linux-arm64.tar.gz' "$root/scripts/materialize.sh" >/dev/null
+grep -F 'reach-exo-package' "$root/scripts/build-binaries.sh" "$root/scripts/materialize.sh" >/dev/null
 grep -F 'systemctl is-enabled reach-exo-node.service' "$root/scripts/install.sh" >/dev/null
 grep -F 'systemctl is-active reach-exo-node.service' "$root/scripts/install.sh" >/dev/null
 grep -F 'pre-existing reach-exo account or group refuses package ownership' "$root/scripts/install.sh" >/dev/null
 grep -F '.bundle-created-account' "$root/scripts/install.sh" "$root/scripts/remove.sh" >/dev/null
+grep -F 'VerifyServiceRuntimeAuthority(packageupdate.DefaultPaths())' "$root/internal/lifecycle/node.go" >/dev/null
+grep -F 'chmod 0600 "$account_marker"' "$root/scripts/install.sh" >/dev/null
+grep -F "0:0:600:1" "$root/scripts/remove.sh" >/dev/null
+grep -F 'package account marker absent or ambiguous' "$root/scripts/remove.sh" >/dev/null
+grep -F 'ExecStartPre=+/opt/reach-exo/bin/reach-exo-package verify-installed' "$root/packaging/root/usr/lib/systemd/system/reach-exo-node.service" >/dev/null
+grep -F 'reach-exo-package verify-installed' "$root/scripts/install.sh" >/dev/null
+for locked_script in configure-node.sh purge-created-config.sh remove.sh; do
+  grep -F 'flock -n /run/lock/reach-exo-package.lock' "$root/scripts/$locked_script" >/dev/null
+  grep -F 'assert-no-transaction' "$root/scripts/$locked_script" >/dev/null
+done
+grep -F 'PackageGeneration' "$root/internal/control/protocol.go" "$root/internal/status/status.go" "$root/internal/lifecycle/node.go" >/dev/null
+grep -F 'ExecStartPre=/usr/bin/false' "$root/internal/packageupdate/transaction.go" >/dev/null
+grep -F 'syscall.Flock' "$root/internal/packageupdate/transaction.go" >/dev/null
+grep -F 'ParentPackageSHA256' "$root/internal/packageupdate/artifact.go" >/dev/null
+grep -F 'candidate-payload-sha256' "$root/cmd/reach-exo-package/main.go" >/dev/null
+grep -F 'candidate-metadata-sha256' "$root/cmd/reach-exo-package/main.go" >/dev/null
 grep -F 'BindsTo=nftables.service' "$root/packaging/root/usr/lib/systemd/system/reach-exo-node.service" >/dev/null
 grep -F 'ConditionPathExists=/etc/reach-exo/node.json' "$root/packaging/root/usr/lib/systemd/system/reach-exo-node.service" >/dev/null
 grep -F 'RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK' "$root/packaging/root/usr/lib/systemd/system/reach-exo-node.service" >/dev/null
@@ -53,6 +74,8 @@ grep -F 'chmod 0555 "$stage/root/opt/reach-exo/provider/python/bin/python3.13"' 
 grep -F 'chmod 0555 "$stage/root/opt/reach-exo/provider/.venv/bin/exo"' "$root/scripts/materialize.sh" >/dev/null
 grep -F 'objcopy --strip-debug --remove-section=.note.gnu.build-id "$miniaudio"' "$root/scripts/materialize.sh" >/dev/null
 grep -F 'find "$provider/python" -type d -name __pycache__ -prune -exec rm -rf -- {} +' "$root/scripts/materialize.sh" >/dev/null
+grep -F 'umask 022' "$root/scripts/materialize.sh" >/dev/null
+grep -F 'chmod 0644 "$stage/MANIFEST.sha256"' "$root/scripts/materialize.sh" >/dev/null
 if grep -F 'ConditionPathIsRegular=' "$root/packaging/root/usr/lib/systemd/system/reach-exo-node.service" >/dev/null; then
   echo "unit uses unsupported regular-file condition" >&2
   exit 1
@@ -78,4 +101,4 @@ if find "$root" -type l | grep . >/dev/null; then
   exit 1
 fi
 
-printf '%s\n' 'static lifecycle/package checks: 43 passed'
+printf '%s\n' 'static lifecycle/package checks: 62 passed'

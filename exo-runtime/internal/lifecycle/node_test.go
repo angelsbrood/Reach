@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"reach.dev/exo-runtime/internal/authority"
 	"reach.dev/exo-runtime/internal/config"
 	"reach.dev/exo-runtime/internal/control"
 )
@@ -49,6 +50,65 @@ func TestEpochIdentity(t *testing.T) {
 		if validEpoch(bad) {
 			t.Fatalf("invalid epoch %q accepted", bad)
 		}
+	}
+}
+
+func TestPackageIdentityPairRefusesMissingUnknownAndUnequal(t *testing.T) {
+	if !exactPackageIdentity(authority.BundleVersion, authority.PackageGeneration) {
+		t.Fatal("exact B identity was refused")
+	}
+	for name, pair := range map[string][2]string{
+		"missing": {"", ""},
+		"A to B":  {authority.ParentBundleVersion, ""},
+		"unknown": {authority.BundleVersion, "unknown"},
+		"unequal": {"0.2.1", authority.PackageGeneration},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if exactPackageIdentity(pair[0], pair[1]) {
+				t.Fatal("non-B package identity was admitted")
+			}
+		})
+	}
+	epoch := "0123456789abcdef0123456789abcdef"
+	exact := control.Message{Type: "started", Epoch: epoch, ClosureHash: authority.DerivativeSHA256, PackageVersion: authority.BundleVersion, PackageGeneration: authority.PackageGeneration, ProviderPID: 9, BootID: "boot"}
+	if !validStartedAcknowledgement(exact, epoch) {
+		t.Fatal("exact B/B acknowledgement was refused")
+	}
+	exact.PackageGeneration = ""
+	if validStartedAcknowledgement(exact, epoch) {
+		t.Fatal("missing worker package identity was admitted")
+	}
+}
+
+func TestWorkerRejectsPackageMismatchBeforeProviderCreation(t *testing.T) {
+	epoch := "0123456789abcdef0123456789abcdef"
+	for name, identity := range map[string][2]string{
+		"missing A identity": {"", ""},
+		"named A identity":   {authority.ParentBundleVersion, ""},
+		"unknown identity":   {authority.BundleVersion, "unknown"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			coordinator, worker := net.Pipe()
+			defer coordinator.Close()
+			defer worker.Close()
+			node := NewNode(config.Node{})
+			done := make(chan error, 1)
+			go func() { done <- node.handleWorkerConnection(context.Background(), worker) }()
+			codec := control.NewCodec(coordinator)
+			if err := codec.Send(control.Message{Type: "start", Epoch: epoch, ClosureHash: authority.DerivativeSHA256, PackageVersion: identity[0], PackageGeneration: identity[1]}); err != nil {
+				t.Fatal(err)
+			}
+			response, err := codec.Receive(time.Now().Add(time.Second), coordinator.SetReadDeadline)
+			if err != nil || response.Type != "refused" {
+				t.Fatalf("mismatch refusal missing: %#v %v", response, err)
+			}
+			if err := <-done; err == nil {
+				t.Fatal("mismatched package authority succeeded")
+			}
+			if node.Provider.PID() != 0 || node.epochTotal() != 0 {
+				t.Fatal("provider or epoch ownership began before package refusal")
+			}
+		})
 	}
 }
 

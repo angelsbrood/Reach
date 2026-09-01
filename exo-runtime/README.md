@@ -1,7 +1,8 @@
-# Reach EXO lifecycle package
+# Reach EXO lifecycle package 0.2.0
 
 This subtree is the inert source and package declaration for one exact
-Linux/arm64 lifecycle bundle. It is intentionally not a general EXO installer.
+Linux/arm64 lifecycle bundle and its one admitted offline update edge. It is
+intentionally not a general EXO installer or updater.
 It admits only EXO 0.3.70 at commit
 `21a54c5ea0230a3bec1e1a786d200126c7e34ec6`, the accepted official-MLX
 derivative, and the immutable `mlx-community/Qwen3-0.6B-4bit` snapshot named in
@@ -82,7 +83,8 @@ go test -count=1 ./...
 ```
 
 `scripts/build-binaries.sh` performs two independent, trim-path, build-ID-free
-builds and byte-compares the Linux node and Darwin/arm64 host connector.
+builds and byte-compares the Linux node, Linux package-transaction command and
+Darwin/arm64 host connector.
 `scripts/materialize.sh` must run on Linux/arm64 with uv 0.8.22 and Python
 3.13.7. A connected run populates an external uv cache; an offline run reuses
 only that authenticated cache. Both outputs must have identical
@@ -95,10 +97,71 @@ identity and declared writable roots, copies immutable payloads, and proves the
 unit is disabled and stopped. It performs no network operation and never
 starts or enables the service.
 
+## Exact offline update and rollback
+
+Bundle B `0.2.0` admits only exact parent A `0.1.0`, whose package, payload,
+metadata, node and connector digests are compiled into B and repeated in B's
+immutable package metadata. The operator must retain authenticated, extracted
+A and B bundle roots and their original package archives. No transaction
+downloads, resolves or selects an artifact.
+
+Run the B wrapper with absolute paths and the independently authenticated B
+archive, payload-manifest and metadata digests from the frozen materialization
+output. The A digests are fixed to the only admitted parent; its archive digest
+may be given explicitly:
+
+```sh
+sudo /absolute/B/scripts/update.sh \
+  --candidate-root /absolute/B \
+  --candidate-archive /absolute/reach-exo-lifecycle-0.2.0-linux-arm64.tar.gz \
+  --candidate-sha256 B_ARCHIVE_SHA256 \
+  --candidate-payload-sha256 B_PAYLOAD_MANIFEST_SHA256 \
+  --candidate-metadata-sha256 B_METADATA_SHA256 \
+  --parent-root /absolute/A \
+  --parent-archive /absolute/reach-exo-lifecycle-0.1.0-linux-arm64.tar.gz \
+  --parent-sha256 fe3a5e334ea89f30487bba02bfbd749ad9a8c51736cda35699aedc7b1eb5e138
+```
+
+The command authenticates both artifacts and every installed A payload object
+before mutation. It holds the root package lock, records previous enabled and
+active intent in a bounded fsynced journal, installs a persistent systemd
+start guard, stops publication/provider work, and replaces the complete
+program and unit generation with fresh inodes. `/etc/reach-exo`, operator TLS,
+`/srv/reach-exo-models` and the `reach-exo` UID/GID are never payload inputs.
+
+After an interruption, run `recover.sh` with the same arguments. Recovery
+accepts only the exact journal-bound artifact paths and digests and converges
+to complete B; a corrupt/missing journal or artifact mismatch stays guarded
+and down. Do not copy files manually. Once both nodes report the same exact B
+generation, provider creation and gateway publication may resume. Missing,
+unknown, A/B, B/A or unequal generation identities refuse before B provider
+creation/publication.
+
+Explicit rollback uses the same retained artifacts:
+
+```sh
+sudo /absolute/B/scripts/rollback.sh \
+  --candidate-root /absolute/B \
+  --candidate-archive /absolute/reach-exo-lifecycle-0.2.0-linux-arm64.tar.gz \
+  --candidate-sha256 B_ARCHIVE_SHA256 \
+  --candidate-payload-sha256 B_PAYLOAD_MANIFEST_SHA256 \
+  --candidate-metadata-sha256 B_METADATA_SHA256 \
+  --parent-root /absolute/A \
+  --parent-archive /absolute/reach-exo-lifecycle-0.1.0-linux-arm64.tar.gz
+```
+
+Rollback accepts only B's exact parent A, restores exact A software bytes and
+account receipt, removes B receipts, and preserves prior service intent and
+operator state. `remove.sh`, `configure-node.sh` and
+`purge-created-config.sh` share the same lock and refuse an incomplete
+transaction.
+
 ## Limits
 
 This reference package covers exactly two isolated Linux/arm64 CPU nodes, one
 Qwen snapshot, one 28-layer 14/14 pipeline, and the existing Reach adapter. It
-does not own model acquisition, certificate issuance, persistent topology,
-updates, physical-host deployment, performance, Keeper, public relay, Linux reachd,
-or any other provider/model closure.
+owns only the exact manual A `0.1.0` to B `0.2.0` update and exact-parent
+rollback described above. It does not own model acquisition, certificate
+issuance, persistent topology, a feed or general version selection, physical
+host deployment, performance, Keeper, public relay, Linux reachd, or any other
+provider/model closure.

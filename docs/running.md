@@ -1160,6 +1160,31 @@ MLX CPU's generated shared objects use the package-owned
 directory remains under the unprivileged service identity and is removed with
 all service-created state.
 
+Package generation is part of that readiness authority beginning with bundle
+`0.2.0`. Both ranks must authenticate the exact same B generation over the
+existing mTLS control channel before either B-side provider creation and before
+gateway publication. Missing identity from A, A/B, B/A, unknown and unequal
+generation pairs remain unpublished; there is no one-node fallback. Two exact
+A `0.1.0` nodes retain their accepted behavior after exact-parent rollback.
+
+The only supported update is manual and offline: exact accepted A `0.1.0` to
+B `0.2.0`, followed if needed by explicit rollback to that exact A. Keep the
+authenticated A and B archives and extracted roots locally, stop public supply,
+then run B's `scripts/update.sh` once per node with both roots, archives and
+digests. If the process or node dies, run B's `scripts/recover.sh` with those
+same arguments; never repair an installation by copying individual files.
+Only after both nodes authenticate B/B may the cluster be started. Run
+`scripts/rollback.sh` on each node to restore A; the intermediate B/A state is
+deliberately unpublished.
+
+The transaction preserves service enabled/active intent, the dedicated UID/GID,
+`/etc/reach-exo`, TLS, `/srv/reach-exo-models` and model bytes. A root package
+lock, persistent start guard, bounded durable journal and whole-generation
+fresh-inode replacement keep interrupted or mixed installed bytes unrunnable.
+Wrong/lower/unrelated artifacts, stale or corrupt journals and concurrent
+update, rollback, removal or configuration refuse. Exact syntax and the frozen
+A digest are in `exo-runtime/README.md`.
+
 `systemctl disable --now reach-exo-node` removes publication and provider work;
 disabled state persists across reboot. The bundle remove command deletes its
 unit, immutable program, writable state, runtime files and service-created
