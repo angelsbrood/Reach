@@ -19,8 +19,8 @@ package enum GenerationReceipt: Sendable, Equatable {
 
         package init(remoteEndpointDescription: String?, relayNetwork: String? = nil) {
             guard let remoteEndpointDescription,
-                  let endpoint = MeshEndpoint.split(remoteEndpointDescription),
-                  let kind = MeshEndpoint.classify(endpoint.host) else {
+                  let endpoint = HostEndpoint.split(remoteEndpointDescription),
+                  let kind = HostEndpoint.classify(endpoint.host) else {
                 self = .unknown
                 return
             }
@@ -32,7 +32,7 @@ package enum GenerationReceipt: Sendable, Equatable {
                 self = .reachMesh
                 return
             }
-            if MeshEndpoint.isRelayOverlayAddress(endpoint.host, network: relayNetwork) {
+            if HostEndpoint.isRelayOverlayAddress(endpoint.host, network: relayNetwork) {
                 self = .relayOverlay
                 return
             }
@@ -185,8 +185,8 @@ public actor SessionRegistry {
 
     public init(limits: Limits = Limits()) {
         self.limits = limits
-        receiptSink = { receipt in Log.info(receipt.message) }
-        replayEventSink = { message in Log.info(message) }
+        receiptSink = { receipt in HostLog.info(receipt.message) }
+        replayEventSink = { message in HostLog.info(message) }
         replayStore = ReplayStore(policy: Self.replayPolicy(
             perGenerationBytes: limits.bufferCapBytes,
             processBytes: nil
@@ -200,7 +200,7 @@ public actor SessionRegistry {
         limits: Limits = Limits(),
         replayProcessCapBytes: Int? = nil,
         receiptSink: @escaping GenerationReceiptSink,
-        replayEventSink: @escaping ReplayEventSink = { message in Log.info(message) }
+        replayEventSink: @escaping ReplayEventSink = { message in HostLog.info(message) }
     ) {
         self.limits = limits
         self.receiptSink = receiptSink
@@ -579,7 +579,7 @@ public actor SessionRegistry {
 
     /// How many sessions are resident. Nothing in the daemon needs this —
     /// it exists so a test can watch the table not grow.
-    var residentSessions: Int { sessions.count }
+    package var residentSessions: Int { sessions.count }
 
     /// Privacy-safe operator copy: policy only, never live usage.
     package var replayStartupMessage: String {

@@ -1,7 +1,7 @@
 import Foundation
 import ReachWire
 import Testing
-@testable import ReachDaemon
+@testable import ReachHost
 
 @Suite(.serialized) struct ReplayStoreTests {
     private let key = ReplayStore.Key(sessionID: UUID(), generationID: UUID())

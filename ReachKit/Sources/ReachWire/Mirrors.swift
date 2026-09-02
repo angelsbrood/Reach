@@ -1,32 +1,48 @@
 import Foundation
-import FoundationModels
 
-// The wire codec bridges the framework's transcript and generation types by
-// hand — the named stub from the plan. `Transcript` and `GenerationSchema`
-// are natively Codable and ride as themselves; only the options types and
-// tool definitions need mirrors. Native conformances are adopted when the
-// framework core open-sourcing lands; this file is the seam that rebase
-// replaces.
+// Portable values are the wire source of truth. The native Foundation Models
+// spellings remain an Apple-edge adapter in FoundationModelsBridge.swift.
 
 public struct WireToolDefinition: Codable, Sendable {
     public var name: String
     public var description: String
-    public var parameters: GenerationSchema
+    public var portableParameters: WireGenerationSchema
 
-    public init(name: String, description: String, parameters: GenerationSchema) {
+    public init(name: String, description: String, portableParameters: WireGenerationSchema) {
         self.name = name
         self.description = description
-        self.parameters = parameters
+        self.portableParameters = portableParameters
     }
 
-    public init(_ native: Transcript.ToolDefinition) {
-        self.init(name: native.name, description: native.description, parameters: native.parameters)
+    private enum CodingKeys: String, CodingKey { case name, description, parameters }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        name = try container.decode(String.self, forKey: .name)
+        description = try container.decode(String.self, forKey: .description)
+        portableParameters = try container.decode(WireGenerationSchema.self, forKey: .parameters)
     }
 
-    public func native() -> Transcript.ToolDefinition {
-        Transcript.ToolDefinition(name: name, description: description, parameters: parameters)
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(name, forKey: .name)
+        try container.encode(description, forKey: .description)
+        try container.encode(portableParameters, forKey: .parameters)
     }
 }
+
+#if !canImport(FoundationModels)
+public extension WireToolDefinition {
+    var parameters: WireGenerationSchema {
+        get { portableParameters }
+        set { portableParameters = newValue }
+    }
+
+    init(name: String, description: String, parameters: WireGenerationSchema) {
+        self.init(name: name, description: description, portableParameters: parameters)
+    }
+}
+#endif
 
 public enum WireSampling: Codable, Sendable, Equatable {
     case greedy
@@ -58,47 +74,6 @@ public struct WireGenerationOptions: Codable, Sendable, Equatable {
         self.toolCalling = toolCalling
     }
 
-    public init(_ native: GenerationOptions) {
-        temperature = native.temperature
-        maximumResponseTokens = native.maximumResponseTokens
-        // SamplingMode exposes no public read accessor (its `Kind` enum
-        // exists but nothing returns it — feedback-worthy). Greedy is
-        // detectable via Equatable; custom sampling rides as nil and the
-        // host applies its defaults. Documented v0 limitation, resolved by
-        // the framework-core rebase.
-        if let mode = native.samplingMode, mode == .greedy {
-            sampling = .greedy
-        }
-        if let mode = native.toolCallingMode {
-            switch mode {
-            case .allowed: toolCalling = .allowed
-            case .required: toolCalling = .required
-            case .disallowed: toolCalling = .disallowed
-            default: toolCalling = nil
-            }
-        }
-    }
-
-    public func native() -> GenerationOptions {
-        let mode: GenerationOptions.SamplingMode? = switch sampling {
-        case .greedy: .greedy
-        case .topK(let k, let seed): .random(top: k, seed: seed)
-        case .topP(let p, let seed): .random(probabilityThreshold: p, seed: seed)
-        case nil: nil
-        }
-        let toolMode: GenerationOptions.ToolCallingMode? = switch toolCalling {
-        case .allowed: .allowed
-        case .required: .required
-        case .disallowed: .disallowed
-        case nil: nil
-        }
-        return GenerationOptions(
-            samplingMode: mode,
-            temperature: temperature,
-            maximumResponseTokens: maximumResponseTokens,
-            toolCallingMode: toolMode
-        )
-    }
 }
 
 public enum WireReasoningLevel: Codable, Sendable, Equatable {
@@ -117,28 +92,6 @@ public struct WireContextOptions: Codable, Sendable, Equatable {
         self.reasoning = reasoning
     }
 
-    public init(_ native: ContextOptions) {
-        includeSchemaInPrompt = native.includeSchemaInPrompt
-        switch native.reasoningLevel {
-        case .light: reasoning = .light
-        case .moderate: reasoning = .moderate
-        case .deep: reasoning = .deep
-        case .custom(let value): reasoning = .custom(value)
-        case nil: reasoning = nil
-        default: reasoning = nil
-        }
-    }
-
-    public func native() -> ContextOptions {
-        let level: ContextOptions.ReasoningLevel? = switch reasoning {
-        case .light: .light
-        case .moderate: .moderate
-        case .deep: .deep
-        case .custom(let value): .custom(value)
-        case nil: nil
-        }
-        return ContextOptions(includeSchemaInPrompt: includeSchemaInPrompt, reasoningLevel: level)
-    }
 }
 
 /// The generation request as it crosses the trust boundary. `metadata` from
@@ -147,36 +100,79 @@ public struct WireContextOptions: Codable, Sendable, Equatable {
 /// carry generically. Documented limitation.
 public struct WireGenerationRequest: Codable, Sendable {
     public var id: UUID
-    public var transcript: Transcript
+    public var portableTranscript: WireTranscript
     public var tools: [WireToolDefinition]
-    public var schema: GenerationSchema?
+    public var portableSchema: WireGenerationSchema?
     public var options: WireGenerationOptions
     public var context: WireContextOptions
 
     public init(
         id: UUID,
-        transcript: Transcript,
+        portableTranscript: WireTranscript,
         tools: [WireToolDefinition] = [],
-        schema: GenerationSchema? = nil,
+        portableSchema: WireGenerationSchema? = nil,
         options: WireGenerationOptions = WireGenerationOptions(),
         context: WireContextOptions = WireContextOptions()
     ) {
         self.id = id
-        self.transcript = transcript
+        self.portableTranscript = portableTranscript
         self.tools = tools
-        self.schema = schema
+        self.portableSchema = portableSchema
         self.options = options
         self.context = context
     }
 
-    public init(_ native: LanguageModelExecutorGenerationRequest) {
+    private enum CodingKeys: String, CodingKey { case id, transcript, tools, schema, options, context }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        portableTranscript = try container.decode(WireTranscript.self, forKey: .transcript)
+        tools = try container.decode([WireToolDefinition].self, forKey: .tools)
+        portableSchema = try container.decodeIfPresent(WireGenerationSchema.self, forKey: .schema)
+        options = try container.decode(WireGenerationOptions.self, forKey: .options)
+        context = try container.decode(WireContextOptions.self, forKey: .context)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(portableTranscript, forKey: .transcript)
+        try container.encode(tools, forKey: .tools)
+        try container.encodeIfPresent(portableSchema, forKey: .schema)
+        try container.encode(options, forKey: .options)
+        try container.encode(context, forKey: .context)
+    }
+}
+
+#if !canImport(FoundationModels)
+public extension WireGenerationRequest {
+    var transcript: WireTranscript {
+        get { portableTranscript }
+        set { portableTranscript = newValue }
+    }
+
+    var schema: WireGenerationSchema? {
+        get { portableSchema }
+        set { portableSchema = newValue }
+    }
+
+    init(
+        id: UUID,
+        transcript: WireTranscript,
+        tools: [WireToolDefinition] = [],
+        schema: WireGenerationSchema? = nil,
+        options: WireGenerationOptions = WireGenerationOptions(),
+        context: WireContextOptions = WireContextOptions()
+    ) {
         self.init(
-            id: native.id,
-            transcript: native.transcript,
-            tools: native.enabledToolDefinitions.map(WireToolDefinition.init),
-            schema: native.schema,
-            options: WireGenerationOptions(native.generationOptions),
-            context: WireContextOptions(native.contextOptions)
+            id: id,
+            portableTranscript: transcript,
+            tools: tools,
+            portableSchema: schema,
+            options: options,
+            context: context
         )
     }
 }
+#endif

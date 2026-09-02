@@ -12,15 +12,11 @@ public enum MeshEndpoint {
     /// WireGuard's listen port on the host, fixed across the rig.
     public static let port: UInt16 = 51820
 
-    /// Reach's own mesh subnet. Deriving an endpoint from an address inside it
-    /// would tell a phone to reach the mesh by way of the mesh.
-    static let meshPrefix: [UInt8] = [10, 86, 0]
-
     /// The complete address predicate shared by endpoint selection and host
     /// readiness. A prefix match on a malformed or longer byte array is not a
     /// Reach mesh address.
     static func isReachMeshAddress(_ address: [UInt8]) -> Bool {
-        address.count == 4 && Array(address.prefix(3)) == meshPrefix
+        HostEndpoint.isReachMeshAddress(address)
     }
 
     public enum Source: Sendable, Equatable {
@@ -89,11 +85,7 @@ public enum MeshEndpoint {
     /// Split `host:port`. Rightmost colon wins, so a bracketed IPv6 literal
     /// fails cleanly rather than being silently mangled.
     public static func split(_ endpoint: String) -> (host: String, port: UInt16)? {
-        guard let colon = endpoint.lastIndex(of: ":") else { return nil }
-        let host = String(endpoint[endpoint.startIndex..<colon])
-        let portText = String(endpoint[endpoint.index(after: colon)...])
-        guard !host.isEmpty, let port = UInt16(portText) else { return nil }
-        return (host, port)
+        HostEndpoint.split(endpoint)
     }
 
     /// What kind of address a host is, and therefore who can reach it.
@@ -110,27 +102,21 @@ public enum MeshEndpoint {
     }
 
     public static func classify(_ host: String) -> AddressKind? {
-        guard let octets = ipv4(host) else { return nil }
-        if octets[0] == 127 { return .loopback }
-        if isReachMeshAddress(octets) { return .mesh }
-        if octets[0] == 169, octets[1] == 254 { return .linkLocal }
-        if octets[0] == 100, (64...127).contains(octets[1]) { return .sharedAddressSpace }
-        if octets[0] == 10 { return .privateNetwork }
-        if octets[0] == 172, (16...31).contains(octets[1]) { return .privateNetwork }
-        if octets[0] == 192, octets[1] == 168 { return .privateNetwork }
-        return .publicAddress
+        switch HostEndpoint.classify(host) {
+        case .loopback: .loopback
+        case .mesh: .mesh
+        case .sharedAddressSpace: .sharedAddressSpace
+        case .privateNetwork: .privateNetwork
+        case .linkLocal: .linkLocal
+        case .publicAddress: .publicAddress
+        case nil: nil
+        }
     }
 
     /// Whether `host` belongs to the operator-configured relay overlay.
     /// Direct mesh classification always takes precedence at the caller.
     package static func isRelayOverlayAddress(_ host: String, network: String?) -> Bool {
-        guard let network,
-              let address = ipv4(host),
-              !isReachMeshAddress(address),
-              let prefix = MeshIPv4Prefix.parse(network), prefix.length == 24
-        else { return false }
-        let raw = address.reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
-        return MeshIPv4Prefix(network: raw, length: 32).isContained(in: prefix)
+        HostEndpoint.isRelayOverlayAddress(host, network: network)
     }
 
     static func ipv4(_ host: String) -> [UInt8]? {

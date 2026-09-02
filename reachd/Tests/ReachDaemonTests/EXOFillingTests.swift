@@ -1,8 +1,10 @@
 import Foundation
-import FoundationModels
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import ReachWire
 import Testing
-@testable import ReachDaemon
+@testable import ReachHost
 
 private final class LockedFlag: @unchecked Sendable {
     private let lock = NSLock()
@@ -380,13 +382,13 @@ private final class EXOChallengeSender: NSObject, URLAuthenticationChallengeSend
     """# + "\n"
 
     private static func request(
-        entries: [Transcript.Entry]? = nil,
+        entries: [WireTranscript.Entry]? = nil,
         tools: [WireToolDefinition] = [],
-        schema: GenerationSchema? = nil,
+        schema: WireGenerationSchema? = nil,
         options: WireGenerationOptions = .init(),
         context: WireContextOptions = .init()
     ) -> WireGenerationRequest {
-        let defaultEntries: [Transcript.Entry] = [
+        let defaultEntries: [WireTranscript.Entry] = [
             .instructions(.init(
                 id: "instructions",
                 segments: [.text(.init(id: "is", content: "Be exact."))],
@@ -404,9 +406,9 @@ private final class EXOChallengeSender: NSObject, URLAuthenticationChallengeSend
         ]
         return WireGenerationRequest(
             id: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!,
-            transcript: Transcript(entries: entries ?? defaultEntries),
+            portableTranscript: WireTranscript(entries: entries ?? defaultEntries),
             tools: tools,
-            schema: schema,
+            portableSchema: schema,
             options: options,
             context: context
         )
@@ -1036,7 +1038,7 @@ private final class EXOChallengeSender: NSObject, URLAuthenticationChallengeSend
         let oversized = Self.request(entries: [.prompt(.init(segments: [.text(.init(content: maxMessage + "a"))]))])
         #expect(capturedError { _ = try EXORequestEncoder.encode(oversized, modelID: Self.modelID) } == .requestLimit("message UTF-8 bytes"))
 
-        let small = Transcript.Entry.prompt(Transcript.Prompt(segments: [.text(.init(content: "x"))]))
+        let small = WireTranscript.Entry.prompt(WireTranscript.Prompt(segments: [.text(.init(content: "x"))]))
         #expect(capturedError {
             _ = try EXORequestEncoder.encode(Self.request(entries: Array(repeating: small, count: 256)), modelID: Self.modelID)
         } == nil)
@@ -1046,7 +1048,7 @@ private final class EXOChallengeSender: NSObject, URLAuthenticationChallengeSend
 
         let quarter = String(repeating: "x", count: EXOLimits.messageBytes)
         let bodyLimitEntries = (0 ..< 4).map { _ in
-            Transcript.Entry.prompt(Transcript.Prompt(segments: [.text(.init(content: quarter))]))
+            WireTranscript.Entry.prompt(WireTranscript.Prompt(segments: [.text(.init(content: quarter))]))
         }
         let loader = FakeEXOLoader()
         let filling = try Self.filling(loader: loader)
@@ -1056,20 +1058,27 @@ private final class EXOChallengeSender: NSObject, URLAuthenticationChallengeSend
     }
 
     @Test func unsupportedShapesFailBeforeTheLoaderStarts() async throws {
-        let schema = GenerationSchema(type: GeneratedContent.self, properties: [])
-        let tool = WireToolDefinition(name: "lookup", description: "lookup", parameters: schema)
-        let toolCall = Transcript.Entry.toolCalls(.init([
-            Transcript.ToolCall(id: "call-1", toolName: "lookup", arguments: try GeneratedContent(json: "{}")),
+        let schema = try WireGenerationSchema(jsonValue: .object([
+            "additionalProperties": .bool(false),
+            "properties": .object([:]),
+            "required": .array([]),
+            "title": .string("Unsupported"),
+            "type": .string("object"),
+            "x-order": .array([]),
         ]))
-        let toolOutput = Transcript.Entry.toolOutput(.init(
+        let tool = WireToolDefinition(name: "lookup", description: "lookup", portableParameters: schema)
+        let toolCall = WireTranscript.Entry.toolCalls(.init(calls: [
+            .init(id: "call-1", name: "lookup", argumentsJSON: "{}"),
+        ]))
+        let toolOutput = WireTranscript.Entry.toolOutput(.init(
             id: "call-1",
             toolName: "lookup",
             segments: [.text(.init(content: "answer"))]
         ))
-        let structured = Transcript.Entry.prompt(.init(segments: [
-            .structure(.init(schemaName: "object", content: try GeneratedContent(json: "{}"))),
+        let structured = WireTranscript.Entry.prompt(.init(segments: [
+            .structure(.init(source: "object", content: .object([:]))),
         ]))
-        let reasoning = Transcript.Entry.reasoning(.init(segments: [.text(.init(content: "hidden"))]))
+        let reasoning = WireTranscript.Entry.reasoning(.init(segments: [.text(.init(content: "hidden"))]))
         let cases: [WireGenerationRequest] = [
             Self.request(tools: [tool]),
             Self.request(schema: schema),
@@ -1091,8 +1100,15 @@ private final class EXOChallengeSender: NSObject, URLAuthenticationChallengeSend
     }
 
     @Test func nestedToolsAndResponseAssetsFailAfterWireDecodeBeforeLoaderStarts() async throws {
-        let schema = GenerationSchema(type: GeneratedContent.self, properties: [])
-        let transcriptTool = Transcript.ToolDefinition(
+        let schema = try WireGenerationSchema(jsonValue: .object([
+            "additionalProperties": .bool(false),
+            "properties": .object([:]),
+            "required": .array([]),
+            "title": .string("Unsupported"),
+            "type": .string("object"),
+            "x-order": .array([]),
+        ]))
+        let transcriptTool = WireTranscript.ToolDefinition(
             name: "lookup",
             description: "Looks a thing up.",
             parameters: schema
@@ -1294,6 +1310,22 @@ private final class EXOChallengeSender: NSObject, URLAuthenticationChallengeSend
             let data = Data((Self.event(try Self.terminal(usage: usage)) + Self.event("[DONE]")).utf8)
             #expect(capturedError { _ = try Self.parse(data) } != nil)
         }
+    }
+
+    @Test func usageNumberClassificationPreservesExactIntegerCategories() {
+        #expect(EXONumber.integer(NSNumber(value: Int8(1))) == 1)
+        #expect(EXONumber.integer(NSNumber(value: UInt8.max)) == Int(UInt8.max))
+        #expect(EXONumber.integer(NSNumber(value: Int.max)) == Int.max)
+        #expect(EXONumber.integer(NSNumber(value: UInt64(Int.max))) == Int.max)
+
+        #expect(EXONumber.integer(NSNumber(value: true)) == nil)
+        #expect(EXONumber.integer(NSNumber(value: -1)) == nil)
+        #expect(EXONumber.integer(NSNumber(value: UInt64(Int.max) + 1)) == nil)
+        #expect(EXONumber.integer(NSNumber(value: UInt64.max)) == nil)
+        #expect(EXONumber.integer(NSNumber(value: Float(1))) == nil)
+        #expect(EXONumber.integer(NSNumber(value: Double(1))) == nil)
+        #expect(EXONumber.integer(NSNumber(value: Double.nan)) == nil)
+        #expect(EXONumber.integer(NSNumber(value: Double.infinity)) == nil)
     }
 
     @Test func streamSyntaxAndIncrementalBoundsFailClosed() throws {

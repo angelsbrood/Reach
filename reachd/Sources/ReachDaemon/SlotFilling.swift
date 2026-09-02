@@ -1,5 +1,4 @@
 import Foundation
-import FoundationModels
 import ReachWire
 
 /// The slot: reachd hosts whatever filling conforms. The slot speaks the
@@ -76,7 +75,7 @@ public enum TranscriptChat {
         }
     }
 
-    public static func messages(from transcript: Transcript) -> [Message] {
+    public static func messages(from transcript: WireTranscript) -> [Message] {
         var messages: [Message] = []
         for entry in transcript {
             switch entry {
@@ -95,11 +94,11 @@ public enum TranscriptChat {
                 messages.append(Message(
                     role: .assistant,
                     text: "",
-                    tool: .calls(calls.map { call in
+                    tool: .calls(calls.calls.map { call in
                         Message.Call(
                             id: call.id,
-                            name: call.toolName,
-                            argumentsJSON: call.arguments.jsonString
+                            name: call.name,
+                            argumentsJSON: call.argumentsJSON
                         )
                     })
                 ))
@@ -107,7 +106,7 @@ public enum TranscriptChat {
                 messages.append(Message(
                     role: .tool,
                     text: text(of: output.segments),
-                    tool: .output(callID: output.id)
+                    tool: .output(callID: output.toolCallID)
                 ))
             default:
                 continue
@@ -116,7 +115,7 @@ public enum TranscriptChat {
         return messages
     }
 
-    static func text(of segments: [Transcript.Segment]) -> String {
+    static func text(of segments: [WireTranscript.Segment]) -> String {
         segments.compactMap { segment in
             if case .text(let text) = segment { return text.content }
             return nil

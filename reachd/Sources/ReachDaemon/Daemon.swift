@@ -1,6 +1,7 @@
 import Crypto
 import Foundation
 import Network
+import ReachHost
 import ReachIdentity
 import ReachTransport
 import ReachWire
@@ -38,6 +39,28 @@ public enum DaemonInfo {
             return URL(fileURLWithPath: override, isDirectory: true)
         }
         return canonicalLoginStateDirectory
+    }
+}
+
+// Preserve the Apple shell's diagnostic/test vocabulary while routing the
+// classification and operator copy through the shared host implementation.
+// `FrameEnding` remains ReachTransport's read result; no transport type enters
+// the Linux host closure.
+extension FrameEnding {
+    private var hostEnding: HostFrameEnding {
+        switch self {
+        case .frame(let frame): .frame(frame)
+        case .closed: .closed
+        case .broke(let error): .broke(error)
+        }
+    }
+
+    var peerWentAway: Bool {
+        hostEnding.peerWentAway { $0 is TransportError }
+    }
+
+    var accountOfAControlStream: String {
+        hostEnding.controlAccount { $0 is TransportError }
     }
 }
 
@@ -131,14 +154,11 @@ public final class Daemon: Sendable {
 
     private let config: DaemonConfig
     private let filling: any SlotFilling
-    private let registry: SessionRegistry
-    private let admission: SlotAdmission
+    private let host: SessionHost
     private let tls: ListenerIdentity
     private let grants: GrantWiring?
     private let reachability: ReachabilityCoordinator?
     private let currentAddresses: @Sendable () -> [[UInt8]]
-    private let relayRoadDeclaration: @Sendable (UInt8, UInt16) -> RelayRoadDeclaration
-    private let currentRelayNetwork: @Sendable () -> String?
     private let state = StateBox()
 
     public init(
@@ -151,20 +171,44 @@ public final class Daemon: Sendable {
     ) {
         self.config = config
         self.filling = filling
-        self.registry = registry
-        self.admission = SlotAdmission(policy: .init(
-            capacity: filling.maximumConcurrentGenerations
-        ))
         self.tls = identity
         self.grants = grants
         self.reachability = reachability
         self.currentAddresses = { DirectAddressSelector.current() }
-        self.relayRoadDeclaration = { version, port in
+        let relayDeclaration: @Sendable (UInt8, UInt16) -> RelayRoadDeclaration = { version, port in
             RelayRoadDeclarationProvider.current(version: version, port: port)
         }
-        self.currentRelayNetwork = {
+        let relayNetwork: @Sendable () -> String? = {
             try? MeshIntentStore.load(in: DaemonInfo.stateDirectory).relay?.network
         }
+        let addressProvider = self.currentAddresses
+        self.host = SessionHost(
+            filling: filling,
+            registry: registry,
+            helloAck: { version in
+                let localAddresses = addressProvider().map { $0.map(String.init).joined(separator: ".") }
+                let advertisement = Self.roadAdvertisement(
+                    localAddresses: localAddresses,
+                    port: config.port,
+                    mapped: reachability?.sessionEndpoint
+                )
+                return HelloAck(
+                    version: version,
+                    cluster: config.clusterName,
+                    models: [ModelDescriptor(id: filling.modelID, displayName: filling.displayName, capabilities: filling.capabilities)],
+                    addrs: advertisement.legacyAddresses,
+                    port: config.port,
+                    roads: advertisement.roads,
+                    relayRoads: relayDeclaration(version, config.port).wireValue
+                )
+            },
+            relayNetwork: relayNetwork,
+            sessionOpened: { Log.sessionOpened($0, from: $1) },
+            info: { Log.info($0) },
+            error: { Log.error($0) },
+            isOrdinaryPeerDeparture: { $0 is TransportError },
+            controlExtension: { GrantControl(grants: grants, peerCertificateDER: $0) }
+        )
     }
 
     /// Test-only/package seam for the fact authenticated hellos read the
@@ -188,16 +232,39 @@ public final class Daemon: Sendable {
     ) {
         self.config = config
         self.filling = filling
-        self.registry = registry
-        self.admission = admission ?? SlotAdmission(policy: .init(
-            capacity: filling.maximumConcurrentGenerations
-        ))
         self.tls = identity
         self.grants = grants
         self.reachability = reachability
         self.currentAddresses = currentAddresses
-        self.relayRoadDeclaration = relayRoadDeclaration
-        self.currentRelayNetwork = currentRelayNetwork
+        let addressProvider = currentAddresses
+        self.host = SessionHost(
+            filling: filling,
+            registry: registry,
+            admission: admission,
+            helloAck: { version in
+                let localAddresses = addressProvider().map { $0.map(String.init).joined(separator: ".") }
+                let advertisement = Self.roadAdvertisement(
+                    localAddresses: localAddresses,
+                    port: config.port,
+                    mapped: reachability?.sessionEndpoint
+                )
+                return HelloAck(
+                    version: version,
+                    cluster: config.clusterName,
+                    models: [ModelDescriptor(id: filling.modelID, displayName: filling.displayName, capabilities: filling.capabilities)],
+                    addrs: advertisement.legacyAddresses,
+                    port: config.port,
+                    roads: advertisement.roads,
+                    relayRoads: relayRoadDeclaration(version, config.port).wireValue
+                )
+            },
+            relayNetwork: currentRelayNetwork,
+            sessionOpened: { Log.sessionOpened($0, from: $1) },
+            info: { Log.info($0) },
+            error: { Log.error($0) },
+            isOrdinaryPeerDeparture: { $0 is TransportError },
+            controlExtension: { GrantControl(grants: grants, peerCertificateDER: $0) }
+        )
     }
 
     /// Starts listening (and advertising, unless disabled for tests).
@@ -218,8 +285,9 @@ public final class Daemon: Sendable {
         // for its port is exactly what a restart is, so this is the shape the
         // daemon meets most.
         try await listener.waitUntilReady()
-        Log.info(await admission.startupMessage)
-        Log.info(await registry.replayStartupMessage)
+        let startup = await host.startupMessages
+        Log.info(startup.admission)
+        Log.info(startup.replay)
         // The system request is deliberately long-lived: it renews mappings
         // and follows primary-network changes, calling us again whenever the
         // assigned address or port moves.
@@ -248,10 +316,10 @@ public final class Daemon: Sendable {
         // The desk sweeps on the same tick as the registry. It was left out
         // when this was written, and being the one organ with nothing on
         // disk, there was no artifact anywhere that would have shown it.
-        let sweeper = Task { [registry, grants] in
+        let sweeper = Task { [host, grants] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(30))
-                await registry.sweep()
+                await host.sweep()
                 await grants?.desk.sweep()
             }
         }
@@ -265,8 +333,7 @@ public final class Daemon: Sendable {
 
     public func stop() async {
         reachability?.stop()
-        await admission.shutdown()
-        await registry.shutdown()
+        await host.shutdown()
         await state.stop()
     }
 
@@ -287,319 +354,57 @@ public final class Daemon: Sendable {
     }
 
     private func serve(stream: ReachTransport.QUICStream) async {
-        var iterator = stream.frames.makeAsyncIterator()
-        do {
-            // A stream that opens and never speaks is not a fault: a dial the
-            // client cancelled, an app that went away between connect and
-            // send, a probe. Both silent endings are that — and the reset one
-            // arrived here as a THROW, past this guard into the catch below,
-            // where it printed `stream ended: POSIXErrorCode 57` at error
-            // level for a session that never existed. That is 7f's reading, on
-            // the one listener 7f did not reach.
-            //
-            // Nothing was served, so there is nothing to say. The cancel is
-            // what the catch was already doing for that path and still has to
-            // happen — and the clean close, which used to fall out of here
-            // without one, was leaking the connection.
-            let opening = await FrameEnding.next(from: &iterator)
-            guard case .frame(let first) = opening else {
-                stream.cancel()
-                return
+        await host.serve(stream)
+    }
+
+}
+
+extension ReachTransport.QUICStream: SessionHostStream {}
+
+private actor GrantControl: HostControlExtension {
+    private let grants: Daemon.GrantWiring?
+    private let peerCertificateDER: Data?
+    private var admin: DeviceRegistry.Device?
+
+    init(grants: Daemon.GrantWiring?, peerCertificateDER: Data?) {
+        self.grants = grants
+        self.peerCertificateDER = peerCertificateDER
+    }
+
+    package func handle(_ frame: RawFrame) async throws -> HostControlAction {
+        switch frame.type {
+        case .grantSubscribe:
+            _ = try frame.decode(GrantSubscribe.self)
+            guard let grants, let device = await adminDevice(grants: grants) else {
+                return .send(ErrorFrame(code: "grant-denied", message: "admin device certificate required"))
             }
-            switch first.type {
-            case .hello:
-                let hello = try first.decode(Hello.self)
-                guard let version = Wire.negotiate(offered: hello.versions) else {
-                    try await stream.send(ErrorFrame(
-                        code: "wire-version",
-                        message: Wire.mismatchMessage(app: hello.versions, cluster: Wire.supportedVersions)
-                    ))
-                    stream.finishSending()
-                    return
-                }
-                let ending = try await controlLoop(stream: stream, iterator: &iterator, version: version)
-                // How a control stream ends is a decision, so it is made where
-                // the decision belongs and logged from the answer — not left
-                // to fall into the catch below, which is where it used to go.
-                if ending.peerWentAway {
-                    Log.info(ending.accountOfAControlStream)
-                } else {
-                    Log.error(ending.accountOfAControlStream)
-                }
-                stream.cancel()
-            case .generateBegin:
-                let begin = try first.decode(GenerateBegin.self)
-                try await generationLoop(stream: stream, iterator: &iterator, begin: begin)
-            case .generateReattach:
-                let reattach = try first.decode(GenerateReattach.self)
-                try await reattachLoop(stream: stream, iterator: &iterator, frame: reattach)
-            default:
-                try await stream.send(ErrorFrame(code: "unexpected-frame", message: "stream must open with hello or generate"))
-                stream.cancel()
+            admin = device
+            return .subscribe(await grants.desk.subscribe())
+        case .grantRule:
+            let rule = try frame.decode(GrantRule.self)
+            if admin == nil, let grants {
+                admin = await adminDevice(grants: grants)
             }
-        } catch {
-            Log.error("stream ended: \(error)")
-            stream.cancel()
+            guard let grants, let device = admin else {
+                return .send(ErrorFrame(code: "grant-denied", message: "admin device certificate required"))
+            }
+            if await !grants.desk.rule(requestID: rule.requestID, allow: rule.allow, ruler: device.id) {
+                return .send(ErrorFrame(code: "grant-unknown", message: "no pending request \(rule.requestID)"))
+            }
+            return .handled
+        default:
+            return .unhandled
         }
     }
 
-    /// Serves the control stream until it ends, and returns **how** it ended.
-    ///
-    /// The ending is a return value rather than a throw for the reason
-    /// `FrameEnding` exists at all: `while let raw = try await iterator.next()`
-    /// handles a clean close and lets a reset throw straight past, into
-    /// `serve`'s catch, which logged `stream ended: <socket error>` at error
-    /// level. An app quitting with a live control stream is the most ordinary
-    /// traffic this daemon sees, and it is the traffic a restart generates
-    /// most — so the log filled with errors for nothing going wrong. That is
-    /// 7f's reading again, one shape over.
-    ///
-    /// It still throws for what genuinely fails: a send that will not go, a
-    /// frame that will not decode. Those are faults and belong in the catch.
-    private func controlLoop(
-        stream: ReachTransport.QUICStream,
-        iterator: inout AsyncThrowingStream<RawFrame, Error>.AsyncIterator,
-        version: UInt8
-    ) async throws -> FrameEnding {
-        let localAddresses = currentAddresses().map { $0.map(String.init).joined(separator: ".") }
-        let advertisement = Self.roadAdvertisement(
-            localAddresses: localAddresses,
-            port: config.port,
-            mapped: reachability?.sessionEndpoint
-        )
-        try await stream.send(HelloAck(
-            version: version,
-            cluster: config.clusterName,
-            models: [ModelDescriptor(id: filling.modelID, displayName: filling.displayName, capabilities: filling.capabilities)],
-            addrs: advertisement.legacyAddresses,
-            port: config.port,
-            roads: advertisement.roads,
-            relayRoads: relayRoadDeclaration(version, config.port).wireValue
-        ), for: version)
-        // The admin device, once this stream proves it is one; grant events
-        // ride back on this same stream while the loop keeps consuming.
-        var admin: DeviceRegistry.Device?
-        var forwarder: Task<Void, Never>?
-        defer { forwarder?.cancel() }
-        while true {
-            let next = await FrameEnding.next(from: &iterator)
-            guard case .frame(let raw) = next else { return next }
-            try raw.requireSupported(by: version)
-            switch raw.type {
-            case .sessionOpen:
-                // Decoded so a malformed frame is still refused here; its
-                // `modelID` is not authoritative yet — the unread-wire audit
-                // graduated catalog meaning, selection ownership, and
-                // mismatch refusal together rather than inventing one here.
-                _ = try raw.decode(SessionOpen.self)
-                let (sessionID, token) = await registry.openSession(version: version)
-                try await stream.send(
-                    SessionOpened(sessionID: sessionID, token: token, capabilities: filling.capabilities),
-                    for: version
-                )
-                // Which road the session was *born* on. The re-attach below
-                // has said this since the walk-out take, for a reason that
-                // applies here word for word — a 10.86.0.x on the Mac's
-                // terminal, in shot, is the difference between the claim and
-                // the evidence for it — and a cold open is the half the away
-                // claim actually rests on. It was never written, so the one
-                // scenario nobody could photograph was the headline one.
-                //
-                // It matters because the client *races* its stored roads and
-                // keeps whichever answers: a session that came over the
-                // tailnet and one that came over the mesh are indistinguishable
-                // from every other line in this log, and only one of them is
-                // the claim.
-                Log.info(Log.sessionOpened(sessionID, from: stream.remoteEndpointDescription() ?? "an unnamed path"))
-                let source = GenerationReceipt.Source(
-                    remoteEndpointDescription: stream.remoteEndpointDescription(),
-                    relayNetwork: currentRelayNetwork()
-                )
-                Log.info("session \(sessionID) source category \(source.rawValue)")
-            case .grantSubscribe:
-                _ = try raw.decode(GrantSubscribe.self)
-                guard let grants, let device = await adminDevice(on: stream, grants: grants) else {
-                    try await stream.send(ErrorFrame(code: "grant-denied", message: "admin device certificate required"), for: version)
-                    continue
-                }
-                admin = device
-                forwarder?.cancel()
-                let events = await grants.desk.subscribe()
-                forwarder = Task {
-                    for await event in events {
-                        try? await stream.send(event, for: version)
-                    }
-                }
-            case .grantRule:
-                let rule = try raw.decode(GrantRule.self)
-                if admin == nil, let grants {
-                    admin = await adminDevice(on: stream, grants: grants)
-                }
-                guard let grants, let device = admin else {
-                    try await stream.send(ErrorFrame(code: "grant-denied", message: "admin device certificate required"), for: version)
-                    continue
-                }
-                if await !grants.desk.rule(requestID: rule.requestID, allow: rule.allow, ruler: device.id) {
-                    try await stream.send(ErrorFrame(code: "grant-unknown", message: "no pending request \(rule.requestID)"), for: version)
-                }
-            case .ping:
-                let ping = try raw.decode(Ping.self)
-                try await stream.send(Pong(nonce: ping.nonce), for: version)
-            default:
-                try await stream.send(ErrorFrame(code: "unexpected-frame", message: "\(raw.type) on control stream"), for: version)
-            }
-        }
-    }
-
-    /// The peer is an admin device iff its leaf's SAN URI names an active
-    /// enrolled device holding the admin grant.
-    private func adminDevice(on stream: ReachTransport.QUICStream, grants: GrantWiring) async -> DeviceRegistry.Device? {
-        guard let der = stream.peerCertificateDER(),
-              let uri = PeerIdentity.uri(fromDER: der),
+    private func adminDevice(grants: Daemon.GrantWiring) async -> DeviceRegistry.Device? {
+        guard let peerCertificateDER,
+              let uri = PeerIdentity.uri(fromDER: peerCertificateDER),
               let id = PeerIdentity.deviceID(fromURI: uri),
               let device = await grants.devices.device(id: id),
               device.admin, device.active
         else { return nil }
         return device
-    }
-
-    private func generationLoop(
-        stream: ReachTransport.QUICStream,
-        iterator: inout AsyncThrowingStream<RawFrame, Error>.AsyncIterator,
-        begin: GenerateBegin
-    ) async throws {
-        let filling = self.filling
-        let events: AsyncStream<Ev>
-        let epoch: UInt64
-        let version: UInt8
-        do {
-            (events, epoch, version) = try await registry.begin(
-                sessionID: begin.sessionID,
-                genID: begin.genID,
-                receiptSource: GenerationReceipt.Source(
-                    remoteEndpointDescription: stream.remoteEndpointDescription(),
-                    relayNetwork: currentRelayNetwork()
-                ),
-                admission: admission,
-                events: { filling.generate(begin.request) }
-            )
-        } catch let error as SlotAdmission.AdmissionError where error.isImmediateRefusal {
-            try await stream.send(ErrorFrame(code: "cluster-busy", message: error.description))
-            stream.cancel()
-            return
-        } catch {
-            try await stream.send(ErrorFrame(code: "begin-rejected", message: "\(error)"))
-            // Cancelled for the same reason the silent-opening path above
-            // cancels: a stream this side is done with and does not close
-            // leaks the connection. Refusals are the traffic a restart
-            // generates most, so this is the leak that would grow fastest.
-            stream.cancel()
-            return
-        }
-        try await pump(
-            events: events,
-            stream: stream,
-            iterator: &iterator,
-            sessionID: begin.sessionID,
-            genID: begin.genID,
-            epoch: epoch,
-            version: version
-        )
-    }
-
-    private func reattachLoop(
-        stream: ReachTransport.QUICStream,
-        iterator: inout AsyncThrowingStream<RawFrame, Error>.AsyncIterator,
-        frame: GenerateReattach
-    ) async throws {
-        let events: AsyncStream<Ev>
-        let epoch: UInt64
-        let version: UInt8
-        do {
-            try await registry.validate(sessionID: frame.sessionID, token: frame.token)
-            (events, epoch, version) = try await registry.attach(
-                sessionID: frame.sessionID,
-                genID: frame.genID,
-                fromSeq: frame.fromSeq
-            )
-        } catch {
-            try await stream.send(ErrorFrame(code: "reattach-rejected", message: "\(error)"))
-            stream.cancel()
-            return
-        }
-        // Which road the generation came back on. Nothing else records it:
-        // the session is road-agnostic by design, and a walk-out at a venue
-        // whose Wi-Fi reaches past the door can complete without the mesh
-        // ever being used — a take that looks perfect while demonstrating
-        // nothing. A 10.86.0.x here, on the Mac's terminal and in shot, is
-        // the difference between the claim and the evidence for it.
-        let source = GenerationReceipt.Source(
-            remoteEndpointDescription: stream.remoteEndpointDescription(),
-            relayNetwork: currentRelayNetwork()
-        )
-        Log.info("generation \(frame.genID) re-attached from \(stream.remoteEndpointDescription() ?? "an unnamed path") at seq \(frame.fromSeq)")
-        Log.info("generation \(frame.genID) re-attachment source category \(source.rawValue) at seq \(frame.fromSeq)")
-        try await pump(
-            events: events,
-            stream: stream,
-            iterator: &iterator,
-            sessionID: frame.sessionID,
-            genID: frame.genID,
-            epoch: epoch,
-            version: version
-        )
-    }
-
-    /// Sends seq-stamped events while consuming acks/cancels, detaching the
-    /// generation if the transport dies before the stream completes.
-    private func pump(
-        events: AsyncStream<Ev>,
-        stream: ReachTransport.QUICStream,
-        iterator: inout AsyncThrowingStream<RawFrame, Error>.AsyncIterator,
-        sessionID: UUID,
-        genID: UUID,
-        epoch: UInt64,
-        version: UInt8
-    ) async throws {
-        let registry = self.registry
-        let sender = Task {
-            var clean = true
-            for await ev in events {
-                do {
-                    try await stream.send(ev, for: version)
-                } catch {
-                    clean = false
-                    break
-                }
-            }
-            if clean {
-                stream.finishSending()
-            } else {
-                await registry.detach(sessionID: sessionID, genID: genID, epoch: epoch)
-            }
-        }
-        do {
-            while let raw = try await iterator.next() {
-                try raw.requireSupported(by: version)
-                switch raw.type {
-                case .evAck:
-                    let ack = try raw.decode(EvAck.self)
-                    await registry.ack(sessionID: sessionID, genID: genID, seq: ack.seq, epoch: epoch)
-                case .generateCancel:
-                    await registry.cancel(
-                        sessionID: sessionID,
-                        genID: genID,
-                        epoch: epoch,
-                        admission: admission
-                    )
-                default:
-                    break
-                }
-            }
-        } catch {
-            await registry.detach(sessionID: sessionID, genID: genID, epoch: epoch)
-        }
-        _ = await sender.value
     }
 }
 
@@ -665,55 +470,6 @@ private actor StateBox {
         // Established connections, which the two lines above never reached.
         for tunnel in tunnels.values { tunnel.cancel() }
         tunnels = [:]
-    }
-}
-
-/// How a served control stream ended, and whether that is news or a fault.
-///
-/// The same move `EnrollmentService` makes with `appHalfConverges` and
-/// `reason(waitingFor:)`, for the same reason: the level has to *follow* from
-/// a decision, and a decision that lives in a log line cannot be tested. Both
-/// of these are values, and the tests read the values.
-extension FrameEnding {
-    /// Whether this ending is just a peer going away.
-    ///
-    /// Two of the three are. A control stream closes cleanly when an app is
-    /// done with it, and it resets when the app is killed, suspended past its
-    /// keepalive, or loses its network — an app quitting mid-session is the
-    /// single most common thing that happens to this daemon, and after a
-    /// restart it is nearly all of the traffic. Neither is a fault and neither
-    /// costs anything: the session outlives the connection by design.
-    ///
-    /// A `WireError` is the exception, and it is the reason this is not simply
-    /// "the loop stopped". A peer whose bytes will not parse as frames is not
-    /// leaving, it is speaking something this daemon does not know — no
-    /// version negotiation exists to have refused it earlier, so this line is
-    /// where it surfaces.
-    ///
-    /// `.frame` cannot arrive here — the loop only returns on a non-frame —
-    /// but if it ever did it would mean a frame was read and dropped, which is
-    /// a fault by any reading.
-    var peerWentAway: Bool {
-        switch self {
-        case .frame: false
-        case .closed: true
-        case .broke(let error): error is TransportError
-        }
-    }
-
-    /// What to write down about it. Carries the transport's own words in the
-    /// reset case, because that is the part naming what actually happened.
-    var accountOfAControlStream: String {
-        switch self {
-        case .frame(let raw):
-            "a control stream ended holding an unread \(raw.type) — that is a fault in the loop, not in the peer"
-        case .closed:
-            "an app closed its control stream"
-        case .broke(let error) where error is TransportError:
-            "an app's control stream went away: \(error). It quit, slept, or lost its network; anything it had running is held for the residency window"
-        case .broke(let error):
-            "a control stream carried something this daemon could not read as a frame: \(error)"
-        }
     }
 }
 

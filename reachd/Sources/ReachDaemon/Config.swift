@@ -1,29 +1,5 @@
 import Foundation
-
-public struct EXOConfiguration: Codable, Sendable, Equatable {
-    public let endpoint: String
-
-    public init(endpoint: String) throws {
-        _ = try EXOEndpoint(endpoint)
-        self.endpoint = endpoint
-    }
-
-    private enum CodingKeys: String, CodingKey { case endpoint }
-
-    public init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        let endpoint = try container.decode(String.self, forKey: .endpoint)
-        do {
-            try self.init(endpoint: endpoint)
-        } catch {
-            throw DecodingError.dataCorruptedError(
-                forKey: .endpoint,
-                in: container,
-                debugDescription: "EXO endpoint is not canonical numeric loopback HTTP"
-            )
-        }
-    }
-}
+import ReachHost
 
 public enum DaemonProviderKind: Sendable, Equatable {
     case mlx
@@ -135,8 +111,8 @@ public struct DaemonConfig: Codable, Sendable {
     }
 
     public var providerKind: DaemonProviderKind {
-        guard let exo, let endpoint = try? EXOEndpoint(exo.endpoint) else { return .mlx }
-        return .exo(authority: endpoint.authority)
+        guard let exo else { return .mlx }
+        return .exo(authority: exo.authority)
     }
 
     public func makeFilling() throws -> any SlotFilling {

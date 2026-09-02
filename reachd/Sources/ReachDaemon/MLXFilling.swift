@@ -5,6 +5,7 @@ import MLXGuidedGeneration
 import MLXHuggingFace
 import MLXLLM
 import MLXLMCommon
+import ReachHost
 import ReachWire
 import Tokenizers
 
@@ -85,7 +86,7 @@ public final class MLXFilling: SlotFilling {
         let task = Task {
             do {
                 let container = try await box.get(configuration: configuration)
-                let messages = TranscriptChat.messages(from: request.transcript)
+                let messages = TranscriptChat.messages(from: request.portableTranscript)
                 let maxTokens = request.options.maximumResponseTokens ?? 512
                 let schemaJSON = try request.schema.map(ResponseGuidance.schemaJSON)
                 let tools = try ToolRendering.specs(for: request)

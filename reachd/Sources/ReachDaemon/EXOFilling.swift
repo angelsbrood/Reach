@@ -1,6 +1,8 @@
 import CoreFoundation
 import Foundation
-import FoundationModels
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import ReachWire
 
 /// One operator-managed EXO API behind Reach's existing provider slot.
@@ -14,7 +16,7 @@ public final class EXOFilling: SlotFilling, @unchecked Sendable {
     public let displayName: String
     public let capabilities: [String] = []
 
-    let endpoint: EXOEndpoint
+    package let endpoint: EXOEndpoint
     let loader: any EXOHTTPLoading
     let clock: any EXOClock
     let testProbe: EXOOperationTestProbe?
@@ -53,7 +55,7 @@ public final class EXOFilling: SlotFilling, @unchecked Sendable {
         self.productionDelegate = nil
     }
 
-    var loaderStartCount: Int { loader.startCount }
+    package var loaderStartCount: Int { loader.startCount }
 
     static func lockedSessionConfiguration() -> URLSessionConfiguration {
         let configuration = URLSessionConfiguration.ephemeral
@@ -264,12 +266,12 @@ public enum EXOFillingError: Error, Sendable, Equatable, CustomStringConvertible
 
 // MARK: - Exact endpoint and request mapping
 
-struct EXOEndpoint: Sendable, Equatable {
-    let rawValue: String
-    let authority: String
-    let baseURL: URL
+package struct EXOEndpoint: Sendable, Equatable {
+    package let rawValue: String
+    package let authority: String
+    package let baseURL: URL
 
-    init(_ rawValue: String) throws {
+    package init(_ rawValue: String) throws {
         let portText: Substring
         let authority: String
         if rawValue.hasPrefix("http://127.0.0.1:") {
@@ -296,7 +298,7 @@ struct EXOEndpoint: Sendable, Equatable {
         self.baseURL = url
     }
 
-    func url(path: String) -> URL {
+    package func url(path: String) -> URL {
         // Construction follows exact validation; neither input can contain a
         // slash that Foundation can normalize into a different authority.
         URL(string: rawValue + path)!
@@ -308,7 +310,7 @@ enum EXORequestEncoder {
         guard request.tools.isEmpty else {
             throw EXOFillingError.unsupportedRequest("offered tools")
         }
-        guard request.schema == nil else {
+        guard request.portableSchema == nil else {
             throw EXOFillingError.unsupportedRequest("response schema")
         }
         guard request.context.includeSchemaInPrompt != true else {
@@ -321,7 +323,7 @@ enum EXORequestEncoder {
             throw EXOFillingError.unsupportedRequest("required tool calling without tools")
         }
 
-        let entries = Array(request.transcript)
+        let entries = Array(request.portableTranscript)
         guard entries.count <= EXOLimits.transcriptMessages else {
             throw EXOFillingError.requestLimit("transcript message count")
         }
@@ -329,7 +331,7 @@ enum EXORequestEncoder {
         messages.reserveCapacity(entries.count)
         for entry in entries {
             let role: String
-            let segments: [Transcript.Segment]
+            let segments: [WireTranscript.Segment]
             switch entry {
             case .instructions(let value):
                 guard value.toolDefinitions.isEmpty else {
@@ -350,8 +352,6 @@ enum EXORequestEncoder {
                 throw EXOFillingError.unsupportedRequest("reasoning transcript")
             case .toolCalls, .toolOutput:
                 throw EXOFillingError.unsupportedRequest("tool-bearing transcript")
-            @unknown default:
-                throw EXOFillingError.unsupportedRequest("unknown transcript entry")
             }
             var text = ""
             for segment in segments {
@@ -2053,9 +2053,16 @@ struct EXOSSEParser: Sendable {
 
 enum EXONumber {
     static func integer(_ value: Any?) -> Int? {
-        guard let number = value as? NSNumber,
+        guard let number = value as? NSNumber else { return nil }
+        // JSONSerialization preserves whether a number was encoded as an
+        // integer or floating point in NSNumber's Objective-C type encoding.
+        // Inspect that encoding directly because swift-corelibs-foundation
+        // does not toll-free bridge NSNumber to CFNumber.
+        let encoding = String(cString: number.objCType)
+        guard encoding != "f",
+              encoding != "d",
+              encoding != "D",
               CFGetTypeID(number) != CFBooleanGetTypeID(),
-              !CFNumberIsFloatType(number),
               number.int64Value >= 0,
               number.uint64Value <= UInt64(Int.max)
         else { return nil }

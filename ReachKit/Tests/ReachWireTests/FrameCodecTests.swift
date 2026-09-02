@@ -1,5 +1,7 @@
 import Foundation
+#if canImport(FoundationModels)
 import FoundationModels
+#endif
 import Testing
 @testable import ReachWire
 
@@ -319,6 +321,7 @@ private func roundTrip<F: WireFrame>(_ frame: F) throws -> F {
     }
 }
 
+#if canImport(FoundationModels)
 @Suite struct GenerationRequestTests {
     private func sampleTranscript() -> Transcript {
         let tool = Transcript.ToolDefinition(
@@ -344,6 +347,217 @@ private func roundTrip<F: WireFrame>(_ frame: F) throws -> F {
             )
         )
         return Transcript(entries: [instructions, prompt])
+    }
+
+    private func validRequestObject() throws -> [String: Any] {
+        let request = WireGenerationRequest(
+            id: try #require(UUID(uuidString: "00000000-0000-0000-0000-000000000057")),
+            transcript: sampleTranscript(),
+            tools: [WireToolDefinition(
+                name: "lookup",
+                description: "Looks a thing up.",
+                parameters: GenerationSchema(type: GeneratedContent.self, properties: [])
+            )],
+            schema: GenerationSchema(type: GeneratedContent.self, properties: [])
+        )
+        return try #require(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(request)) as? [String: Any]
+        )
+    }
+
+    private func requestData(
+        mutating mutation: (inout [String: Any]) throws -> Void
+    ) throws -> Data {
+        var object = try validRequestObject()
+        try mutation(&object)
+        return try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+    }
+
+    private func expectRequestDataCorrupted(_ data: Data, _ label: String) {
+        do {
+            _ = try JSONDecoder().decode(WireGenerationRequest.self, from: data)
+            Issue.record("\(label) unexpectedly crossed the Apple wire boundary")
+        } catch DecodingError.dataCorrupted {
+            // The corresponding Foundation Models native value rejected it.
+        } catch {
+            Issue.record("\(label) produced \(error), expected DecodingError.dataCorrupted")
+        }
+    }
+
+    @Test func malformedNativeValuesFailDuringWholeRequestDecode() throws {
+        let malformedSchema: [String: Any] = ["type": "future"]
+
+        expectRequestDataCorrupted(try requestData { request in
+            request["schema"] = malformedSchema
+        }, "top-level response schema")
+
+        expectRequestDataCorrupted(try requestData { request in
+            request["tools"] = [[
+                "description": "Looks a thing up.",
+                "name": "lookup",
+                "parameters": malformedSchema,
+            ]]
+        }, "enabled tool schema")
+
+        expectRequestDataCorrupted(try requestData { request in
+            request["transcript"] = [
+                "transcript": ["entries": [[
+                    "contents": [["id": "prompt-text", "text": "Prompt.", "type": "text"]],
+                    "contextOptions": [:],
+                    "id": "prompt",
+                    "options": [:],
+                    "responseFormat": [
+                        "jsonSchema": ["name": "Bad", "schema": malformedSchema],
+                        "type": "jsonSchema",
+                    ],
+                    "role": "user",
+                ]]],
+                "type": "FoundationModels.Transcript",
+                "version": "1.1",
+            ]
+        }, "transcript response-format schema")
+
+        expectRequestDataCorrupted(try requestData { request in
+            request["transcript"] = [
+                "transcript": ["entries": [[
+                    "id": "tool-calls",
+                    "role": "response",
+                    "toolCalls": [[
+                        "arguments": "not-json",
+                        "id": "call",
+                        "name": "lookup",
+                    ]],
+                ]]],
+                "type": "FoundationModels.Transcript",
+                "version": "1.1",
+            ]
+        }, "transcript tool-call arguments")
+    }
+
+    @Test func portableSchemaCanonicalizationMatchesTheCurrentNativeDecoder() throws {
+        let sources = [
+            #"{"future":true,"minItems":1,"minLength":1,"type":"string"}"#,
+            #"{"const":"fixed","title":"Ignored","type":"string"}"#,
+            #"{"enum":["a","b"],"title":"Choice","type":"string"}"#,
+            #"{"enum":[],"type":"string"}"#,
+            #"{"enum":["a"],"pattern":"x","type":"string"}"#,
+            #"{"pattern":"^[a-z]+$","type":"string"}"#,
+            #"{"minimum":1,"pattern":"ignored","title":"Ignored","type":"integer"}"#,
+            #"{"maximum":3.5,"minimum":1,"type":"number"}"#,
+            #"{"maximum":18446744073709551615,"type":"number"}"#,
+            #"{"minimum":-18446744073709551615,"type":"number"}"#,
+            #"{"items":{"type":"string"},"maxItems":3,"minItems":1,"title":"Ignored","type":"array"}"#,
+            #"{"additionalProperties":true,"properties":{"dropped":{"type":"integer"},"kept":{"type":"string"}},"required":["dropped","kept","missing"],"title":"Object","type":"object","x-order":["kept"]}"#,
+            #"{"additionalProperties":false,"properties":{"a":{"type":"string"},"b":{"type":"integer"}},"required":["b","a"],"title":"Object","type":"object","x-order":["a","b"]}"#,
+            #"{"anyOf":[{"type":"string"},{"type":"integer"}],"description":"D","title":"Any","type":"boolean"}"#,
+            #"{"description":"Root D","items":{"description":"Array D","items":{"description":"Item D","enum":["a"],"title":"Item","type":"string"},"type":"array"},"type":"array"}"#,
+            #"{"anyOf":[{"description":"D","enum":["x"],"title":"Choice","type":"string"}],"title":"Root"}"#,
+            #"{"additionalProperties":false,"properties":{"x":{"description":"D","enum":["x"],"title":"Choice","type":"string"}},"required":["x"],"title":"Root","type":"object","x-order":["x"]}"#,
+            ##"{"$defs":{"Child":{"additionalProperties":false,"properties":{},"required":[],"title":"Child","type":"object","x-order":[]}},"items":{"$ref":"Child","description":"D"},"type":"array"}"##,
+            ##"{"$defs":{"Child":{"additionalProperties":false,"properties":{},"required":[],"title":"Child","type":"object","x-order":[]}},"anyOf":[{"$ref":"Child","description":"D"}],"title":"Root"}"##,
+            ##"{"$defs":{"Child":{"additionalProperties":false,"properties":{},"required":[],"title":"Child","type":"object","x-order":[]}},"additionalProperties":false,"properties":{"x":{"$ref":"Child","description":"D"}},"required":["x"],"title":"Root","type":"object","x-order":["x"]}"##,
+            #"{"items":{"additionalProperties":false,"description":"Child D","properties":{},"required":[],"title":"Child","type":"object","x-order":[]},"type":"array"}"#,
+            #"{"anyOf":[{"additionalProperties":false,"description":"Child D","properties":{},"required":[],"title":"Child","type":"object","x-order":[]}],"title":"Root"}"#,
+            #"{"additionalProperties":false,"properties":{"object":{"additionalProperties":false,"description":"Object D","properties":{},"required":[],"title":"Nested","type":"object","x-order":[]},"string":{"description":"String D","type":"string"},"union":{"anyOf":[{"type":"string"}],"description":"Union D","title":"Union"}},"required":["object","string","union"],"title":"Root","type":"object","x-order":["object","string","union"]}"#,
+            #"{"$defs":{"A":{"type":"string"}},"type":"string"}"#,
+            #"{"$defs":{"A":{"type":"future"}},"type":"string"}"#,
+            #"{"$defs":1,"type":"string"}"#,
+            ##"{"additionalProperties":false,"properties":{"dropped":{"$ref":"#/$defs/A"},"kept":{"type":"string"}},"required":["dropped","kept"],"title":"Root","type":"object","x-order":["kept"]}"##,
+            #"{"additionalProperties":false,"properties":{"dropped":{"$ref":"external"},"kept":{"type":"string"}},"required":["dropped","kept"],"title":"Root","type":"object","x-order":["kept"]}"#,
+            ##"{"$defs":{"raw-key":{"additionalProperties":false,"properties":{"value":{"type":"string"}},"required":["value"],"title":"A","type":"object","x-order":["value"]}},"additionalProperties":false,"properties":{"a":{"$ref":"A"}},"required":["a"],"title":"Root","type":"object","x-order":["a"]}"##,
+            ##"{"$defs":{"raw-key":{"additionalProperties":false,"properties":{"value":{"type":"string"}},"required":["value"],"title":"B","type":"object","x-order":["value"]}},"additionalProperties":false,"properties":{"b":{"$ref":"B"}},"required":["b"],"title":"Root","type":"object","x-order":["b"]}"##,
+            ##"{"$defs":{"A":{"additionalProperties":false,"properties":{"value":{"type":"string"}},"required":["value"],"title":"A","type":"object","x-order":["value"]},"Unused":{"additionalProperties":false,"properties":{},"required":[],"title":"Unused","type":"object","x-order":[]}},"additionalProperties":false,"properties":{"a":{"$ref":"#/$defs/A"}},"required":["a"],"title":"Root","type":"object","x-order":["a"]}"##,
+        ]
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        for source in sources {
+            let data = Data(source.utf8)
+            let portable = try JSONDecoder().decode(WireGenerationSchema.self, from: data)
+            let native = try JSONDecoder().decode(GenerationSchema.self, from: data)
+            #expect(try encoder.encode(portable) == encoder.encode(native), Comment(rawValue: source))
+        }
+    }
+
+    @Test func portableToolOutputIdentityMatchesTheCurrentNativeDecoder() throws {
+        let source = Data(#"{"transcript":{"entries":[{"contents":[],"id":"entry-id","role":"tool","toolCallID":"call-id","toolName":"lookup"}]},"type":"FoundationModels.Transcript","version":"1.1"}"#.utf8)
+        let portable = try JSONDecoder().decode(WireTranscript.self, from: source)
+        let native = try JSONDecoder().decode(Transcript.self, from: source)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        #expect(try encoder.encode(portable) == encoder.encode(native))
+    }
+
+    @Test func portableResponseMetadataMatchesTheCurrentNativeDecoder() throws {
+        let sources = [
+            #"{"transcript":{"entries":[{"assets":["a"],"contents":[],"id":"response","role":"response"}]},"type":"FoundationModels.Transcript","version":"1.1"}"#,
+            #"{"transcript":{"entries":[{"assets":["a"],"contents":[],"id":"response","metadata":{"assetIDs":["stale"],"foo":true},"role":"response"}]},"type":"FoundationModels.Transcript","version":"1.1"}"#,
+            #"{"transcript":{"entries":[{"assets":[],"contents":[],"id":"response","role":"response"}]},"type":"FoundationModels.Transcript","version":"1.1"}"#,
+            #"{"transcript":{"entries":[{"assets":[],"contents":[],"id":"response","metadata":{"assetIDs":["stale"]},"role":"response"}]},"type":"FoundationModels.Transcript","version":"1.1"}"#,
+            #"{"transcript":{"entries":[{"contents":[],"id":"response","metadata":{"assetIDs":["stale"]},"role":"response"}]},"type":"FoundationModels.Transcript","version":"1.1"}"#,
+            #"{"transcript":{"entries":[{"contents":[],"id":"response","metadata":{"assetIDs":[],"foo":true},"role":"response"}]},"type":"FoundationModels.Transcript","version":"1.1"}"#,
+            #"{"transcript":{"entries":[{"contents":[],"id":"response","metadata":{"assetIDs":"raw"},"role":"response"}]},"type":"FoundationModels.Transcript","version":"1.1"}"#,
+            #"{"transcript":{"entries":[{"contents":[],"id":"response","metadata":{"assetIDs":[1]},"role":"response"}]},"type":"FoundationModels.Transcript","version":"1.1"}"#,
+            #"{"transcript":{"entries":[{"contents":[],"id":"response","metadata":{"assetIDs":null},"role":"response"}]},"type":"FoundationModels.Transcript","version":"1.1"}"#,
+        ]
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        for source in sources {
+            let data = Data(source.utf8)
+            let portable = try JSONDecoder().decode(WireTranscript.self, from: data)
+            let native = try JSONDecoder().decode(Transcript.self, from: data)
+            #expect(try encoder.encode(portable) == encoder.encode(native), Comment(rawValue: source))
+        }
+    }
+
+    @Test func portableResponseFormatIdentityMatchesTheCurrentNativeDecoder() throws {
+        let sources = [
+            #"{"transcript":{"entries":[{"contents":[],"contextOptions":{},"id":"prompt","options":{},"responseFormat":{"jsonSchema":{"description":"Outer D","name":"Outer","schema":{"description":"Inner D","enum":["x"],"title":"Inner","type":"string"}},"type":"jsonSchema"},"role":"user"}]},"type":"FoundationModels.Transcript","version":"1.1"}"#,
+            #"{"transcript":{"entries":[{"contents":[],"contextOptions":{},"id":"prompt","options":{},"responseFormat":{"jsonSchema":{"description":"Outer D","name":"Outer","schema":{"enum":["x"],"type":"string"}},"type":"jsonSchema"},"role":"user"}]},"type":"FoundationModels.Transcript","version":"1.1"}"#,
+            #"{"transcript":{"entries":[{"contents":[],"contextOptions":{},"id":"prompt","options":{},"responseFormat":{"jsonSchema":{"description":"Outer D","name":"Outer","schema":{"items":{"enum":["x"],"title":"Choice","type":"string"},"type":"array"}},"type":"jsonSchema"},"role":"user"}]},"type":"FoundationModels.Transcript","version":"1.1"}"#,
+        ]
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        for source in sources {
+            let data = Data(source.utf8)
+            let portable = try JSONDecoder().decode(WireTranscript.self, from: data)
+            let native = try JSONDecoder().decode(Transcript.self, from: data)
+            #expect(try encoder.encode(portable) == encoder.encode(native), Comment(rawValue: source))
+        }
+    }
+
+    @Test func deferredNativeConstructionRetainsASafeNativeReadPath() throws {
+        let nativeSchema = GenerationSchema(type: GeneratedContent.self, properties: [])
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let schemaJSON = try encoder.encode(nativeSchema)
+        let deferredSchema = WireGenerationSchema(
+            deferredEncodingError: "forced portable conversion failure",
+            nativeJSON: schemaJSON
+        )
+        let tool = WireToolDefinition(
+            name: "lookup",
+            description: "Looks a thing up.",
+            portableParameters: deferredSchema
+        )
+        #expect(try encoder.encode(tool.parameters) == schemaJSON)
+        #expect(throws: WirePortableValueError.self) {
+            _ = try JSONEncoder().encode(tool)
+        }
+
+        let nativeTranscript = sampleTranscript()
+        let transcriptJSON = try JSONEncoder().encode(nativeTranscript)
+        let deferredTranscript = WireTranscript(
+            deferredEncodingError: "forced portable conversion failure",
+            nativeJSON: transcriptJSON
+        )
+        let request = WireGenerationRequest(
+            id: UUID(),
+            portableTranscript: deferredTranscript
+        )
+        #expect(request.transcript == nativeTranscript)
+        #expect(throws: WirePortableValueError.self) {
+            _ = try JSONEncoder().encode(request)
+        }
     }
 
     @Test func transcriptSurvivesTheWireByteIdentically() throws {
@@ -404,3 +618,4 @@ private func roundTrip<F: WireFrame>(_ frame: F) throws -> F {
         #expect(nativeAgain == native)
     }
 }
+#endif
