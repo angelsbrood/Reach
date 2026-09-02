@@ -156,12 +156,106 @@ operator state. `remove.sh`, `configure-node.sh` and
 `purge-created-config.sh` share the same lock and refuse an incomplete
 transaction.
 
+## Offline cluster-authority bootstrap
+
+`reach-exo-bootstrap` is a private Darwin/arm64 operator command for creating
+the configuration and P-256 mTLS authority for exactly one coordinator, one
+worker, and one host connector. It imports the fixed package/configuration
+contracts above but is not included in the Linux payload and never discovers,
+downloads, installs, starts, or contacts anything. It does not use Keychain,
+environment defaults, DNS, SSH state, `.env.local`, or the network.
+
+The strict inventory declares only schema version 1, a safe namespace, an
+absolute canonical final authority root, one RFC1918 `/24` through `/29`, the
+three distinct usable IPv4 endpoints, direct-gateway or loopback-tunnel mode,
+two safe node/interface/MAC records, and a UTC certificate expiry 24 hours
+through 825 days from creation. Ports, model and package identities, peer
+relations, 14/14 ranges, server names, TLS paths, and roles are derived.
+Unknown or trailing fields refuse.
+
+```json
+{
+  "schema_version": 1,
+  "namespace": "reach-lab",
+  "authority_root": "/private/path/final-authority",
+  "private_network_cidr": "192.168.108.0/29",
+  "connector_address": "192.168.108.1",
+  "gateway_mode": "direct-gateway",
+  "coordinator": {
+    "name": "reach-exo-a",
+    "address": "192.168.108.2",
+    "interface": "eth0",
+    "mac_address": "52:55:55:00:00:02"
+  },
+  "worker": {
+    "name": "reach-exo-b",
+    "address": "192.168.108.6",
+    "interface": "eth0",
+    "mac_address": "52:55:55:00:00:03"
+  },
+  "certificate_expiry": "2027-09-01T12:00:00Z"
+}
+```
+
+For the fixed account-owned tunnel boundary, change only `gateway_mode` to
+`loopback-tunnel`; the compiler then derives `127.0.0.1:53422` instead of the
+coordinator's direct private gateway.
+
+Build the operator command outside the package payload:
+
+```sh
+CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 \
+  go build -trimpath -buildvcs=false -ldflags '-s -w -buildid=' \
+  -o /private/path/reach-exo-bootstrap ./cmd/reach-exo-bootstrap
+```
+
+Creation is deliberately two-phase. Capture its one-line stdout commitment in
+separately trusted owner-private storage; a zero exit by itself is not
+acceptance. Then start a fresh process and provide the captured digest
+explicitly:
+
+```sh
+umask 077
+/private/path/reach-exo-bootstrap create \
+  --inventory /private/path/cluster-inventory.json \
+  > /private/path/authority-commitment.json
+
+/private/path/reach-exo-bootstrap verify \
+  --authority-root /private/path/final-authority \
+  --expected-authority-sha256 EXPECTED_LOWERCASE_SHA256
+```
+
+The tree is a prepared candidate until that independent verification passes.
+It contains an operator-only CA key, one leaf key per deployment slice, exact
+node/connector JSON, a cluster manifest, and a self-excluding complete file
+manifest. The authority digest is not stored in the tree. Moving the root
+invalidates connector paths and verification.
+
+If creation stops before a complete commitment was captured, inspect which
+single deterministic state remains and discard only that attributable state
+with the same inventory:
+
+```sh
+/private/path/reach-exo-bootstrap recover \
+  --discard-uncommitted --confirm-discard-uncommitted \
+  --inventory /private/path/cluster-inventory.json \
+  --target staging \
+  --commitment-state absent
+```
+
+The target is exactly `staging`, `prepared`, or `quarantine`; commitment state
+is exactly `absent` or `partial`. A complete or uncertain complete commitment
+must be verified, never automatically deleted. Damaged provenance, links,
+widened modes, mismatched inventory, or a conflicting quarantine require
+manual disposition rather than broader deletion authority.
+
 ## Limits
 
 This reference package covers exactly two isolated Linux/arm64 CPU nodes, one
 Qwen snapshot, one 28-layer 14/14 pipeline, and the existing Reach adapter. It
 owns only the exact manual A `0.1.0` to B `0.2.0` update and exact-parent
-rollback described above. It does not own model acquisition, certificate
-issuance, persistent topology, a feed or general version selection, physical
+rollback described above. The bootstrap command owns only offline initial
+issuance for that exact topology; it does not own rotation, revocation, remote
+enrollment, model acquisition, persistent topology, a feed or general version selection, physical
 host deployment, performance, Keeper, public relay, Linux reachd, or any other
 provider/model closure.

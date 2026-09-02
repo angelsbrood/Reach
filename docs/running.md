@@ -1185,6 +1185,39 @@ Wrong/lower/unrelated artifacts, stale or corrupt journals and concurrent
 update, rollback, removal or configuration refuse. Exact syntax and the frozen
 A digest are in `exo-runtime/README.md`.
 
+### Minting one private two-node authority offline
+
+Before copying configuration to either node, build the repository's private
+Darwin/arm64 `reach-exo-bootstrap` command and prepare one owner-private JSON
+inventory. The inventory schema and build command are documented in
+`exo-runtime/README.md`. The command fixes the exact B package generation,
+Qwen snapshot, 14/14 layer assignment, ports, peer relationships and TLS role
+names. It accepts no credential, model, layer, port, DNS, discovery or
+extension field and performs no network or Keychain operation.
+
+Run `create` with stdout redirected to a separately trusted owner-private
+commitment file. The published directory is only a prepared candidate. Parse
+the complete lowercase `authority_sha256` from that one-line JSON record, then
+run a separate fresh `verify` process with both the absolute authority root and
+that explicit digest. Do not infer the digest from anything inside the tree.
+Only a successful fresh verification accepts the authority for later physical
+deployment.
+
+The operator slice retains the sole CA private key. Coordinator, worker and
+connector slices each contain only their own leaf key and the public CA. Node
+files declare their `/etc/reach-exo` deployment paths and modes; connector TLS
+paths bind the absolute authority-root spelling. Copying, moving or renaming
+the prepared tree is not accepted deployment and makes verification fail.
+
+An interrupted ceremony is fail-closed. If stdout was absent or partial, use
+`recover --discard-uncommitted` with the same inventory, explicit confirmation,
+the exact deterministic `staging`, `prepared`, or `quarantine` target, and the
+observed `absent` or `partial` commitment state. Recovery checks durable
+`PREPARE.json` provenance and removes it last. A complete or possibly complete
+commitment goes back to fresh verification; it is never an automatic-recovery
+input. Linked, mode-widened, foreign, damaged or mismatched state is left for
+manual disposition.
+
 `systemctl disable --now reach-exo-node` removes publication and provider work;
 disabled state persists across reboot. The bundle remove command deletes its
 unit, immutable program, writable state, runtime files and service-created
