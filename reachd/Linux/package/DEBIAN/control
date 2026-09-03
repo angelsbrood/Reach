@@ -1,0 +1,10 @@
+Package: reachd-linux
+Version: 0.1.0
+Section: net
+Priority: optional
+Architecture: arm64
+Maintainer: Reach Project <noreply@invalid.example>
+Depends: libc6, libgcc-s1, libstdc++6, libcurl4t64, libssl3t64, libnuma1, zlib1g, libzstd1, systemd, libmsquic (= 2.5.11)
+Description: Explicit Linux Reach host service
+ A bounded QUIC-v1/TLS-1.3 ReachWire listener backed by an operator-managed
+ numeric-loopback EXO endpoint. Installation is inert.

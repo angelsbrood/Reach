@@ -108,8 +108,75 @@ let reachHostTestsTarget: Target = .testTarget(
 )
 
 #if os(Linux)
-let reachdProducts: [Product] = [reachHostProduct]
-let reachdTargets: [Target] = [reachHostTarget, reachHostTestsTarget]
+let reachdProducts: [Product] = [
+    reachHostProduct,
+    .executable(name: "reachd-linux", targets: ["reachd-linux"]),
+]
+let reachdTargets: [Target] = [
+    reachHostTarget,
+    .target(
+        name: "CReachLinuxMsQuic",
+        path: "Sources/CReachLinuxMsQuic",
+        publicHeadersPath: "include",
+        cSettings: [
+            .headerSearchPath("vendor"),
+        ],
+        linkerSettings: [
+            // Microsoft's runtime package intentionally exposes only the
+            // stable ABI SONAME, not an unversioned development symlink.
+            .unsafeFlags(["-Xlinker", "-l:libmsquic.so.2"]),
+        ]
+    ),
+    .target(
+        name: "ReachLinuxTransport",
+        dependencies: [
+            "CReachLinuxMsQuic",
+            "ReachHost",
+            .product(name: "ReachWire", package: "ReachKit"),
+        ],
+        path: "Sources/ReachLinuxTransport"
+    ),
+    .target(
+        name: "ReachLinuxService",
+        dependencies: [
+            "ReachHost",
+            "ReachLinuxTransport",
+            .product(name: "ReachWire", package: "ReachKit"),
+        ],
+        path: "Sources/ReachLinuxService"
+    ),
+    .executableTarget(
+        name: "reachd-linux",
+        dependencies: ["ReachLinuxService"],
+        path: "Sources/reachd-linux",
+        linkerSettings: [
+            .unsafeFlags([
+                "-Xlinker", "-z", "-Xlinker", "separate-code",
+                "-Xlinker", "-z", "-Xlinker", "noexecstack",
+            ]),
+        ]
+    ),
+    reachHostTestsTarget,
+    .testTarget(
+        name: "ReachLinuxTransportTests",
+        dependencies: [
+            "CReachLinuxMsQuic",
+            "ReachLinuxTransport",
+            .product(name: "ReachWire", package: "ReachKit"),
+        ],
+        path: "Tests/ReachLinuxTransportTests"
+    ),
+    .testTarget(
+        name: "ReachLinuxServiceTests",
+        dependencies: [
+            "ReachHost",
+            "ReachLinuxService",
+            "ReachLinuxTransport",
+            .product(name: "ReachWire", package: "ReachKit"),
+        ],
+        path: "Tests/ReachLinuxServiceTests"
+    ),
+]
 #else
 let reachdProducts: [Product] = [
     .executable(name: "reachd", targets: ["reachd"]),

@@ -91,6 +91,14 @@ rather than at the application layer. The ceremony speaks **`reach-enroll/0`**
 on a sibling listener with server-authenticated TLS only, because at enrollment
 time the client's certificate is the thing being asked for.
 
+S56 contains an **unaccepted Linux transport candidate** intended to carry this
+same session road through MsQuic using IETF QUIC v1, TLS 1.3, and `reach/0`,
+without an enrollment ALPN or TCP/HTTP3/sidecar fallback. Its private-CA peer
+authentication, peer-DER handoff, stream ceilings, borrowed-buffer ownership,
+cancellation, and Apple interoperability are still closeout predicates, not
+current wire capability. The accepted wire contract remains the existing
+ReachWire framing and 16 MiB frame ceiling; this candidate does not change it.
+
 Both are found over Bonjour — `_reach._udp` for sessions,
 `_reach-enroll._udp` for the door, advertised under the same cluster name. The
 session advertisement carries `ca`, the base64url SHA-256 of the cluster CA's

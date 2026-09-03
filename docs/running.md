@@ -1,5 +1,48 @@
 # Running the daemon
 
+## Linux service candidate — not accepted or operable
+
+S56 currently contains an **unaccepted implementation candidate** for a native
+Linux `reachd-linux` composition. It is under correction and must not be
+installed, enabled, or used as an operator runbook. Architecture has not
+accepted Apple/Linux interoperability, authenticated peer-DER delivery,
+stream/receive/cancellation limits, package lifecycle, restart behavior, or
+service teardown on these bytes.
+
+The candidate is intentionally limited to the existing `ReachHost` and
+ReachWire state machine, a Linux-only MsQuic 2.5.11 adapter, and an externally
+managed numeric-loopback EXO HTTP endpoint. Its proposed package subtree is
+`reachd/Linux/package`; it excludes the Apple client, enrollment, Bonjour,
+MLX, model bytes, EXO lifecycle, and alternate application protocols. These
+are source boundaries, not earned deployment capability.
+
+The candidate configuration shape under test is one strict schema-1 document,
+at most 65,536 bytes:
+
+```json
+{
+  "schemaVersion": 1,
+  "clusterDisplayName": "Synthetic Cluster",
+  "listen": { "address": "0.0.0.0", "port": 4433 },
+  "advertisedRoads": [
+    { "address": "192.0.2.10", "port": 4433 }
+  ],
+  "tls": {
+    "clusterCACertificatePath": "/etc/reach/tls/ca.pem",
+    "serverCertificateChainPath": "/etc/reach/tls/server-chain.pem",
+    "serverPrivateKeyPath": "/etc/reach/tls/server-key.pem"
+  },
+  "modelID": "synthetic-model",
+  "exoEndpoint": "http://127.0.0.1:52415"
+}
+```
+
+The candidate is intended to refuse unknown, duplicate, missing, mistyped,
+non-NFC, noncanonical, widened, linked, or metadata-weakened input before bind,
+and to advertise only configured roads. Those behaviors and the proposed
+`/run/reach/status.json` record remain verification targets. No enablement,
+installation, removal, or identity-management procedure is accepted here.
+
 ## Building the private unsigned Mac package
 
 `Tools/ReleasePackage` builds and independently verifies the deterministic

@@ -1,0 +1,374 @@
+import Dispatch
+import Foundation
+import Glibc
+import ReachHost
+import ReachLinuxTransport
+
+public enum LinuxServiceRuntimeError: Error, Sendable, Equatable, CustomStringConvertible, LocalizedError {
+    public enum StartupBoundary: String, Sendable, Equatable {
+        case exoPreflight
+        case credentialOrListener
+    }
+
+    case startupRefused(StartupBoundary, String)
+    case listenerEnded
+    case runtime(String)
+
+    public var description: String {
+        switch self {
+        case .startupRefused(let boundary, let detail):
+            "the Linux reachd \(boundary.rawValue) startup boundary refused: \(detail)"
+        case .listenerEnded:
+            "the Linux QUIC listener ended without a stop signal"
+        case .runtime(let detail):
+            "the Linux reachd service failed: \(detail)"
+        }
+    }
+
+    public var errorDescription: String? { description }
+}
+
+public enum LinuxServiceExitStatus {
+    public static let noRestart: Int32 = 64
+    public static let unexpectedRuntimeFailure: Int32 = 1
+
+    public static func code(for error: any Error) -> Int32 {
+        if error is LinuxServiceConfigurationError {
+            return noRestart
+        }
+        if let runtimeError = error as? LinuxServiceRuntimeError,
+           case .startupRefused = runtimeError {
+            return noRestart
+        }
+        if let transportError = error as? LinuxTransportError,
+           case .startup = transportError {
+            return noRestart
+        }
+        return unexpectedRuntimeFailure
+    }
+}
+
+public struct LinuxServiceStatus: Codable, Sendable, Equatable {
+    public var schemaVersion: Int
+    public var pid: Int32
+    public var ready: Bool
+    public var modelID: String
+    public var boundAddress: String
+    public var boundPort: UInt16
+    public var activeConnections: UInt32
+    public var activeStreams: UInt32
+    public var acceptedConnections: UInt32
+    public var acceptedStreams: UInt32
+    public var refusedConnections: UInt32
+    public var refusedStreams: UInt32
+    public var lastError: String?
+
+    public init(
+        configuration: LinuxServiceConfiguration,
+        ready: Bool,
+        metrics: LinuxTransportMetrics,
+        lastError: String? = nil
+    ) {
+        schemaVersion = 1
+        pid = getpid()
+        self.ready = ready
+        modelID = configuration.modelID
+        boundAddress = configuration.listen.address
+        boundPort = configuration.listen.port
+        activeConnections = metrics.activeConnections
+        activeStreams = metrics.activeStreams
+        acceptedConnections = metrics.acceptedConnections
+        acceptedStreams = metrics.acceptedStreams
+        refusedConnections = metrics.refusedConnections
+        refusedStreams = metrics.refusedStreams
+        self.lastError = lastError.map(Self.boundedError)
+    }
+
+    private static func boundedError(_ source: String) -> String {
+        var result = ""
+        result.reserveCapacity(min(source.utf8.count, 512))
+        for character in source {
+            let candidate = result + String(character)
+            if candidate.utf8.count > 512 { break }
+            result = candidate
+        }
+        return result
+    }
+}
+
+struct LinuxStopRequest: Sendable, Equatable {
+    enum Reason: Sendable, Equatable {
+        case signal(Int32)
+        case failure(String)
+    }
+
+    var reason: Reason
+    var deadline: LinuxShutdownDeadline
+}
+
+actor LinuxStopLatch {
+
+    private var request: LinuxStopRequest?
+    private var waiter: CheckedContinuation<LinuxStopRequest, Never>?
+
+    func request(_ request: LinuxStopRequest) {
+        guard self.request == nil else { return }
+        self.request = request
+        waiter?.resume(returning: request)
+        waiter = nil
+    }
+
+    func wait() async -> LinuxStopRequest {
+        if let request { return request }
+        return await withCheckedContinuation { continuation in
+            waiter = continuation
+        }
+    }
+}
+
+private actor LinuxStreamRegistry {
+    private struct Entry: Sendable {
+        var stream: LinuxSessionStream
+        var task: Task<Void, Never>
+    }
+
+    private var entries: [UUID: Entry] = [:]
+
+    func start(_ stream: LinuxSessionStream, host: SessionHost) {
+        let id = UUID()
+        let task = Task { [weak self] in
+            await host.serve(stream)
+            await self?.finished(id)
+        }
+        entries[id] = Entry(stream: stream, task: task)
+    }
+
+    private func finished(_ id: UUID) {
+        entries.removeValue(forKey: id)
+    }
+
+    func cancelAndWait() async {
+        let snapshot = Array(entries.values)
+        snapshot.forEach { entry in
+            entry.stream.cancel()
+            entry.task.cancel()
+        }
+        for entry in snapshot {
+            await entry.task.value
+        }
+        entries.removeAll()
+    }
+
+    var count: Int { entries.count }
+}
+
+private final class LinuxSignalMonitor: @unchecked Sendable {
+    struct Event: Sendable {
+        var signal: Int32
+        var deadline: LinuxShutdownDeadline
+    }
+
+    let signals: AsyncStream<Event>
+    private let term: DispatchSourceSignal
+    private let interrupt: DispatchSourceSignal
+
+    init() {
+        _ = Glibc.signal(SIGTERM, SIG_IGN)
+        _ = Glibc.signal(SIGINT, SIG_IGN)
+        let pair = AsyncStream<Event>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        signals = pair.stream
+        let queue = DispatchQueue(label: "reach.linux.signals")
+        term = DispatchSource.makeSignalSource(signal: SIGTERM, queue: queue)
+        interrupt = DispatchSource.makeSignalSource(signal: SIGINT, queue: queue)
+        term.setEventHandler {
+            _ = pair.continuation.yield(Event(
+                signal: SIGTERM,
+                deadline: .startingNow()
+            ))
+        }
+        interrupt.setEventHandler {
+            _ = pair.continuation.yield(Event(
+                signal: SIGINT,
+                deadline: .startingNow()
+            ))
+        }
+        term.resume()
+        interrupt.resume()
+    }
+
+    deinit {
+        term.cancel()
+        interrupt.cancel()
+    }
+}
+
+enum LinuxStatusWriter {
+    static let productionPath = "/run/reach/status.json"
+
+    static func write(_ status: LinuxServiceStatus, path: String = productionPath) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let data = try encoder.encode(status)
+        let destination = URL(fileURLWithPath: path)
+        let temporary = destination
+            .deletingLastPathComponent()
+            .appendingPathComponent(".status-\(getpid())-\(UUID().uuidString)")
+        do {
+            try data.write(to: temporary, options: [.withoutOverwriting])
+            guard chmod(temporary.path, 0o600) == 0 else {
+                throw LinuxServiceConfigurationError.system("chmod(status)", errno)
+            }
+            guard rename(temporary.path, destination.path) == 0 else {
+                throw LinuxServiceConfigurationError.system("rename(status)", errno)
+            }
+        } catch {
+            try? FileManager.default.removeItem(at: temporary)
+            throw error
+        }
+    }
+}
+
+public enum LinuxServiceRuntime {
+    public static func runProduction() async throws {
+        try await run(configuration: LinuxServiceConfiguration.loadProduction())
+    }
+
+    public static func run(configuration: LinuxServiceConfiguration) async throws {
+        let filling: any SlotFilling
+        do {
+            filling = try PortableEXOHostConfiguration(
+                modelID: configuration.modelID,
+                exo: EXOConfiguration(endpoint: configuration.exoEndpoint)
+            ).makeFilling()
+            try await filling.prewarm()
+        } catch {
+            throw LinuxServiceRuntimeError.startupRefused(
+                .exoPreflight,
+                String(describing: error)
+            )
+        }
+
+        let host = SessionHost(
+            filling: filling,
+            helloAck: { version in
+                configuration.helloAck(version: version, capabilities: filling.capabilities)
+            },
+            sessionOpened: { sessionID, _ in
+                "session \(sessionID) opened on authenticated Linux QUIC"
+            }
+        )
+        let listener: ReachLinuxListener
+        do {
+            listener = try ReachLinuxListener(configuration: configuration.listenerConfiguration)
+        } catch {
+            throw LinuxServiceRuntimeError.startupRefused(
+                .credentialOrListener,
+                String(describing: error)
+            )
+        }
+        let latch = LinuxStopLatch()
+        let registry = LinuxStreamRegistry()
+        let signals = LinuxSignalMonitor()
+
+        let initial = LinuxServiceStatus(
+            configuration: configuration,
+            ready: true,
+            metrics: listener.metrics()
+        )
+        try LinuxStatusWriter.write(initial)
+        try LinuxSystemdNotifier.notify("READY=1\nSTATUS=Reach Linux listener ready")
+
+        let acceptTask = Task {
+            do {
+                while let stream = try await listener.nextStream() {
+                    await registry.start(stream, host: host)
+                }
+                if !Task.isCancelled {
+                    await latch.request(LinuxStopRequest(
+                        reason: .failure(LinuxServiceRuntimeError.listenerEnded.description),
+                        deadline: .startingNow()
+                    ))
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                await latch.request(LinuxStopRequest(
+                    reason: .failure(String(describing: error)),
+                    deadline: .startingNow()
+                ))
+            }
+        }
+        let signalTask = Task {
+            for await event in signals.signals {
+                await latch.request(LinuxStopRequest(
+                    reason: .signal(event.signal),
+                    deadline: event.deadline
+                ))
+                return
+            }
+        }
+        let statusTask = Task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                guard !Task.isCancelled else { return }
+                let status = LinuxServiceStatus(
+                    configuration: configuration,
+                    ready: true,
+                    metrics: listener.metrics()
+                )
+                try? LinuxStatusWriter.write(status)
+            }
+        }
+
+        let request = await latch.wait()
+        let reason = request.reason
+        let deadline = request.deadline
+        try? LinuxSystemdNotifier.notify("STOPPING=1\nSTATUS=Reach Linux listener stopping")
+        acceptTask.cancel()
+        signalTask.cancel()
+        statusTask.cancel()
+
+        let listenerTask = Task<Result<Void, any Error>, Never> {
+            do {
+                try await listener.stop(until: deadline)
+                return .success(())
+            } catch {
+                return .failure(error)
+            }
+        }
+        let registryTask = Task { await registry.cancelAndWait() }
+        let hostTask = Task { await host.shutdown() }
+        await registryTask.value
+        await hostTask.value
+        await acceptTask.value
+        await signalTask.value
+        await statusTask.value
+        let listenerResult = await listenerTask.value
+        var shutdownError: Error?
+        if case .failure(let error) = listenerResult {
+            shutdownError = error
+        } else if deadline.hasExpired() {
+            shutdownError = LinuxTransportError.shutdownTimedOut
+        }
+
+        let finalError: String?
+        switch reason {
+        case .signal:
+            finalError = shutdownError.map(String.init(describing:))
+        case .failure(let detail):
+            finalError = detail
+        }
+        let finalStatus = LinuxServiceStatus(
+            configuration: configuration,
+            ready: false,
+            metrics: listener.metrics(),
+            lastError: finalError
+        )
+        try? LinuxStatusWriter.write(finalStatus)
+
+        if let shutdownError { throw shutdownError }
+        if case .failure(let detail) = reason {
+            throw LinuxServiceRuntimeError.runtime(detail)
+        }
+    }
+}
