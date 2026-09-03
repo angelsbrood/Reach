@@ -1,6 +1,7 @@
 import CReachLinuxMsQuic
 import Dispatch
 import Foundation
+import Glibc
 import ReachHost
 import ReachWire
 
@@ -88,6 +89,11 @@ public struct LinuxTransportMetrics: Sendable, Equatable, Codable {
     public var peakStreams: UInt32
     public var retainedReceiveBytes: UInt64
     public var peakRetainedReceiveBytes: UInt64
+    public var physicalOwnedReceiveBytes: UInt64
+    public var physicalBorrowedReceiveBytes: UInt64
+    public var physicalReceiveBytes: UInt64
+    public var peakPhysicalReceiveBytes: UInt64
+    public var virtualReceiveBytes: UInt64
     public var suspendedReceiveStreams: UInt32
 
     public init(
@@ -102,6 +108,11 @@ public struct LinuxTransportMetrics: Sendable, Equatable, Codable {
         peakStreams: UInt32,
         retainedReceiveBytes: UInt64 = 0,
         peakRetainedReceiveBytes: UInt64 = 0,
+        physicalOwnedReceiveBytes: UInt64 = 0,
+        physicalBorrowedReceiveBytes: UInt64 = 0,
+        physicalReceiveBytes: UInt64 = 0,
+        peakPhysicalReceiveBytes: UInt64 = 0,
+        virtualReceiveBytes: UInt64 = 0,
         suspendedReceiveStreams: UInt32 = 0
     ) {
         self.rawConnections = rawConnections
@@ -115,6 +126,11 @@ public struct LinuxTransportMetrics: Sendable, Equatable, Codable {
         self.peakStreams = peakStreams
         self.retainedReceiveBytes = retainedReceiveBytes
         self.peakRetainedReceiveBytes = peakRetainedReceiveBytes
+        self.physicalOwnedReceiveBytes = physicalOwnedReceiveBytes
+        self.physicalBorrowedReceiveBytes = physicalBorrowedReceiveBytes
+        self.physicalReceiveBytes = physicalReceiveBytes
+        self.peakPhysicalReceiveBytes = peakPhysicalReceiveBytes
+        self.virtualReceiveBytes = virtualReceiveBytes
         self.suspendedReceiveStreams = suspendedReceiveStreams
     }
 }
@@ -199,6 +215,11 @@ private final class ListenerHandle: @unchecked Sendable {
             peakStreams: raw.peak_streams,
             retainedReceiveBytes: raw.retained_receive_bytes,
             peakRetainedReceiveBytes: raw.peak_retained_receive_bytes,
+            physicalOwnedReceiveBytes: raw.physical_owned_receive_bytes,
+            physicalBorrowedReceiveBytes: raw.physical_borrowed_receive_bytes,
+            physicalReceiveBytes: raw.physical_receive_bytes,
+            peakPhysicalReceiveBytes: raw.peak_physical_receive_bytes,
+            virtualReceiveBytes: raw.virtual_receive_bytes,
             suspendedReceiveStreams: raw.suspended_receive_streams
         )
     }
@@ -272,6 +293,28 @@ private final class StreamHandle: @unchecked Sendable {
         precondition(reach_msquic_stream_release_receive_bytes(pointer, count) == reachStatusOK)
     }
 
+    func registerReceiveMapping(_ allocation: FrameAllocation) -> Bool {
+        reach_msquic_stream_register_receive_mapping(
+            pointer,
+            allocation.mappingBase!,
+            allocation.bodyOffset,
+            allocation.count,
+            allocation.mappedLength,
+            allocation.pageSize
+        ) == reachStatusOK
+    }
+
+    func releaseReceiveMapping(_ allocation: FrameMappingIdentity) -> Bool {
+        reach_msquic_stream_release_receive_mapping(
+            pointer,
+            allocation.mappingBase,
+            allocation.bodyOffset,
+            allocation.logicalLength,
+            allocation.mappedLength,
+            allocation.pageSize
+        ) == reachStatusOK
+    }
+
     func blockingSend(_ data: Data) -> Int32 {
         data.withUnsafeBytes { bytes in
             reach_msquic_stream_send(
@@ -299,22 +342,200 @@ struct BlockingRead: Sendable {
     var fin: Bool
 }
 
+struct FrameMappingIdentity: @unchecked Sendable {
+    let mappingBase: UnsafeMutableRawPointer
+    let pointer: UnsafeMutableRawPointer
+    let bodyOffset: Int
+    let logicalLength: Int
+    let mappedLength: Int
+    let pageSize: Int
+}
+
+final class FrameStorageLease: @unchecked Sendable {
+    typealias Releaser = @Sendable (FrameMappingIdentity, Int) -> Bool
+
+    let identity: FrameMappingIdentity
+    private let releaser: Releaser
+    private let lock = NSLock()
+    private var transferredBytes = 0
+    private var releaseStarted = false
+    private var released = false
+    private var cancellationRequested = false
+    private var waiter: CheckedContinuation<Void, any Error>?
+
+    init(identity: FrameMappingIdentity, releaser: @escaping Releaser) {
+        self.identity = identity
+        self.releaser = releaser
+    }
+
+    func recordTransfer(_ count: Int) {
+        lock.lock()
+        precondition(!releaseStarted && count >= 0)
+        transferredBytes += count
+        precondition(transferredBytes <= identity.logicalLength)
+        lock.unlock()
+    }
+
+    func release() {
+        let transferred: Int
+        lock.lock()
+        guard !releaseStarted else {
+            lock.unlock()
+            return
+        }
+        releaseStarted = true
+        transferred = transferredBytes
+        lock.unlock()
+
+        precondition(releaser(identity, transferred), "mapped frame storage release failed")
+
+        let continuation: CheckedContinuation<Void, any Error>?
+        lock.lock()
+        released = true
+        continuation = waiter
+        waiter = nil
+        lock.unlock()
+        continuation?.resume()
+    }
+
+    func waitForRelease() async throws {
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                lock.lock()
+                if released {
+                    lock.unlock()
+                    continuation.resume()
+                } else if cancellationRequested || Task.isCancelled {
+                    lock.unlock()
+                    continuation.resume(throwing: CancellationError())
+                } else {
+                    precondition(waiter == nil)
+                    waiter = continuation
+                    lock.unlock()
+                }
+            }
+        } onCancel: {
+            self.cancelWaiter()
+        }
+    }
+
+    func cancelWaiter() {
+        let continuation: CheckedContinuation<Void, any Error>?
+        lock.lock()
+        cancellationRequested = true
+        continuation = waiter
+        waiter = nil
+        lock.unlock()
+        continuation?.resume(throwing: CancellationError())
+    }
+}
+
 final class FrameAllocation: @unchecked Sendable {
+    enum Storage {
+        case heap
+        case mapped(pageSize: Int, mappedLength: Int)
+    }
+
     private(set) var pointer: UnsafeMutableRawPointer
     let count: Int
+    let storage: Storage
+    let mappingBase: UnsafeMutableRawPointer?
+    let bodyOffset: Int
     private var transferred = false
+    private var lease: FrameStorageLease?
 
     init(count: Int) {
         self.count = count
+        storage = .heap
         pointer = UnsafeMutableRawPointer.allocate(
             byteCount: max(count, 1),
             alignment: MemoryLayout<UInt64>.alignment
         )
+        mappingBase = nil
+        bodyOffset = 0
+    }
+
+    private init(
+        count: Int,
+        mappingBase: UnsafeMutableRawPointer,
+        bodyOffset: Int,
+        pageSize: Int,
+        mappedLength: Int
+    ) {
+        self.count = count
+        self.mappingBase = mappingBase
+        self.bodyOffset = bodyOffset
+        pointer = mappingBase.advanced(by: bodyOffset)
+        storage = .mapped(pageSize: pageSize, mappedLength: mappedLength)
+    }
+
+    static func mapped(count: Int) throws -> FrameAllocation {
+        let pageSize = Int(sysconf(Int32(_SC_PAGESIZE)))
+        guard count > 0,
+              pageSize > 0,
+              pageSize <= Int(REACH_MSQUIC_MAX_RECEIVE_PAGE_SIZE),
+              pageSize.nonzeroBitCount == 1,
+              Int(REACH_MSQUIC_RECEIVE_COPY_QUANTUM).isMultiple(of: pageSize),
+              Int(REACH_MSQUIC_MAX_FRAME_LENGTH).isMultiple(of: pageSize) else {
+            throw LinuxTransportError.receive("unsupported receive page geometry")
+        }
+        let remainder = count % pageSize
+        let mappedLength = count + (remainder == 0 ? 0 : pageSize - remainder)
+        let bodyOffset = count < pageSize ? pageSize - count : 0
+        guard mappedLength <= Int(REACH_MSQUIC_MAX_FRAME_LENGTH),
+              let mappingBase = mmap(
+                nil,
+                mappedLength,
+                PROT_READ | PROT_WRITE,
+                MAP_PRIVATE | MAP_ANONYMOUS,
+                -1,
+                0
+              ), mappingBase != MAP_FAILED else {
+            throw LinuxTransportError.receive("could not reserve frame body mapping")
+        }
+        return FrameAllocation(
+            count: count,
+            mappingBase: mappingBase,
+            bodyOffset: bodyOffset,
+            pageSize: pageSize,
+            mappedLength: mappedLength
+        )
+    }
+
+    var pageSize: Int {
+        guard case .mapped(let pageSize, _) = storage else { return 0 }
+        return pageSize
+    }
+
+    var mappedLength: Int {
+        guard case .mapped(_, let mappedLength) = storage else { return 0 }
+        return mappedLength
+    }
+
+    var mappingIdentity: FrameMappingIdentity {
+        precondition(mappedLength > 0)
+        return FrameMappingIdentity(
+            mappingBase: mappingBase!,
+            pointer: pointer,
+            bodyOffset: bodyOffset,
+            logicalLength: count,
+            mappedLength: mappedLength,
+            pageSize: pageSize
+        )
+    }
+
+    func bindLease(_ lease: FrameStorageLease) {
+        precondition(self.lease == nil && lease.identity.pointer == pointer)
+        self.lease = lease
     }
 
     deinit {
         if !transferred {
-            pointer.deallocate()
+            if let lease {
+                lease.release()
+            } else {
+                releaseUnboundStorage()
+            }
         }
     }
 
@@ -322,25 +543,57 @@ final class FrameAllocation: @unchecked Sendable {
         pointer.load(fromByteOffset: index, as: UInt8.self)
     }
 
-    func transferToData() -> Data {
-        precondition(!transferred)
+    func transferToData() -> (Data, FrameStorageLease) {
+        precondition(!transferred && count > 0)
+        let lease = self.lease!
         transferred = true
-        return Data(
-            bytesNoCopy: pointer,
-            count: count,
-            deallocator: .custom { pointer, _ in pointer.deallocate() }
+        // Linux Foundation copies custom NSData subclasses and inlines short
+        // Data values. A sub-page body therefore occupies the tail of its
+        // already-charged page: the full-page owner stays external, while the
+        // nonzero-offset slice exposes only the logical bytes and retains the
+        // same custom-deallocator lease.
+        let backing = Data(
+            bytesNoCopy: mappingBase!,
+            count: bodyOffset + count,
+            deallocator: .custom { [lease] _, _ in lease.release() }
         )
+        let data = bodyOffset == 0 ? backing : backing.dropFirst(bodyOffset)
+        precondition(data.count == count)
+        precondition(data.withUnsafeBytes { $0.baseAddress } == UnsafeRawPointer(pointer))
+        return (data, lease)
+    }
+
+    private func releaseUnboundStorage() {
+        switch storage {
+        case .heap:
+            pointer.deallocate()
+        case .mapped(_, let mappedLength):
+            precondition(munmap(mappingBase!, mappedLength) == 0)
+        }
     }
 }
 
 protocol LinuxFrameByteSource: Sendable {
     func read(into allocation: FrameAllocation, offset: Int, count: Int) async -> BlockingRead
     func releaseRetainedBytes(_ count: Int)
+    func registerBodyMapping(_ allocation: FrameAllocation) -> Bool
+    func releaseBodyMapping(_ identity: FrameMappingIdentity, transferredBytes: Int) -> Bool
     func cancel()
 }
 
 extension LinuxFrameByteSource {
     func releaseRetainedBytes(_: Int) {}
+
+    func registerBodyMapping(_: FrameAllocation) -> Bool { true }
+
+    func releaseBodyMapping(
+        _ identity: FrameMappingIdentity,
+        transferredBytes: Int
+    ) -> Bool {
+        guard munmap(identity.mappingBase, identity.mappedLength) == 0 else { return false }
+        releaseRetainedBytes(transferredBytes)
+        return true
+    }
 }
 
 private final class CFrameByteSource: LinuxFrameByteSource, @unchecked Sendable {
@@ -360,6 +613,17 @@ private final class CFrameByteSource: LinuxFrameByteSource, @unchecked Sendable 
         handle.releaseReceiveBytes(count)
     }
 
+    func registerBodyMapping(_ allocation: FrameAllocation) -> Bool {
+        handle.registerReceiveMapping(allocation)
+    }
+
+    func releaseBodyMapping(
+        _ identity: FrameMappingIdentity,
+        transferredBytes _: Int
+    ) -> Bool {
+        handle.releaseReceiveMapping(identity)
+    }
+
     func cancel() {
         handle.cancel()
     }
@@ -369,14 +633,10 @@ final class LinuxFrameReader: @unchecked Sendable {
     private let source: any LinuxFrameByteSource
     private let lock = NSLock()
     private var inputFinished = false
-    private var outstandingFrameBytes = 0
+    private var outstandingLease: FrameStorageLease?
 
     init(source: any LinuxFrameByteSource) {
         self.source = source
-    }
-
-    deinit {
-        releaseOutstandingFrame()
     }
 
     private func hasFinishedInput() -> Bool {
@@ -391,39 +651,35 @@ final class LinuxFrameReader: @unchecked Sendable {
         lock.unlock()
     }
 
-    private func releaseOutstandingFrame() {
-        let count: Int
-        lock.lock()
-        count = outstandingFrameBytes
-        outstandingFrameBytes = 0
-        lock.unlock()
-        source.releaseRetainedBytes(count)
+    private func waitForOutstandingFrame() async throws {
+        let lease = lock.withLock { outstandingLease }
+        guard let lease else { return }
+        try await lease.waitForRelease()
+        lock.withLock {
+            if outstandingLease === lease {
+                outstandingLease = nil
+            }
+        }
     }
 
-    private func retainFrameForHandoff(_ count: Int) {
+    private func retainFrameForHandoff(_ lease: FrameStorageLease) {
         lock.lock()
-        precondition(outstandingFrameBytes == 0)
-        outstandingFrameBytes = count
+        precondition(outstandingLease == nil)
+        outstandingLease = lease
         lock.unlock()
     }
 
     func nextFrame() async throws -> RawFrame? {
-        releaseOutstandingFrame()
+        try await waitForOutstandingFrame()
         if hasFinishedInput() { return nil }
 
-        let header = FrameAllocation(count: 4)
-        let headerRead = try await readExactly(into: header, count: 4)
-        defer { source.releaseRetainedBytes(headerRead.retainedBytes) }
-        guard let headerFin = headerRead.fin else {
+        let (length, headerFin) = try await readLength()
+        guard let headerFin else {
             markInputFinished()
             return nil
         }
         if headerFin {
             throw LinuxTransportError.receive("the peer finished inside a frame header")
-        }
-        var length: UInt32 = 0
-        for index in 0 ..< 4 {
-            length = (length << 8) | UInt32(header.byte(at: index))
         }
         guard length >= 1 else {
             throw WireError.malformedFrame("zero-length frame")
@@ -432,97 +688,130 @@ final class LinuxFrameReader: @unchecked Sendable {
             throw WireError.frameTooLarge(length)
         }
 
-        let typeStorage = FrameAllocation(count: 1)
-        let typeRead = try await readExactly(into: typeStorage, count: 1)
-        defer { source.releaseRetainedBytes(typeRead.retainedBytes) }
-        guard let typeFin = typeRead.fin else {
+        let (rawType, typeFin) = try await readType()
+        guard let typeFin else {
             throw LinuxTransportError.streamClosed
         }
-        guard let type = FrameType(rawValue: typeStorage.byte(at: 0)) else {
-            throw WireError.unknownFrameType(typeStorage.byte(at: 0))
+        guard let type = FrameType(rawValue: rawType) else {
+            throw WireError.unknownFrameType(rawType)
         }
         let bodyCount = Int(length) - 1
-        var body = Data()
-        var retainedBodyBytes = 0
+        let body: Data
         let bodyFin: Bool
         if bodyCount == 0 {
+            body = Data()
             bodyFin = typeFin
         } else {
             if typeFin {
                 throw LinuxTransportError.receive("the peer finished before the frame body")
             }
-            var remaining = bodyCount
-            var finished = false
-            do {
-                while remaining > 0 {
-                    let amount = min(remaining, 64 * 1024)
-                    let chunk = FrameAllocation(count: amount)
-                    let read = try await readExactly(into: chunk, count: amount)
-                    retainedBodyBytes += read.retainedBytes
-                    guard let chunkFin = read.fin else {
-                        throw LinuxTransportError.streamClosed
-                    }
-                    body.append(
-                        chunk.pointer.assumingMemoryBound(to: UInt8.self),
-                        count: amount
-                    )
-                    remaining -= amount
-                    finished = chunkFin
-                    if finished && remaining > 0 {
-                        throw LinuxTransportError.receive("the peer finished inside a frame")
-                    }
-                }
-            } catch {
-                source.releaseRetainedBytes(retainedBodyBytes)
-                throw error
+            let allocation = try FrameAllocation.mapped(count: bodyCount)
+            guard source.registerBodyMapping(allocation) else {
+                throw LinuxTransportError.receive("transport refused frame body mapping")
             }
+            let lease = FrameStorageLease(identity: allocation.mappingIdentity) { [source] identity, transferred in
+                source.releaseBodyMapping(identity, transferredBytes: transferred)
+            }
+            allocation.bindLease(lease)
+            var offset = 0
+            var finished = false
+            while offset < bodyCount {
+                let amount = min(bodyCount - offset, Int(REACH_MSQUIC_RECEIVE_COPY_QUANTUM))
+                let read = try await readExactly(
+                    into: allocation,
+                    offset: offset,
+                    count: amount,
+                    releaseOnFailure: false,
+                    onTransfer: lease.recordTransfer
+                )
+                guard let chunkFin = read.fin else {
+                    throw LinuxTransportError.streamClosed
+                }
+                offset += amount
+                finished = chunkFin
+                if finished && offset < bodyCount {
+                    throw LinuxTransportError.receive("the peer finished inside a frame")
+                }
+            }
+            let transferred = allocation.transferToData()
+            body = transferred.0
+            retainFrameForHandoff(lease)
             bodyFin = finished
         }
         if bodyFin {
             markInputFinished()
         }
-        retainFrameForHandoff(retainedBodyBytes)
         return RawFrame(type: type, body: body)
+    }
+
+    private func readLength() async throws -> (UInt32, Bool?) {
+        let allocation = FrameAllocation(count: 4)
+        let read = try await readExactly(into: allocation, count: 4)
+        defer { source.releaseRetainedBytes(read.retainedBytes) }
+        guard read.fin != nil else { return (0, nil) }
+        var length: UInt32 = 0
+        for index in 0 ..< 4 {
+            length = (length << 8) | UInt32(allocation.byte(at: index))
+        }
+        return (length, read.fin)
+    }
+
+    private func readType() async throws -> (UInt8, Bool?) {
+        let allocation = FrameAllocation(count: 1)
+        let read = try await readExactly(into: allocation, count: 1)
+        defer { source.releaseRetainedBytes(read.retainedBytes) }
+        guard read.fin != nil else { return (0, nil) }
+        return (allocation.byte(at: 0), read.fin)
     }
 
     private func readExactly(
         into allocation: FrameAllocation,
-        count: Int
+        offset initialOffset: Int = 0,
+        count: Int,
+        releaseOnFailure: Bool = true,
+        onTransfer: ((Int) -> Void)? = nil
     ) async throws -> (fin: Bool?, retainedBytes: Int) {
-        var offset = 0
+        var offset = initialOffset
+        let end = initialOffset + count
         var sawFin = false
         do {
-            while offset < count {
+            while offset < end {
                 try Task.checkCancellation()
-                let result = await source.read(into: allocation, offset: offset, count: count - offset)
+                let result = await source.read(into: allocation, offset: offset, count: end - offset)
                 switch result.status {
                 case reachStatusOK:
                     guard result.count > 0 else {
                         throw LinuxTransportError.receive("the transport returned an empty receive")
                     }
                     offset += result.count
+                    onTransfer?(result.count)
                     sawFin = result.fin
-                    if sawFin && offset < count {
+                    if sawFin && offset < end {
                         throw LinuxTransportError.receive("the peer finished inside a frame")
                     }
                 case reachStatusTimeout:
                     continue
                 case reachStatusClosed:
-                    if offset == 0 && result.fin { return (nil, 0) }
+                    if offset == initialOffset && result.fin { return (nil, 0) }
                     throw LinuxTransportError.streamClosed
                 default:
                     throw LinuxTransportError.receive("MsQuic receive status \(result.status)")
                 }
             }
-            return (sawFin, offset)
+            return (sawFin, offset - initialOffset)
         } catch {
-            source.releaseRetainedBytes(offset)
+            if releaseOnFailure {
+                source.releaseRetainedBytes(offset - initialOffset)
+            }
             throw error
         }
     }
 
     func cancel() {
-        releaseOutstandingFrame()
+        lock.lock()
+        let lease = outstandingLease
+        lock.unlock()
+        lease?.cancelWaiter()
         source.cancel()
     }
 }

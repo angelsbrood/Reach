@@ -1,3 +1,4 @@
+import CReachLinuxMsQuic
 import Dispatch
 import Foundation
 import Glibc
@@ -228,6 +229,118 @@ enum LinuxStatusWriter {
     }
 }
 
+enum LinuxShutdownBranch: String, CaseIterable, Sendable {
+    case listener
+    case registry
+    case host
+    case accept
+    case signal
+    case status
+}
+
+struct LinuxShutdownOperations: Sendable {
+    typealias Operation = @Sendable (LinuxShutdownDeadline) async -> Result<Void, any Error>
+
+    var listener: Operation
+    var registry: Operation
+    var host: Operation
+    var accept: Operation
+    var signal: Operation
+    var status: Operation
+
+    var ordered: [(LinuxShutdownBranch, Operation)] {
+        [
+            (.listener, listener),
+            (.registry, registry),
+            (.host, host),
+            (.accept, accept),
+            (.signal, signal),
+            (.status, status),
+        ]
+    }
+}
+
+struct LinuxShutdownClock: Sendable {
+    var now: @Sendable () -> UInt64
+    var sleepUntil: @Sendable (UInt64) async -> Void
+
+    static let production = LinuxShutdownClock(
+        now: { reach_msquic_monotonic_now_nanoseconds() },
+        sleepUntil: { deadline in
+            let now = reach_msquic_monotonic_now_nanoseconds()
+            guard now < deadline else { return }
+            try? await Task.sleep(nanoseconds: deadline - now)
+        }
+    )
+}
+
+private actor LinuxShutdownRace {
+    enum Outcome: Sendable {
+        case settled((any Error)?)
+        case timedOut
+    }
+
+    private var outcome: Outcome?
+    private var waiter: CheckedContinuation<Outcome, Never>?
+
+    func resolve(_ outcome: Outcome) {
+        guard self.outcome == nil else { return }
+        self.outcome = outcome
+        waiter?.resume(returning: outcome)
+        waiter = nil
+    }
+
+    func wait() async -> Outcome {
+        if let outcome { return outcome }
+        return await withCheckedContinuation { continuation in
+            waiter = continuation
+        }
+    }
+}
+
+enum LinuxShutdownCoordinator {
+    static func settle(
+        request: LinuxStopRequest,
+        operations: LinuxShutdownOperations,
+        clock: LinuxShutdownClock = .production
+    ) async throws {
+        let deadline = request.deadline
+        let tasks = operations.ordered.map { branch, operation in
+            (branch, Task { await operation(deadline) })
+        }
+        let race = LinuxShutdownRace()
+        let settlementObserver = Task {
+            var firstError: (any Error)?
+            for (_, task) in tasks {
+                if case .failure(let error) = await task.value, firstError == nil {
+                    firstError = error
+                }
+            }
+            if clock.now() >= deadline.monotonicNanoseconds {
+                await race.resolve(.timedOut)
+            } else {
+                await race.resolve(.settled(firstError))
+            }
+        }
+        let deadlineObserver = Task {
+            await clock.sleepUntil(deadline.monotonicNanoseconds)
+            guard !Task.isCancelled else { return }
+            await race.resolve(.timedOut)
+        }
+
+        switch await race.wait() {
+        case .settled(let error):
+            deadlineObserver.cancel()
+            if let error { throw error }
+        case .timedOut:
+            settlementObserver.cancel()
+            deadlineObserver.cancel()
+            for (_, task) in tasks { task.cancel() }
+            throw LinuxTransportError.shutdownTimedOut
+        }
+    }
+}
+
 public enum LinuxServiceRuntime {
     public static func runProduction() async throws {
         try await run(configuration: LinuxServiceConfiguration.loadProduction())
@@ -328,27 +441,43 @@ public enum LinuxServiceRuntime {
         signalTask.cancel()
         statusTask.cancel()
 
-        let listenerTask = Task<Result<Void, any Error>, Never> {
-            do {
-                try await listener.stop(until: deadline)
-                return .success(())
-            } catch {
-                return .failure(error)
-            }
-        }
-        let registryTask = Task { await registry.cancelAndWait() }
-        let hostTask = Task { await host.shutdown() }
-        await registryTask.value
-        await hostTask.value
-        await acceptTask.value
-        await signalTask.value
-        await statusTask.value
-        let listenerResult = await listenerTask.value
         var shutdownError: Error?
-        if case .failure(let error) = listenerResult {
+        do {
+            try await LinuxShutdownCoordinator.settle(
+                request: request,
+                operations: LinuxShutdownOperations(
+                    listener: { deadline in
+                        do {
+                            try await listener.stop(until: deadline)
+                            return .success(())
+                        } catch {
+                            return .failure(error)
+                        }
+                    },
+                    registry: { _ in
+                        await registry.cancelAndWait()
+                        return .success(())
+                    },
+                    host: { _ in
+                        await host.shutdown()
+                        return .success(())
+                    },
+                    accept: { _ in
+                        await acceptTask.value
+                        return .success(())
+                    },
+                    signal: { _ in
+                        await signalTask.value
+                        return .success(())
+                    },
+                    status: { _ in
+                        await statusTask.value
+                        return .success(())
+                    }
+                )
+            )
+        } catch {
             shutdownError = error
-        } else if deadline.hasExpired() {
-            shutdownError = LinuxTransportError.shutdownTimedOut
         }
 
         let finalError: String?
@@ -358,13 +487,15 @@ public enum LinuxServiceRuntime {
         case .failure(let detail):
             finalError = detail
         }
-        let finalStatus = LinuxServiceStatus(
-            configuration: configuration,
-            ready: false,
-            metrics: listener.metrics(),
-            lastError: finalError
-        )
-        try? LinuxStatusWriter.write(finalStatus)
+        if !deadline.hasExpired() {
+            let finalStatus = LinuxServiceStatus(
+                configuration: configuration,
+                ready: false,
+                metrics: listener.metrics(),
+                lastError: finalError
+            )
+            try? LinuxStatusWriter.write(finalStatus)
+        }
 
         if let shutdownError { throw shutdownError }
         if case .failure(let detail) = reason {

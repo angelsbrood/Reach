@@ -26,6 +26,13 @@ enum {
     REACH_MSQUIC_MAX_FRAME_LENGTH = 16 * 1024 * 1024,
     REACH_MSQUIC_STREAM_RECEIVE_LIMIT = REACH_MSQUIC_MAX_FRAME_LENGTH + 4,
     REACH_MSQUIC_PROCESS_RECEIVE_LIMIT = 256 * 1024 * 1024,
+    REACH_MSQUIC_RECEIVE_COPY_QUANTUM = 64 * 1024,
+    REACH_MSQUIC_MAX_RECEIVE_PAGE_SIZE = 64 * 1024,
+    REACH_MSQUIC_STREAM_PHYSICAL_RECEIVE_LIMIT =
+        REACH_MSQUIC_STREAM_RECEIVE_LIMIT + REACH_MSQUIC_RECEIVE_COPY_QUANTUM,
+    REACH_MSQUIC_PROCESS_PHYSICAL_RECEIVE_LIMIT =
+        REACH_MSQUIC_PROCESS_RECEIVE_LIMIT +
+        REACH_MSQUIC_MAX_STREAMS_PROCESS * REACH_MSQUIC_RECEIVE_COPY_QUANTUM,
     REACH_MSQUIC_MAX_PEER_CERTIFICATE = 1024 * 1024,
 };
 
@@ -36,6 +43,9 @@ enum {
     REACH_MSQUIC_RECEIVE_TEST_CLOSE_RACE = 4,
     REACH_MSQUIC_RECEIVE_TEST_EMPTY_FIN = 5,
     REACH_MSQUIC_RECEIVE_TEST_RETENTION_BUDGET = 6,
+    REACH_MSQUIC_RECEIVE_TEST_MAPPED_PRECHARGE = 7,
+    REACH_MSQUIC_RECEIVE_TEST_MAPPED_SIXTEEN_STREAMS = 8,
+    REACH_MSQUIC_RECEIVE_TEST_MAPPED_TAIL_BODY = 9,
 };
 
 enum {
@@ -64,6 +74,11 @@ typedef struct reach_msquic_metrics {
     uint32_t peak_streams;
     uint64_t retained_receive_bytes;
     uint64_t peak_retained_receive_bytes;
+    uint64_t physical_owned_receive_bytes;
+    uint64_t physical_borrowed_receive_bytes;
+    uint64_t physical_receive_bytes;
+    uint64_t peak_physical_receive_bytes;
+    uint64_t virtual_receive_bytes;
     uint32_t suspended_receive_streams;
 } reach_msquic_metrics;
 
@@ -109,10 +124,11 @@ int reach_msquic_stream_copy_peer_certificate(
     size_t destination_capacity);
 
 /**
- * Copies at most destination_capacity borrowed receive bytes and atomically
- * transfers that exact byte count into Swift-owned retention before MsQuic is
- * permitted to indicate more bytes. The caller must release the transferred
- * count when the frame leaves the transport/parser handoff.
+ * Copies at most destination_capacity borrowed receive bytes. If destination
+ * belongs to the registered body mapping, every newly covered destination page
+ * is physically precharged before memcpy while the complete source indication
+ * remains charged. The exact copied byte count transfers to logical Swift
+ * ownership before MsQuic may indicate more bytes.
  */
 int reach_msquic_stream_read(
     reach_msquic_stream *stream,
@@ -125,6 +141,32 @@ int reach_msquic_stream_read(
 int reach_msquic_stream_release_receive_bytes(
     reach_msquic_stream *stream,
     size_t length);
+
+/**
+ * Registers one page-aligned, initially unbacked frame-body mapping. A body
+ * shorter than one page occupies its canonical tail so its public Data slice
+ * remains reference-backed without adding another mapping or resident page.
+ */
+int reach_msquic_stream_register_receive_mapping(
+    reach_msquic_stream *stream,
+    void *base,
+    size_t body_offset,
+    size_t logical_length,
+    size_t mapped_length,
+    size_t page_size);
+
+/**
+ * Validates and unmaps the exact registered mapping, then releases all logical
+ * and physical ownership associated with it. This is the final Data storage
+ * deallocator edge and may succeed exactly once.
+ */
+int reach_msquic_stream_release_receive_mapping(
+    reach_msquic_stream *stream,
+    void *base,
+    size_t body_offset,
+    size_t logical_length,
+    size_t mapped_length,
+    size_t page_size);
 
 /** Copies bytes into one owned send context and waits for its completion. */
 int reach_msquic_stream_send(

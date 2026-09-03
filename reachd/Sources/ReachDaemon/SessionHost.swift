@@ -113,14 +113,12 @@ public final class SessionHost: Sendable {
     public func serve<Stream: SessionHostStream>(_ stream: Stream) async {
         var iterator = stream.frames.makeAsyncIterator()
         do {
-            let opening = await HostFrameEnding.next(from: &iterator)
-            guard case .frame(let first) = opening else {
+            guard let opening = try await nextOpening(from: &iterator) else {
                 stream.cancel()
                 return
             }
-            switch first.type {
-            case .hello:
-                let hello = try first.decode(Hello.self)
+            switch opening {
+            case .hello(let hello):
                 guard let version = Wire.negotiate(offered: hello.versions) else {
                     try await stream.send(ErrorFrame(
                         code: "wire-version",
@@ -136,19 +134,19 @@ public final class SessionHost: Sendable {
                     error(ending.controlAccount(using: isOrdinaryPeerDeparture))
                 }
                 stream.cancel()
-            case .generateBegin:
+            case .generate(let begin):
                 try await generationLoop(
                     stream: stream,
                     iterator: &iterator,
-                    begin: first.decode(GenerateBegin.self)
+                    begin: begin
                 )
-            case .generateReattach:
+            case .reattach(let frame):
                 try await reattachLoop(
                     stream: stream,
                     iterator: &iterator,
-                    frame: first.decode(GenerateReattach.self)
+                    frame: frame
                 )
-            default:
+            case .unexpected:
                 try await stream.send(
                     ErrorFrame(code: "unexpected-frame", message: "stream must open with hello or generate"),
                     for: Wire.baselineVersion
@@ -158,6 +156,33 @@ public final class SessionHost: Sendable {
         } catch {
             self.error("stream ended: \(error)")
             stream.cancel()
+        }
+    }
+
+    private enum Opening: Sendable {
+        case hello(Hello)
+        case generate(GenerateBegin)
+        case reattach(GenerateReattach)
+        case unexpected
+    }
+
+    private func nextOpening(
+        from iterator: inout AsyncThrowingStream<RawFrame, any Error>.AsyncIterator
+    ) async throws -> Opening? {
+        guard let frame = try await iterator.next() else { return nil }
+        return try consumeOpening(frame)
+    }
+
+    private func consumeOpening(_ frame: consuming RawFrame) throws -> Opening {
+        switch frame.type {
+        case .hello:
+            return .hello(try frame.decode(Hello.self))
+        case .generateBegin:
+            return .generate(try frame.decode(GenerateBegin.self))
+        case .generateReattach:
+            return .reattach(try frame.decode(GenerateReattach.self))
+        default:
+            return .unexpected
         }
     }
 
@@ -171,12 +196,16 @@ public final class SessionHost: Sendable {
         var forwarder: Task<Void, Never>?
         defer { forwarder?.cancel() }
         while true {
-            let next = await HostFrameEnding.next(from: &iterator)
-            guard case .frame(let raw) = next else { return next }
-            try raw.requireSupported(by: version)
-            switch raw.type {
+            switch try await nextControlStep(
+                from: &iterator,
+                version: version,
+                extensionHandler: extensionHandler
+            ) {
+            case .closed:
+                return .closed
+            case .broke(let error):
+                return .broke(error)
             case .sessionOpen:
-                _ = try raw.decode(SessionOpen.self)
                 let (sessionID, token) = await registry.openSession(version: version)
                 try await stream.send(
                     SessionOpened(sessionID: sessionID, token: token, capabilities: filling.capabilities),
@@ -191,14 +220,13 @@ public final class SessionHost: Sendable {
                     relayNetwork: relayNetwork()
                 )
                 info("session \(sessionID) source category \(source.rawValue)")
-            case .ping:
-                let ping = try raw.decode(Ping.self)
+            case .ping(let ping):
                 try await stream.send(Pong(nonce: ping.nonce), for: version)
-            default:
-                switch try await extensionHandler.handle(raw) {
+            case .extensionAction(let type, let action):
+                switch action {
                 case .unhandled:
                     try await stream.send(
-                        ErrorFrame(code: "unexpected-frame", message: "\(raw.type) on control stream"),
+                        ErrorFrame(code: "unexpected-frame", message: "\(type) on control stream"),
                         for: version
                     )
                 case .handled:
@@ -214,6 +242,52 @@ public final class SessionHost: Sendable {
                     }
                 }
             }
+        }
+    }
+
+    private enum ControlStep: Sendable {
+        case closed
+        case broke(any Error)
+        case sessionOpen
+        case ping(Ping)
+        case extensionAction(FrameType, HostControlAction)
+    }
+
+    private func nextControlStep(
+        from iterator: inout AsyncThrowingStream<RawFrame, any Error>.AsyncIterator,
+        version: UInt8,
+        extensionHandler: any HostControlExtension
+    ) async throws -> ControlStep {
+        let ending = await HostFrameEnding.next(from: &iterator)
+        switch ending {
+        case .closed:
+            return .closed
+        case .broke(let error):
+            return .broke(error)
+        case .frame(let frame):
+            return try await consumeControlFrame(
+                frame,
+                version: version,
+                extensionHandler: extensionHandler
+            )
+        }
+    }
+
+    private func consumeControlFrame(
+        _ frame: consuming RawFrame,
+        version: UInt8,
+        extensionHandler: any HostControlExtension
+    ) async throws -> ControlStep {
+        try frame.requireSupported(by: version)
+        switch frame.type {
+        case .sessionOpen:
+            _ = try frame.decode(SessionOpen.self)
+            return .sessionOpen
+        case .ping:
+            return .ping(try frame.decode(Ping.self))
+        default:
+            let type = frame.type
+            return .extensionAction(type, try await extensionHandler.handle(frame))
         }
     }
 
@@ -329,20 +403,20 @@ public final class SessionHost: Sendable {
             }
         }
         do {
-            while let raw = try await iterator.next() {
-                try raw.requireSupported(by: version)
-                switch raw.type {
-                case .evAck:
-                    let ack = try raw.decode(EvAck.self)
+            pumpLoop: while true {
+                switch try await nextPumpStep(from: &iterator, version: version) {
+                case .closed:
+                    break pumpLoop
+                case .ack(let ack):
                     await registry.ack(sessionID: sessionID, genID: genID, seq: ack.seq, epoch: epoch)
-                case .generateCancel:
+                case .cancel:
                     await registry.cancel(
                         sessionID: sessionID,
                         genID: genID,
                         epoch: epoch,
                         admission: admission
                     )
-                default:
+                case .ignored:
                     break
                 }
             }
@@ -351,6 +425,35 @@ public final class SessionHost: Sendable {
         }
         _ = await sender.value
     }
+
+    private enum PumpStep: Sendable {
+        case closed
+        case ack(EvAck)
+        case cancel
+        case ignored
+    }
+
+    private func nextPumpStep(
+        from iterator: inout AsyncThrowingStream<RawFrame, any Error>.AsyncIterator,
+        version: UInt8
+    ) async throws -> PumpStep {
+        guard let frame = try await iterator.next() else { return .closed }
+        return try consumePumpFrame(frame, version: version)
+    }
+
+    private func consumePumpFrame(_ frame: consuming RawFrame, version: UInt8) throws -> PumpStep {
+        try frame.requireSupported(by: version)
+        switch frame.type {
+        case .evAck:
+            return .ack(try frame.decode(EvAck.self))
+        case .generateCancel:
+            _ = try frame.decode(GenerateCancel.self)
+            return .cancel
+        default:
+            return .ignored
+        }
+    }
+
 }
 
 package enum HostFrameEnding: Sendable {

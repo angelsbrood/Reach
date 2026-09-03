@@ -81,6 +81,152 @@ private func previewOnlyIdentifiers(_ header: String) -> Set<String> {
     })
 }
 
+private enum ShutdownFixtureError: Error, Equatable {
+    case failed(LinuxShutdownBranch)
+}
+
+private enum ShutdownFixtureBehavior {
+    case succeed
+    case fail
+    case stall
+}
+
+private final class ShutdownFixtureClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: UInt64
+
+    init(_ value: UInt64) {
+        self.value = value
+    }
+
+    func now() -> UInt64 { lock.withLock { value } }
+    func set(_ value: UInt64) { lock.withLock { self.value = value } }
+}
+
+private actor ShutdownFixtureProbe {
+    struct Snapshot: Sendable {
+        var started: Set<LinuxShutdownBranch>
+        var completed: Set<LinuxShutdownBranch>
+        var cancelled: Set<LinuxShutdownBranch>
+        var deadlines: [LinuxShutdownBranch: LinuxShutdownDeadline]
+        var active: Int
+        var peakActive: Int
+    }
+
+    private var started: Set<LinuxShutdownBranch> = []
+    private var completed: Set<LinuxShutdownBranch> = []
+    private var cancelled: Set<LinuxShutdownBranch> = []
+    private var deadlines: [LinuxShutdownBranch: LinuxShutdownDeadline] = [:]
+    private var active = 0
+    private var peakActive = 0
+    private var allStartedWaiters: [CheckedContinuation<Void, Never>] = []
+    private var zeroWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func begin(_ branch: LinuxShutdownBranch, deadline: LinuxShutdownDeadline) {
+        precondition(started.insert(branch).inserted)
+        deadlines[branch] = deadline
+        active += 1
+        peakActive = max(peakActive, active)
+        if started.count == LinuxShutdownBranch.allCases.count {
+            let waiters = allStartedWaiters
+            allStartedWaiters.removeAll()
+            waiters.forEach { $0.resume() }
+        }
+    }
+
+    func waitUntilAllStarted() async {
+        guard started.count != LinuxShutdownBranch.allCases.count else { return }
+        await withCheckedContinuation { allStartedWaiters.append($0) }
+    }
+
+    func finish(_ branch: LinuxShutdownBranch, wasCancelled: Bool) {
+        precondition(completed.insert(branch).inserted)
+        if wasCancelled { cancelled.insert(branch) }
+        active -= 1
+        if active == 0 {
+            let waiters = zeroWaiters
+            zeroWaiters.removeAll()
+            waiters.forEach { $0.resume() }
+        }
+    }
+
+    func waitUntilZero() async {
+        guard active != 0 else { return }
+        await withCheckedContinuation { zeroWaiters.append($0) }
+    }
+
+    var snapshot: Snapshot {
+        Snapshot(
+            started: started,
+            completed: completed,
+            cancelled: cancelled,
+            deadlines: deadlines,
+            active: active,
+            peakActive: peakActive
+        )
+    }
+}
+
+private func shutdownFixtureOperation(
+    _ branch: LinuxShutdownBranch,
+    behavior: ShutdownFixtureBehavior,
+    probe: ShutdownFixtureProbe
+) -> LinuxShutdownOperations.Operation {
+    { deadline in
+        await probe.begin(branch, deadline: deadline)
+        await probe.waitUntilAllStarted()
+        switch behavior {
+        case .succeed:
+            await probe.finish(branch, wasCancelled: false)
+            return .success(())
+        case .fail:
+            await probe.finish(branch, wasCancelled: false)
+            return .failure(ShutdownFixtureError.failed(branch))
+        case .stall:
+            do {
+                try await Task.sleep(for: .seconds(60))
+                await probe.finish(branch, wasCancelled: false)
+            } catch {
+                await probe.finish(branch, wasCancelled: Task.isCancelled)
+            }
+            return .success(())
+        }
+    }
+}
+
+private func shutdownFixtureOperations(
+    probe: ShutdownFixtureProbe,
+    behaviors: [LinuxShutdownBranch: ShutdownFixtureBehavior] = [:]
+) -> LinuxShutdownOperations {
+    func operation(_ branch: LinuxShutdownBranch) -> LinuxShutdownOperations.Operation {
+        shutdownFixtureOperation(branch, behavior: behaviors[branch] ?? .succeed, probe: probe)
+    }
+    return LinuxShutdownOperations(
+        listener: operation(.listener),
+        registry: operation(.registry),
+        host: operation(.host),
+        accept: operation(.accept),
+        signal: operation(.signal),
+        status: operation(.status)
+    )
+}
+
+private func shutdownFixtureRequest(deadline: UInt64 = 20_000_000_000) -> LinuxStopRequest {
+    LinuxStopRequest(
+        reason: .signal(SIGTERM),
+        deadline: LinuxShutdownDeadline(monotonicNanoseconds: deadline)
+    )
+}
+
+private func expectShutdownTimeout(_ operation: () async throws -> Void) async {
+    do {
+        try await operation()
+        Issue.record("expected shutdown timeout")
+    } catch {
+        #expect(error as? LinuxTransportError == .shutdownTimedOut)
+    }
+}
+
 @Suite(.serialized) struct LinuxServiceRuntimeTests {
     @Test func statusIsPrivacySafeBoundedAndAtomicallyReplaced() throws {
         let root = FileManager.default.temporaryDirectory
@@ -192,6 +338,128 @@ private func previewOnlyIdentifiers(_ header: String) -> Set<String> {
             deadline: LinuxShutdownDeadline(monotonicNanoseconds: 35_000_000_000)
         ))
         #expect(await latch.wait() == first)
+    }
+
+    @Test func shutdownHappyPathStartsAllBranchesAndSettlesBeforeTheOneDeadline() async throws {
+        let request = shutdownFixtureRequest()
+        let probe = ShutdownFixtureProbe()
+        let clock = ShutdownFixtureClock(request.deadline.monotonicNanoseconds - 1)
+        try await LinuxShutdownCoordinator.settle(
+            request: request,
+            operations: shutdownFixtureOperations(probe: probe),
+            clock: LinuxShutdownClock(
+                now: clock.now,
+                sleepUntil: { _ in try? await Task.sleep(for: .seconds(60)) }
+            )
+        )
+        await probe.waitUntilZero()
+        let snapshot = await probe.snapshot
+        #expect(snapshot.started == Set(LinuxShutdownBranch.allCases))
+        #expect(snapshot.completed == Set(LinuxShutdownBranch.allCases))
+        #expect(snapshot.cancelled.isEmpty)
+        #expect(snapshot.active == 0)
+        #expect(snapshot.peakActive == LinuxShutdownBranch.allCases.count)
+        #expect(snapshot.deadlines.values.allSatisfy { $0 == request.deadline })
+    }
+
+    @Test func everyShutdownBranchTimesOutAtTheSameDeadlineAndLeavesNoFixtureTask() async {
+        for stalled in LinuxShutdownBranch.allCases {
+            let request = shutdownFixtureRequest()
+            let probe = ShutdownFixtureProbe()
+            let clock = ShutdownFixtureClock(request.deadline.monotonicNanoseconds - 1)
+            await expectShutdownTimeout {
+                try await LinuxShutdownCoordinator.settle(
+                    request: request,
+                    operations: shutdownFixtureOperations(
+                        probe: probe,
+                        behaviors: [stalled: .stall]
+                    ),
+                    clock: LinuxShutdownClock(
+                        now: clock.now,
+                        sleepUntil: { deadline in
+                            await probe.waitUntilAllStarted()
+                            clock.set(deadline)
+                        }
+                    )
+                )
+            }
+            await probe.waitUntilZero()
+            let snapshot = await probe.snapshot
+            #expect(snapshot.started == Set(LinuxShutdownBranch.allCases))
+            #expect(snapshot.completed == Set(LinuxShutdownBranch.allCases))
+            #expect(snapshot.cancelled == [stalled])
+            #expect(snapshot.active == 0)
+            #expect(snapshot.peakActive == LinuxShutdownBranch.allCases.count)
+            #expect(snapshot.deadlines.values.allSatisfy { $0 == request.deadline })
+        }
+    }
+
+    @Test func deadlineEqualityAndTimeoutPrecedenceAreFailClosed() async {
+        let equalityRequest = shutdownFixtureRequest()
+        let equalityProbe = ShutdownFixtureProbe()
+        let equalityClock = ShutdownFixtureClock(equalityRequest.deadline.monotonicNanoseconds)
+        await expectShutdownTimeout {
+            try await LinuxShutdownCoordinator.settle(
+                request: equalityRequest,
+                operations: shutdownFixtureOperations(probe: equalityProbe),
+                clock: LinuxShutdownClock(
+                    now: equalityClock.now,
+                    sleepUntil: { _ in try? await Task.sleep(for: .seconds(60)) }
+                )
+            )
+        }
+        await equalityProbe.waitUntilZero()
+        #expect(await equalityProbe.snapshot.active == 0)
+
+        let precedenceRequest = shutdownFixtureRequest()
+        let precedenceProbe = ShutdownFixtureProbe()
+        let precedenceClock = ShutdownFixtureClock(precedenceRequest.deadline.monotonicNanoseconds - 1)
+        await expectShutdownTimeout {
+            try await LinuxShutdownCoordinator.settle(
+                request: precedenceRequest,
+                operations: shutdownFixtureOperations(
+                    probe: precedenceProbe,
+                    behaviors: [.listener: .fail, .host: .stall]
+                ),
+                clock: LinuxShutdownClock(
+                    now: precedenceClock.now,
+                    sleepUntil: { deadline in
+                        await precedenceProbe.waitUntilAllStarted()
+                        precedenceClock.set(deadline)
+                    }
+                )
+            )
+        }
+        await precedenceProbe.waitUntilZero()
+        let snapshot = await precedenceProbe.snapshot
+        #expect(snapshot.cancelled == [.host])
+        #expect(snapshot.active == 0)
+    }
+
+    @Test func inTimeShutdownFailurePreservesTheOriginalError() async {
+        let request = shutdownFixtureRequest()
+        let probe = ShutdownFixtureProbe()
+        let clock = ShutdownFixtureClock(request.deadline.monotonicNanoseconds - 1)
+        do {
+            try await LinuxShutdownCoordinator.settle(
+                request: request,
+                operations: shutdownFixtureOperations(
+                    probe: probe,
+                    behaviors: [.registry: .fail]
+                ),
+                clock: LinuxShutdownClock(
+                    now: clock.now,
+                    sleepUntil: { _ in try? await Task.sleep(for: .seconds(60)) }
+                )
+            )
+            Issue.record("expected original shutdown failure")
+        } catch {
+            #expect(error as? ShutdownFixtureError == .failed(.registry))
+        }
+        await probe.waitUntilZero()
+        let snapshot = await probe.snapshot
+        #expect(snapshot.active == 0)
+        #expect(snapshot.cancelled.isEmpty)
     }
 
     @Test func installIsInertAndRemovalPreservesOperatorConfiguration() throws {

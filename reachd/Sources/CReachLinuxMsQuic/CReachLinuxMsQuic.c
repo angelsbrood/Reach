@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <time.h>
@@ -46,6 +47,15 @@ struct reach_msquic_stream {
     uint64_t receive_total;
     uint64_t borrowed_receive_bytes;
     uint64_t owned_receive_bytes;
+    uint64_t physical_borrowed_receive_bytes;
+    uint64_t physical_owned_receive_bytes;
+    uint8_t *receive_mapping_base;
+    uint64_t receive_mapping_body_offset;
+    uint64_t receive_mapping_logical_length;
+    uint64_t receive_mapping_length;
+    uint64_t receive_mapping_page_size;
+    uint64_t receive_mapping_written_length;
+    uint64_t receive_mapping_charged_length;
     QUIC_RECEIVE_FLAGS receive_flags;
     int receive_pending;
     int receive_suspended;
@@ -88,6 +98,9 @@ struct reach_msquic_listener {
     uint32_t accepted_head;
     uint32_t accepted_count;
     reach_msquic_metrics metrics;
+    void (*receive_test_before_copy)(
+        reach_msquic_stream *, uint8_t *, size_t, void *);
+    void *receive_test_context;
     uint64_t shutdown_deadline_nanoseconds;
     int stopping;
     int stopped;
@@ -203,12 +216,54 @@ static void StreamRetain(reach_msquic_stream *stream)
     (void)atomic_fetch_add_explicit(&stream->references, 1, memory_order_relaxed);
 }
 
+static void
+UpdatePhysicalPeakLocked(reach_msquic_listener *listener)
+{
+    if (listener->metrics.physical_receive_bytes >
+        listener->metrics.peak_physical_receive_bytes) {
+        listener->metrics.peak_physical_receive_bytes =
+            listener->metrics.physical_receive_bytes;
+    }
+}
+
+static int
+IsValidReceivePageSize(uint64_t page_size)
+{
+    return page_size > 0 &&
+        (page_size & (page_size - 1)) == 0 &&
+        page_size <= REACH_MSQUIC_MAX_RECEIVE_PAGE_SIZE &&
+        REACH_MSQUIC_RECEIVE_COPY_QUANTUM % page_size == 0 &&
+        REACH_MSQUIC_MAX_FRAME_LENGTH % page_size == 0;
+}
+
+static int
+RoundReceiveMappingLength(uint64_t logical_length, uint64_t page_size, uint64_t *result)
+{
+    if (result == NULL || logical_length == 0 || !IsValidReceivePageSize(page_size) ||
+        logical_length > REACH_MSQUIC_MAX_FRAME_LENGTH - 1) {
+        return 0;
+    }
+    uint64_t remainder = logical_length % page_size;
+    uint64_t addition = remainder == 0 ? 0 : page_size - remainder;
+    if (UINT64_MAX - logical_length < addition) {
+        return 0;
+    }
+    *result = logical_length + addition;
+    return *result <= REACH_MSQUIC_MAX_FRAME_LENGTH;
+}
+
 static void StreamRelease(reach_msquic_stream *stream)
 {
     if (atomic_fetch_sub_explicit(&stream->references, 1, memory_order_acq_rel) != 1) {
         return;
     }
-    if (stream->owned_receive_bytes > 0 || stream->borrowed_receive_bytes > 0) {
+    if (stream->receive_mapping_base != NULL) {
+        (void)munmap(stream->receive_mapping_base, stream->receive_mapping_length);
+    }
+    if (stream->owned_receive_bytes > 0 || stream->borrowed_receive_bytes > 0 ||
+        stream->physical_owned_receive_bytes > 0 ||
+        stream->physical_borrowed_receive_bytes > 0 ||
+        stream->receive_mapping_length > 0) {
         reach_msquic_listener *listener = stream->connection->listener;
         uint64_t retained = stream->owned_receive_bytes + stream->borrowed_receive_bytes;
         (void)pthread_mutex_lock(&listener->lock);
@@ -216,6 +271,32 @@ static void StreamRelease(reach_msquic_stream *stream)
             listener->metrics.retained_receive_bytes -= retained;
         } else {
             listener->metrics.retained_receive_bytes = 0;
+        }
+        if (stream->physical_owned_receive_bytes <=
+            listener->metrics.physical_owned_receive_bytes) {
+            listener->metrics.physical_owned_receive_bytes -=
+                stream->physical_owned_receive_bytes;
+        } else {
+            listener->metrics.physical_owned_receive_bytes = 0;
+        }
+        if (stream->physical_borrowed_receive_bytes <=
+            listener->metrics.physical_borrowed_receive_bytes) {
+            listener->metrics.physical_borrowed_receive_bytes -=
+                stream->physical_borrowed_receive_bytes;
+        } else {
+            listener->metrics.physical_borrowed_receive_bytes = 0;
+        }
+        uint64_t physical = stream->physical_owned_receive_bytes +
+            stream->physical_borrowed_receive_bytes;
+        if (physical <= listener->metrics.physical_receive_bytes) {
+            listener->metrics.physical_receive_bytes -= physical;
+        } else {
+            listener->metrics.physical_receive_bytes = 0;
+        }
+        if (stream->receive_mapping_length <= listener->metrics.virtual_receive_bytes) {
+            listener->metrics.virtual_receive_bytes -= stream->receive_mapping_length;
+        } else {
+            listener->metrics.virtual_receive_bytes = 0;
         }
         (void)pthread_mutex_unlock(&listener->lock);
     }
@@ -278,6 +359,7 @@ StreamEndAPICall(reach_msquic_stream *stream)
 typedef struct reach_receive_completion {
     HQUIC handle;
     uint64_t length;
+    uint64_t physical_borrowed_length;
     int reenable;
 } reach_receive_completion;
 
@@ -304,6 +386,7 @@ TakePendingReceiveLocked(
     } else {
         transferred_length = 0;
     }
+    completion.physical_borrowed_length = stream->borrowed_receive_bytes;
     reach_msquic_listener *listener = stream->connection->listener;
     (void)pthread_mutex_lock(&listener->lock);
     if (listener->metrics.retained_receive_bytes >= stream->borrowed_receive_bytes) {
@@ -328,13 +411,34 @@ FinishPendingReceive(
     reach_msquic_stream *stream,
     reach_receive_completion completion)
 {
-    if (completion.handle == NULL) {
-        return;
+    if (completion.handle != NULL) {
+        stream->connection->listener->api->StreamReceiveComplete(
+            completion.handle,
+            completion.length);
     }
-    stream->connection->listener->api->StreamReceiveComplete(
-        completion.handle,
-        completion.length);
-    if (completion.reenable) {
+    if (completion.physical_borrowed_length > 0) {
+        reach_msquic_listener *listener = stream->connection->listener;
+        (void)pthread_mutex_lock(&stream->lock);
+        (void)pthread_mutex_lock(&listener->lock);
+        uint64_t released = completion.physical_borrowed_length;
+        if (released > stream->physical_borrowed_receive_bytes) {
+            released = stream->physical_borrowed_receive_bytes;
+        }
+        stream->physical_borrowed_receive_bytes -= released;
+        if (released <= listener->metrics.physical_borrowed_receive_bytes) {
+            listener->metrics.physical_borrowed_receive_bytes -= released;
+        } else {
+            listener->metrics.physical_borrowed_receive_bytes = 0;
+        }
+        if (released <= listener->metrics.physical_receive_bytes) {
+            listener->metrics.physical_receive_bytes -= released;
+        } else {
+            listener->metrics.physical_receive_bytes = 0;
+        }
+        (void)pthread_mutex_unlock(&listener->lock);
+        (void)pthread_mutex_unlock(&stream->lock);
+    }
+    if (completion.handle != NULL && completion.reenable) {
         QUIC_STATUS status = stream->connection->listener->api->StreamReceiveSetEnabled(
             completion.handle,
             TRUE);
@@ -345,7 +449,9 @@ FinishPendingReceive(
                 REACH_RECEIVE_ERROR);
         }
     }
-    StreamEndAPICall(stream);
+    if (completion.handle != NULL) {
+        StreamEndAPICall(stream);
+    }
 }
 
 static void
@@ -472,11 +578,16 @@ ResumeSuspendedReceives(reach_msquic_listener *listener)
         HQUIC handle = NULL;
         (void)pthread_mutex_lock(&stream->lock);
         (void)pthread_mutex_lock(&listener->lock);
-        int has_capacity =
+        int has_logical_capacity =
             stream->owned_receive_bytes < REACH_MSQUIC_STREAM_RECEIVE_LIMIT &&
             listener->metrics.retained_receive_bytes < REACH_MSQUIC_PROCESS_RECEIVE_LIMIT;
+        int has_physical_capacity =
+            stream->physical_owned_receive_bytes + stream->physical_borrowed_receive_bytes <
+                REACH_MSQUIC_STREAM_PHYSICAL_RECEIVE_LIMIT &&
+            listener->metrics.physical_receive_bytes <
+                REACH_MSQUIC_PROCESS_PHYSICAL_RECEIVE_LIMIT;
         if (stream->receive_suspended && !stream->receive_suspend_transition &&
-            has_capacity && !stream->closed &&
+            has_logical_capacity && has_physical_capacity && !stream->closed &&
             !stream->handle_closed && stream->handle != NULL) {
             stream->receive_suspended = 0;
             stream->suspend_stream_retained = 0;
@@ -592,7 +703,20 @@ StreamCallback(HQUIC handle, void *opaque, QUIC_STREAM_EVENT *event)
             event->RECEIVE.TotalBufferLength <=
                 REACH_MSQUIC_PROCESS_RECEIVE_LIMIT -
                     listener->metrics.retained_receive_bytes;
-        if (!stream_fits || !process_fits) {
+        uint64_t stream_physical = stream->physical_owned_receive_bytes +
+            stream->physical_borrowed_receive_bytes;
+        int stream_physical_fits =
+            stream_physical <= REACH_MSQUIC_STREAM_PHYSICAL_RECEIVE_LIMIT &&
+            event->RECEIVE.TotalBufferLength <=
+                REACH_MSQUIC_STREAM_PHYSICAL_RECEIVE_LIMIT - stream_physical;
+        int process_physical_fits =
+            listener->metrics.physical_receive_bytes <=
+                REACH_MSQUIC_PROCESS_PHYSICAL_RECEIVE_LIMIT &&
+            event->RECEIVE.TotalBufferLength <=
+                REACH_MSQUIC_PROCESS_PHYSICAL_RECEIVE_LIMIT -
+                    listener->metrics.physical_receive_bytes;
+        if (!stream_fits || !process_fits ||
+            !stream_physical_fits || !process_physical_fits) {
             if (!stream->receive_suspended) {
                 stream->receive_suspended = 1;
                 listener->metrics.suspended_receive_streams += 1;
@@ -635,6 +759,11 @@ StreamCallback(HQUIC handle, void *opaque, QUIC_STREAM_EVENT *event)
             listener->metrics.peak_retained_receive_bytes =
                 listener->metrics.retained_receive_bytes;
         }
+        listener->metrics.physical_borrowed_receive_bytes +=
+            event->RECEIVE.TotalBufferLength;
+        listener->metrics.physical_receive_bytes +=
+            event->RECEIVE.TotalBufferLength;
+        UpdatePhysicalPeakLocked(listener);
         (void)pthread_mutex_unlock(&listener->lock);
         /* MsQuic's pinned circular receive mode emits at most two descriptors.
          * Their pointed-to byte spans remain borrowed while this receive is
@@ -646,6 +775,7 @@ StreamCallback(HQUIC handle, void *opaque, QUIC_STREAM_EVENT *event)
         stream->receive_buffer_count = event->RECEIVE.BufferCount;
         stream->receive_total = event->RECEIVE.TotalBufferLength;
         stream->borrowed_receive_bytes = event->RECEIVE.TotalBufferLength;
+        stream->physical_borrowed_receive_bytes += event->RECEIVE.TotalBufferLength;
         stream->receive_flags = event->RECEIVE.Flags;
         stream->receive_pending = 1;
         (void)pthread_cond_broadcast(&stream->changed);
@@ -1330,6 +1460,120 @@ reach_msquic_stream_copy_peer_certificate(
 }
 
 int
+reach_msquic_stream_register_receive_mapping(
+    reach_msquic_stream *stream,
+    void *base,
+    size_t body_offset,
+    size_t logical_length,
+    size_t mapped_length,
+    size_t page_size)
+{
+    uint64_t expected_length = 0;
+    uint64_t expected_body_offset = logical_length < page_size ?
+        page_size - logical_length : 0;
+    if (stream == NULL || base == NULL ||
+        !RoundReceiveMappingLength(logical_length, page_size, &expected_length) ||
+        expected_length != mapped_length ||
+        expected_body_offset != body_offset ||
+        ((uintptr_t)base % page_size) != 0) {
+        return REACH_MSQUIC_ERROR;
+    }
+    reach_msquic_listener *listener = stream->connection->listener;
+    (void)pthread_mutex_lock(&stream->lock);
+    if (stream->receive_mapping_base != NULL ||
+        stream->owned_receive_bytes != 0 ||
+        stream->physical_owned_receive_bytes != 0 ||
+        stream->closed) {
+        (void)pthread_mutex_unlock(&stream->lock);
+        return REACH_MSQUIC_REFUSED;
+    }
+    (void)pthread_mutex_lock(&listener->lock);
+    if (UINT64_MAX - listener->metrics.virtual_receive_bytes < mapped_length) {
+        (void)pthread_mutex_unlock(&listener->lock);
+        (void)pthread_mutex_unlock(&stream->lock);
+        return REACH_MSQUIC_REFUSED;
+    }
+    stream->receive_mapping_base = base;
+    stream->receive_mapping_body_offset = body_offset;
+    stream->receive_mapping_logical_length = logical_length;
+    stream->receive_mapping_length = mapped_length;
+    stream->receive_mapping_page_size = page_size;
+    listener->metrics.virtual_receive_bytes += mapped_length;
+    (void)pthread_mutex_unlock(&listener->lock);
+    (void)pthread_mutex_unlock(&stream->lock);
+    return REACH_MSQUIC_OK;
+}
+
+static int
+PrechargeReceiveDestinationLocked(
+    reach_msquic_stream *stream,
+    uint8_t *destination,
+    uint64_t copied)
+{
+    reach_msquic_listener *listener = stream->connection->listener;
+    if (stream->receive_mapping_base == NULL) {
+        uint64_t stream_physical = stream->physical_owned_receive_bytes +
+            stream->physical_borrowed_receive_bytes;
+        (void)pthread_mutex_lock(&listener->lock);
+        int fits = stream_physical <= REACH_MSQUIC_STREAM_PHYSICAL_RECEIVE_LIMIT &&
+            copied <= REACH_MSQUIC_STREAM_PHYSICAL_RECEIVE_LIMIT - stream_physical &&
+            listener->metrics.physical_receive_bytes <=
+                REACH_MSQUIC_PROCESS_PHYSICAL_RECEIVE_LIMIT &&
+            copied <= REACH_MSQUIC_PROCESS_PHYSICAL_RECEIVE_LIMIT -
+                listener->metrics.physical_receive_bytes;
+        if (fits) {
+            stream->physical_owned_receive_bytes += copied;
+            listener->metrics.physical_owned_receive_bytes += copied;
+            listener->metrics.physical_receive_bytes += copied;
+            UpdatePhysicalPeakLocked(listener);
+        }
+        (void)pthread_mutex_unlock(&listener->lock);
+        return fits;
+    }
+
+    uintptr_t base = (uintptr_t)stream->receive_mapping_base;
+    uintptr_t address = (uintptr_t)destination;
+    if (address < base ||
+        address - base != stream->receive_mapping_body_offset +
+            stream->receive_mapping_written_length ||
+        copied == 0 || copied > REACH_MSQUIC_RECEIVE_COPY_QUANTUM ||
+        copied > stream->receive_mapping_logical_length -
+            stream->receive_mapping_written_length) {
+        return 0;
+    }
+    uint64_t written = stream->receive_mapping_written_length + copied;
+    uint64_t page_size = stream->receive_mapping_page_size;
+    uint64_t rounded = stream->receive_mapping_body_offset + written;
+    uint64_t remainder = rounded % page_size;
+    if (remainder != 0) {
+        rounded += page_size - remainder;
+    }
+    if (rounded > stream->receive_mapping_length ||
+        rounded < stream->receive_mapping_charged_length) {
+        return 0;
+    }
+    uint64_t additional = rounded - stream->receive_mapping_charged_length;
+    uint64_t stream_physical = stream->physical_owned_receive_bytes +
+        stream->physical_borrowed_receive_bytes;
+    (void)pthread_mutex_lock(&listener->lock);
+    int fits = stream_physical <= REACH_MSQUIC_STREAM_PHYSICAL_RECEIVE_LIMIT &&
+        additional <= REACH_MSQUIC_STREAM_PHYSICAL_RECEIVE_LIMIT - stream_physical &&
+        listener->metrics.physical_receive_bytes <=
+            REACH_MSQUIC_PROCESS_PHYSICAL_RECEIVE_LIMIT &&
+        additional <= REACH_MSQUIC_PROCESS_PHYSICAL_RECEIVE_LIMIT -
+            listener->metrics.physical_receive_bytes;
+    if (fits) {
+        stream->physical_owned_receive_bytes += additional;
+        stream->receive_mapping_charged_length = rounded;
+        listener->metrics.physical_owned_receive_bytes += additional;
+        listener->metrics.physical_receive_bytes += additional;
+        UpdatePhysicalPeakLocked(listener);
+    }
+    (void)pthread_mutex_unlock(&listener->lock);
+    return fits;
+}
+
+int
 reach_msquic_stream_read(
     reach_msquic_stream *stream,
     uint8_t *destination,
@@ -1365,9 +1609,24 @@ reach_msquic_stream_read(
         return clean_fin ? REACH_MSQUIC_CLOSED : REACH_MSQUIC_ERROR;
     }
 
+    if (stream->handle_closed || stream->handle == NULL) {
+        (void)pthread_mutex_unlock(&stream->lock);
+        return REACH_MSQUIC_ERROR;
+    }
     size_t wanted = destination_capacity;
     if ((uint64_t)wanted > stream->receive_total) {
         wanted = (size_t)stream->receive_total;
+    }
+    if (wanted == 0 || !PrechargeReceiveDestinationLocked(stream, destination, wanted)) {
+        (void)pthread_mutex_unlock(&stream->lock);
+        return REACH_MSQUIC_REFUSED;
+    }
+    if (stream->connection->listener->receive_test_before_copy != NULL) {
+        stream->connection->listener->receive_test_before_copy(
+            stream,
+            destination,
+            wanted,
+            stream->connection->listener->receive_test_context);
     }
     size_t copied = 0;
     for (uint32_t index = 0; index < stream->receive_buffer_count && copied < wanted; ++index) {
@@ -1378,6 +1637,13 @@ reach_msquic_stream_read(
         }
         memcpy(destination + copied, buffer->Buffer, amount);
         copied += amount;
+    }
+    if (copied != wanted) {
+        (void)pthread_mutex_unlock(&stream->lock);
+        return REACH_MSQUIC_ERROR;
+    }
+    if (stream->receive_mapping_base != NULL) {
+        stream->receive_mapping_written_length += copied;
     }
     int receive_finished = copied == stream->receive_total;
     int final_fragment = receive_finished &&
@@ -1413,7 +1679,8 @@ reach_msquic_stream_release_receive_bytes(
     }
     reach_msquic_listener *listener = stream->connection->listener;
     (void)pthread_mutex_lock(&stream->lock);
-    if ((uint64_t)length > stream->owned_receive_bytes) {
+    if (stream->receive_mapping_base != NULL ||
+        (uint64_t)length > stream->owned_receive_bytes) {
         (void)pthread_mutex_unlock(&stream->lock);
         return REACH_MSQUIC_ERROR;
     }
@@ -1423,8 +1690,83 @@ reach_msquic_stream_release_receive_bytes(
         (void)pthread_mutex_unlock(&stream->lock);
         return REACH_MSQUIC_ERROR;
     }
+    if (stream->receive_mapping_base == NULL) {
+        if ((uint64_t)length > stream->physical_owned_receive_bytes ||
+            (uint64_t)length > listener->metrics.physical_owned_receive_bytes ||
+            (uint64_t)length > listener->metrics.physical_receive_bytes) {
+            (void)pthread_mutex_unlock(&listener->lock);
+            (void)pthread_mutex_unlock(&stream->lock);
+            return REACH_MSQUIC_ERROR;
+        }
+    }
     stream->owned_receive_bytes -= (uint64_t)length;
     listener->metrics.retained_receive_bytes -= (uint64_t)length;
+    if (stream->receive_mapping_base == NULL) {
+        stream->physical_owned_receive_bytes -= (uint64_t)length;
+        listener->metrics.physical_owned_receive_bytes -= (uint64_t)length;
+        listener->metrics.physical_receive_bytes -= (uint64_t)length;
+    }
+    (void)pthread_mutex_unlock(&listener->lock);
+    (void)pthread_mutex_unlock(&stream->lock);
+    ResumeSuspendedReceives(listener);
+    return REACH_MSQUIC_OK;
+}
+
+int
+reach_msquic_stream_release_receive_mapping(
+    reach_msquic_stream *stream,
+    void *base,
+    size_t body_offset,
+    size_t logical_length,
+    size_t mapped_length,
+    size_t page_size)
+{
+    if (stream == NULL || base == NULL) {
+        return REACH_MSQUIC_ERROR;
+    }
+    reach_msquic_listener *listener = stream->connection->listener;
+    (void)pthread_mutex_lock(&stream->lock);
+    if (stream->receive_mapping_base != base ||
+        stream->receive_mapping_body_offset != body_offset ||
+        stream->receive_mapping_logical_length != logical_length ||
+        stream->receive_mapping_length != mapped_length ||
+        stream->receive_mapping_page_size != page_size ||
+        stream->receive_mapping_written_length > logical_length ||
+        stream->receive_mapping_charged_length > mapped_length ||
+        stream->physical_owned_receive_bytes != stream->receive_mapping_charged_length ||
+        stream->owned_receive_bytes > logical_length) {
+        (void)pthread_mutex_unlock(&stream->lock);
+        return REACH_MSQUIC_ERROR;
+    }
+    uint64_t logical = stream->owned_receive_bytes;
+    uint64_t physical = stream->physical_owned_receive_bytes;
+    (void)pthread_mutex_lock(&listener->lock);
+    if (logical > listener->metrics.retained_receive_bytes ||
+        physical > listener->metrics.physical_owned_receive_bytes ||
+        physical > listener->metrics.physical_receive_bytes ||
+        mapped_length > listener->metrics.virtual_receive_bytes) {
+        (void)pthread_mutex_unlock(&listener->lock);
+        (void)pthread_mutex_unlock(&stream->lock);
+        return REACH_MSQUIC_ERROR;
+    }
+    if (munmap(base, mapped_length) != 0) {
+        (void)pthread_mutex_unlock(&listener->lock);
+        (void)pthread_mutex_unlock(&stream->lock);
+        return REACH_MSQUIC_ERROR;
+    }
+    stream->owned_receive_bytes = 0;
+    stream->physical_owned_receive_bytes = 0;
+    stream->receive_mapping_base = NULL;
+    stream->receive_mapping_body_offset = 0;
+    stream->receive_mapping_logical_length = 0;
+    stream->receive_mapping_length = 0;
+    stream->receive_mapping_page_size = 0;
+    stream->receive_mapping_written_length = 0;
+    stream->receive_mapping_charged_length = 0;
+    listener->metrics.retained_receive_bytes -= logical;
+    listener->metrics.physical_owned_receive_bytes -= physical;
+    listener->metrics.physical_receive_bytes -= physical;
+    listener->metrics.virtual_receive_bytes -= mapped_length;
     (void)pthread_mutex_unlock(&listener->lock);
     (void)pthread_mutex_unlock(&stream->lock);
     ResumeSuspendedReceives(listener);
@@ -1974,12 +2316,21 @@ ReceiveTestRetentionBudget(void)
         uint64_t retained = 0;
         for (uint32_t index = 0; index + 1 < REACH_MSQUIC_MAX_STREAMS_PROCESS; ++index) {
             streams[index]->owned_receive_bytes = REACH_MSQUIC_STREAM_RECEIVE_LIMIT;
+            streams[index]->physical_owned_receive_bytes =
+                REACH_MSQUIC_STREAM_RECEIVE_LIMIT;
             retained += REACH_MSQUIC_STREAM_RECEIVE_LIMIT;
         }
         streams[REACH_MSQUIC_MAX_STREAMS_PROCESS - 1]->owned_receive_bytes =
             REACH_MSQUIC_PROCESS_RECEIVE_LIMIT - retained - 1;
+        streams[REACH_MSQUIC_MAX_STREAMS_PROCESS - 1]->physical_owned_receive_bytes =
+            REACH_MSQUIC_PROCESS_RECEIVE_LIMIT - retained - 1;
         listener.metrics.retained_receive_bytes = REACH_MSQUIC_PROCESS_RECEIVE_LIMIT - 1;
         listener.metrics.peak_retained_receive_bytes = listener.metrics.retained_receive_bytes;
+        listener.metrics.physical_owned_receive_bytes =
+            REACH_MSQUIC_PROCESS_RECEIVE_LIMIT - 1;
+        listener.metrics.physical_receive_bytes = REACH_MSQUIC_PROCESS_RECEIVE_LIMIT - 1;
+        listener.metrics.peak_physical_receive_bytes =
+            listener.metrics.physical_receive_bytes;
 
         uint8_t bytes[2] = {'a', 'b'};
         QUIC_BUFFER one = {1, bytes};
@@ -2038,7 +2389,13 @@ ReceiveTestRetentionBudget(void)
             }
         }
         streams[0]->owned_receive_bytes = REACH_MSQUIC_STREAM_RECEIVE_LIMIT - 1;
+        streams[0]->physical_owned_receive_bytes =
+            REACH_MSQUIC_STREAM_RECEIVE_LIMIT - 1;
         listener.metrics.retained_receive_bytes = REACH_MSQUIC_STREAM_RECEIVE_LIMIT - 1;
+        listener.metrics.physical_owned_receive_bytes =
+            REACH_MSQUIC_STREAM_RECEIVE_LIMIT - 1;
+        listener.metrics.physical_receive_bytes =
+            REACH_MSQUIC_STREAM_RECEIVE_LIMIT - 1;
         passed = passed && ReceiveTestIndicate(
             streams[0],
             &two,
@@ -2076,6 +2433,540 @@ ReceiveTestRetentionBudget(void)
     return passed;
 }
 
+typedef struct reach_mapped_receive_test_context {
+    reach_msquic_listener *listener;
+    size_t page_size;
+    _Atomic uint32_t arrivals;
+    _Atomic uint32_t release;
+    uint32_t barrier_count;
+    _Atomic uint32_t failures;
+} reach_mapped_receive_test_context;
+
+static int
+ReceiveTestResidentPrefix(
+    uint8_t *base,
+    size_t mapped_length,
+    size_t written_length,
+    size_t page_size)
+{
+    size_t page_count = mapped_length / page_size;
+    size_t resident_pages = (written_length + page_size - 1) / page_size;
+    unsigned char *residency = calloc(page_count, 1);
+    if (residency == NULL || mincore(base, mapped_length, residency) != 0) {
+        free(residency);
+        return 0;
+    }
+    int passed = 1;
+    for (size_t index = 0; index < page_count; ++index) {
+        int resident = (residency[index] & 1U) != 0;
+        if (resident != (index < resident_pages)) {
+            passed = 0;
+            break;
+        }
+    }
+    free(residency);
+    return passed;
+}
+
+static void
+ReceiveTestBeforeMappedCopy(
+    reach_msquic_stream *stream,
+    uint8_t *destination,
+    size_t length,
+    void *opaque)
+{
+    reach_mapped_receive_test_context *context = opaque;
+    reach_msquic_listener *listener = context->listener;
+    unsigned char resident = 0;
+    uintptr_t page = (uintptr_t)destination & ~(context->page_size - 1);
+    int destination_was_resident = mincore(
+        (void *)page,
+        context->page_size,
+        &resident) == 0 && (resident & 1U) != 0;
+    (void)pthread_mutex_lock(&listener->lock);
+    int ledger_is_precharged =
+        stream->physical_borrowed_receive_bytes > 0 &&
+        stream->physical_owned_receive_bytes == stream->receive_mapping_charged_length &&
+        listener->metrics.physical_owned_receive_bytes > 0 &&
+        listener->metrics.physical_borrowed_receive_bytes > 0 &&
+        listener->metrics.physical_receive_bytes ==
+            listener->metrics.physical_owned_receive_bytes +
+                listener->metrics.physical_borrowed_receive_bytes &&
+        listener->metrics.physical_receive_bytes <=
+            REACH_MSQUIC_PROCESS_PHYSICAL_RECEIVE_LIMIT &&
+        stream->physical_owned_receive_bytes +
+                stream->physical_borrowed_receive_bytes <=
+            REACH_MSQUIC_STREAM_PHYSICAL_RECEIVE_LIMIT &&
+        length <= REACH_MSQUIC_RECEIVE_COPY_QUANTUM;
+    (void)pthread_mutex_unlock(&listener->lock);
+    if (!ledger_is_precharged || destination_was_resident) {
+        (void)atomic_fetch_add_explicit(&context->failures, 1, memory_order_relaxed);
+    }
+    uint32_t arrivals = atomic_fetch_add_explicit(
+        &context->arrivals,
+        1,
+        memory_order_acq_rel) + 1;
+    if (context->barrier_count > 0 && arrivals == context->barrier_count) {
+        atomic_store_explicit(&context->release, 1, memory_order_release);
+    }
+    while (context->barrier_count > 0 &&
+           !atomic_load_explicit(&context->release, memory_order_acquire)) {
+        (void)sched_yield();
+    }
+}
+
+static uint8_t *
+ReceiveTestCreateMapping(size_t logical_length, size_t page_size, size_t *mapped_length)
+{
+    uint64_t rounded = 0;
+    if (!RoundReceiveMappingLength(logical_length, page_size, &rounded)) {
+        return NULL;
+    }
+    *mapped_length = (size_t)rounded;
+    void *mapping = mmap(
+        NULL,
+        *mapped_length,
+        PROT_READ | PROT_WRITE,
+        MAP_PRIVATE | MAP_ANONYMOUS,
+        -1,
+        0);
+    return mapping == MAP_FAILED ? NULL : mapping;
+}
+
+static int
+ReceiveTestPopulateMapping(
+    reach_msquic_stream *stream,
+    uint8_t *mapping,
+    size_t from,
+    size_t through,
+    uint8_t *source)
+{
+    size_t offset = from;
+    while (offset < through) {
+        size_t amount = through - offset;
+        if (amount > REACH_MSQUIC_RECEIVE_COPY_QUANTUM) {
+            amount = REACH_MSQUIC_RECEIVE_COPY_QUANTUM;
+        }
+        QUIC_BUFFER descriptor = {(uint32_t)amount, source};
+        if (ReceiveTestIndicate(
+                stream,
+                &descriptor,
+                1,
+                amount,
+                QUIC_RECEIVE_FLAG_NONE) !=
+            QUIC_STATUS_PENDING) {
+            return 0;
+        }
+        size_t copied = 0;
+        int fin = 0;
+        if (reach_msquic_stream_read(
+                stream,
+                mapping + offset,
+                amount,
+                10,
+                &copied,
+                &fin) != REACH_MSQUIC_OK || copied != amount) {
+            return 0;
+        }
+        offset += amount;
+    }
+    return 1;
+}
+
+static int
+ReceiveTestMappedPrecharge(void)
+{
+    long page_size_value = sysconf(_SC_PAGESIZE);
+    if (page_size_value <= 0 || !IsValidReceivePageSize((uint64_t)page_size_value)) {
+        return 0;
+    }
+    size_t page_size = (size_t)page_size_value;
+    size_t logical_length = REACH_MSQUIC_MAX_FRAME_LENGTH - 1;
+    size_t mapped_length = 0;
+    uint8_t *mapping = ReceiveTestCreateMapping(
+        logical_length,
+        page_size,
+        &mapped_length);
+    if (mapping == NULL ||
+        !ReceiveTestResidentPrefix(mapping, mapped_length, 0, page_size)) {
+        if (mapping != NULL) (void)munmap(mapping, mapped_length);
+        return 0;
+    }
+
+    QUIC_API_TABLE api;
+    reach_msquic_listener listener;
+    reach_receive_test_capture capture = {0};
+    if (!ReceiveTestListenerInitialize(&listener, &api)) {
+        (void)munmap(mapping, mapped_length);
+        return 0;
+    }
+    reach_msquic_stream *stream = ReceiveTestStreamCreate(&listener, &capture);
+    uint8_t *source = malloc(REACH_MSQUIC_RECEIVE_COPY_QUANTUM);
+    int passed = stream != NULL && source != NULL;
+    if (passed) {
+        memset(source, 0x5a, REACH_MSQUIC_RECEIVE_COPY_QUANTUM);
+        passed = reach_msquic_stream_register_receive_mapping(
+            stream,
+            mapping,
+            0,
+            logical_length,
+            mapped_length,
+            page_size) == REACH_MSQUIC_OK;
+        passed = passed && reach_msquic_stream_register_receive_mapping(
+            stream,
+            mapping,
+            0,
+            logical_length,
+            mapped_length,
+            page_size) == REACH_MSQUIC_REFUSED;
+    }
+    reach_mapped_receive_test_context context = {
+        .listener = &listener,
+        .page_size = page_size,
+    };
+    listener.receive_test_before_copy = ReceiveTestBeforeMappedCopy;
+    listener.receive_test_context = &context;
+    size_t offset = 0;
+    while (passed && offset < logical_length) {
+        size_t amount = logical_length - offset;
+        if (amount > REACH_MSQUIC_RECEIVE_COPY_QUANTUM) {
+            amount = REACH_MSQUIC_RECEIVE_COPY_QUANTUM;
+        }
+        QUIC_BUFFER descriptor = {(uint32_t)amount, source};
+        QUIC_RECEIVE_FLAGS flags = offset + amount == logical_length ?
+            QUIC_RECEIVE_FLAG_FIN : QUIC_RECEIVE_FLAG_NONE;
+        size_t copied = 0;
+        int fin = 0;
+        passed = ReceiveTestIndicate(stream, &descriptor, 1, amount, flags) ==
+            QUIC_STATUS_PENDING &&
+            reach_msquic_stream_read(
+                stream,
+                mapping + offset,
+                amount,
+                10,
+                &copied,
+                &fin) == REACH_MSQUIC_OK &&
+            copied == amount &&
+            fin == (offset + amount == logical_length);
+        offset += amount;
+        passed = passed && ReceiveTestResidentPrefix(
+            mapping,
+            mapped_length,
+            offset,
+            page_size);
+    }
+    passed = passed &&
+        atomic_load_explicit(&context.failures, memory_order_relaxed) == 0 &&
+        listener.metrics.retained_receive_bytes == logical_length &&
+        listener.metrics.physical_owned_receive_bytes == mapped_length &&
+        listener.metrics.physical_borrowed_receive_bytes == 0 &&
+        listener.metrics.physical_receive_bytes == mapped_length &&
+        listener.metrics.peak_physical_receive_bytes <=
+            REACH_MSQUIC_STREAM_PHYSICAL_RECEIVE_LIMIT &&
+        listener.metrics.virtual_receive_bytes == mapped_length &&
+        reach_msquic_stream_release_receive_mapping(
+            stream,
+            mapping,
+            0,
+            logical_length,
+            mapped_length,
+            page_size + 1) == REACH_MSQUIC_ERROR &&
+        reach_msquic_stream_release_receive_mapping(
+            stream,
+            mapping,
+            0,
+            logical_length,
+            mapped_length,
+            page_size) == REACH_MSQUIC_OK &&
+        listener.metrics.retained_receive_bytes == 0 &&
+        listener.metrics.physical_owned_receive_bytes == 0 &&
+        listener.metrics.physical_borrowed_receive_bytes == 0 &&
+        listener.metrics.physical_receive_bytes == 0 &&
+        listener.metrics.virtual_receive_bytes == 0;
+    free(source);
+    if (stream != NULL) StreamRelease(stream);
+    ReceiveTestListenerDestroy(&listener);
+    return passed;
+}
+
+static int
+ReceiveTestMappedTailBody(void)
+{
+    long page_size_value = sysconf(_SC_PAGESIZE);
+    if (page_size_value <= 0 || !IsValidReceivePageSize((uint64_t)page_size_value)) {
+        return 0;
+    }
+    size_t page_size = (size_t)page_size_value;
+    size_t logical_length = 1;
+    size_t body_offset = page_size - logical_length;
+    size_t mapped_length = 0;
+    uint8_t *mapping = ReceiveTestCreateMapping(
+        logical_length,
+        page_size,
+        &mapped_length);
+    if (mapping == NULL || mapped_length != page_size ||
+        !ReceiveTestResidentPrefix(mapping, mapped_length, 0, page_size)) {
+        if (mapping != NULL) (void)munmap(mapping, mapped_length);
+        return 0;
+    }
+
+    QUIC_API_TABLE api;
+    reach_msquic_listener listener;
+    reach_receive_test_capture capture = {0};
+    if (!ReceiveTestListenerInitialize(&listener, &api)) {
+        (void)munmap(mapping, mapped_length);
+        return 0;
+    }
+    reach_msquic_stream *stream = ReceiveTestStreamCreate(&listener, &capture);
+    int registered = 0;
+    int released = 0;
+    int passed = stream != NULL;
+    if (passed) {
+        passed = reach_msquic_stream_register_receive_mapping(
+            stream,
+            mapping,
+            body_offset - 1,
+            logical_length,
+            mapped_length,
+            page_size) == REACH_MSQUIC_ERROR;
+    }
+    if (passed) {
+        registered = reach_msquic_stream_register_receive_mapping(
+            stream,
+            mapping,
+            body_offset,
+            logical_length,
+            mapped_length,
+            page_size) == REACH_MSQUIC_OK;
+        passed = registered;
+    }
+
+    reach_mapped_receive_test_context context = {
+        .listener = &listener,
+        .page_size = page_size,
+    };
+    listener.receive_test_before_copy = ReceiveTestBeforeMappedCopy;
+    listener.receive_test_context = &context;
+    uint8_t source = 0x5a;
+    QUIC_BUFFER descriptor = {1, &source};
+    size_t copied = 0;
+    int fin = 0;
+    if (passed) {
+        passed = ReceiveTestIndicate(
+                stream,
+                &descriptor,
+                1,
+                1,
+                QUIC_RECEIVE_FLAG_FIN) == QUIC_STATUS_PENDING &&
+            reach_msquic_stream_read(
+                stream,
+                mapping + body_offset,
+                1,
+                10,
+                &copied,
+                &fin) == REACH_MSQUIC_OK &&
+            copied == 1 && fin == 1 && mapping[body_offset] == source;
+    }
+    passed = passed &&
+        atomic_load_explicit(&context.failures, memory_order_relaxed) == 0 &&
+        ReceiveTestResidentPrefix(mapping, mapped_length, page_size, page_size) &&
+        listener.metrics.retained_receive_bytes == logical_length &&
+        listener.metrics.physical_owned_receive_bytes == mapped_length &&
+        listener.metrics.physical_borrowed_receive_bytes == 0 &&
+        listener.metrics.physical_receive_bytes == mapped_length &&
+        listener.metrics.virtual_receive_bytes == mapped_length &&
+        reach_msquic_stream_release_receive_mapping(
+            stream,
+            mapping,
+            body_offset - 1,
+            logical_length,
+            mapped_length,
+            page_size) == REACH_MSQUIC_ERROR;
+    if (passed) {
+        released = reach_msquic_stream_release_receive_mapping(
+            stream,
+            mapping,
+            body_offset,
+            logical_length,
+            mapped_length,
+            page_size) == REACH_MSQUIC_OK;
+        passed = released &&
+            listener.metrics.retained_receive_bytes == 0 &&
+            listener.metrics.physical_receive_bytes == 0 &&
+            listener.metrics.virtual_receive_bytes == 0;
+    }
+    listener.receive_test_before_copy = NULL;
+    listener.receive_test_context = NULL;
+    if (stream != NULL) StreamRelease(stream);
+    if (!registered) (void)munmap(mapping, mapped_length);
+    ReceiveTestListenerDestroy(&listener);
+    return passed;
+}
+
+typedef struct reach_mapped_receive_thread_context {
+    reach_msquic_stream *stream;
+    uint8_t *destination;
+    size_t length;
+    _Atomic uint32_t *start;
+    int status;
+} reach_mapped_receive_thread_context;
+
+static void *
+ReceiveTestMappedReadThread(void *opaque)
+{
+    reach_mapped_receive_thread_context *context = opaque;
+    while (!atomic_load_explicit(context->start, memory_order_acquire)) {
+        (void)sched_yield();
+    }
+    size_t copied = 0;
+    int fin = 0;
+    context->status = reach_msquic_stream_read(
+        context->stream,
+        context->destination,
+        context->length,
+        1000,
+        &copied,
+        &fin);
+    if (copied != context->length || !fin) {
+        context->status = REACH_MSQUIC_ERROR;
+    }
+    return NULL;
+}
+
+static int
+ReceiveTestMappedSixteenStreams(void)
+{
+    long page_size_value = sysconf(_SC_PAGESIZE);
+    if (page_size_value <= 0 || !IsValidReceivePageSize((uint64_t)page_size_value)) {
+        return 0;
+    }
+    size_t page_size = (size_t)page_size_value;
+    const size_t logical_length = REACH_MSQUIC_MAX_FRAME_LENGTH - 1;
+    const size_t final_length = REACH_MSQUIC_RECEIVE_COPY_QUANTUM - 1;
+    const size_t prefix_length = logical_length - final_length;
+    QUIC_API_TABLE api;
+    reach_msquic_listener listener;
+    reach_receive_test_capture captures[REACH_MSQUIC_MAX_STREAMS_PROCESS] = {0};
+    reach_msquic_stream *streams[REACH_MSQUIC_MAX_STREAMS_PROCESS] = {0};
+    uint8_t *mappings[REACH_MSQUIC_MAX_STREAMS_PROCESS] = {0};
+    size_t mapped_lengths[REACH_MSQUIC_MAX_STREAMS_PROCESS] = {0};
+    uint8_t *source = malloc(REACH_MSQUIC_RECEIVE_COPY_QUANTUM);
+    if (source == NULL || !ReceiveTestListenerInitialize(&listener, &api)) {
+        free(source);
+        return 0;
+    }
+    memset(source, 0x3c, REACH_MSQUIC_RECEIVE_COPY_QUANTUM);
+    int passed = 1;
+    for (uint32_t index = 0; index < REACH_MSQUIC_MAX_STREAMS_PROCESS; ++index) {
+        streams[index] = ReceiveTestStreamCreate(&listener, &captures[index]);
+        mappings[index] = ReceiveTestCreateMapping(
+            logical_length,
+            page_size,
+            &mapped_lengths[index]);
+        passed = passed && streams[index] != NULL && mappings[index] != NULL &&
+            reach_msquic_stream_register_receive_mapping(
+                streams[index],
+                mappings[index],
+                0,
+                logical_length,
+                mapped_lengths[index],
+                page_size) == REACH_MSQUIC_OK &&
+            ReceiveTestPopulateMapping(
+                streams[index],
+                mappings[index],
+                0,
+                prefix_length,
+                source);
+    }
+
+    for (uint32_t index = 0; passed && index < REACH_MSQUIC_MAX_STREAMS_PROCESS; ++index) {
+        QUIC_BUFFER descriptor = {(uint32_t)final_length, source};
+        passed = ReceiveTestIndicate(
+            streams[index],
+            &descriptor,
+            1,
+            final_length,
+            QUIC_RECEIVE_FLAG_FIN) == QUIC_STATUS_PENDING;
+    }
+    reach_mapped_receive_test_context barrier = {
+        .listener = &listener,
+        .page_size = page_size,
+        .barrier_count = REACH_MSQUIC_MAX_STREAMS_PROCESS,
+    };
+    listener.receive_test_before_copy = ReceiveTestBeforeMappedCopy;
+    listener.receive_test_context = &barrier;
+    _Atomic uint32_t start = 0;
+    pthread_t threads[REACH_MSQUIC_MAX_STREAMS_PROCESS];
+    reach_mapped_receive_thread_context contexts[REACH_MSQUIC_MAX_STREAMS_PROCESS] = {0};
+    uint32_t created = 0;
+    for (; passed && created < REACH_MSQUIC_MAX_STREAMS_PROCESS; ++created) {
+        contexts[created] = (reach_mapped_receive_thread_context){
+            .stream = streams[created],
+            .destination = mappings[created] + prefix_length,
+            .length = final_length,
+            .start = &start,
+            .status = REACH_MSQUIC_ERROR,
+        };
+        passed = pthread_create(
+            &threads[created],
+            NULL,
+            ReceiveTestMappedReadThread,
+            &contexts[created]) == 0;
+    }
+    if (created == REACH_MSQUIC_MAX_STREAMS_PROCESS) {
+        atomic_store_explicit(&start, 1, memory_order_release);
+    } else {
+        barrier.barrier_count = created;
+        atomic_store_explicit(&start, 1, memory_order_release);
+    }
+    for (uint32_t index = 0; index < created; ++index) {
+        (void)pthread_join(threads[index], NULL);
+        passed = passed && contexts[index].status == REACH_MSQUIC_OK;
+    }
+    passed = passed &&
+        atomic_load_explicit(&barrier.arrivals, memory_order_relaxed) ==
+            REACH_MSQUIC_MAX_STREAMS_PROCESS &&
+        atomic_load_explicit(&barrier.failures, memory_order_relaxed) == 0 &&
+        listener.metrics.retained_receive_bytes ==
+            (uint64_t)logical_length * REACH_MSQUIC_MAX_STREAMS_PROCESS &&
+        listener.metrics.physical_owned_receive_bytes ==
+            (uint64_t)REACH_MSQUIC_MAX_FRAME_LENGTH * REACH_MSQUIC_MAX_STREAMS_PROCESS &&
+        listener.metrics.physical_borrowed_receive_bytes == 0 &&
+        listener.metrics.physical_receive_bytes <=
+            REACH_MSQUIC_PROCESS_PHYSICAL_RECEIVE_LIMIT &&
+        listener.metrics.peak_physical_receive_bytes <=
+            REACH_MSQUIC_PROCESS_PHYSICAL_RECEIVE_LIMIT;
+
+    listener.receive_test_before_copy = NULL;
+    listener.receive_test_context = NULL;
+    for (uint32_t index = 0; index < REACH_MSQUIC_MAX_STREAMS_PROCESS; ++index) {
+        if (streams[index] != NULL && mappings[index] != NULL) {
+            passed = passed && ReceiveTestResidentPrefix(
+                mappings[index],
+                mapped_lengths[index],
+                logical_length,
+                page_size) &&
+                reach_msquic_stream_release_receive_mapping(
+                    streams[index],
+                    mappings[index],
+                    0,
+                    logical_length,
+                    mapped_lengths[index],
+                    page_size) == REACH_MSQUIC_OK;
+        } else if (mappings[index] != NULL) {
+            (void)munmap(mappings[index], mapped_lengths[index]);
+        }
+        if (streams[index] != NULL) StreamRelease(streams[index]);
+    }
+    passed = passed && listener.metrics.retained_receive_bytes == 0 &&
+        listener.metrics.physical_receive_bytes == 0 &&
+        listener.metrics.virtual_receive_bytes == 0 &&
+        listener.metrics.active_streams == 0;
+    free(source);
+    ReceiveTestListenerDestroy(&listener);
+    return passed;
+}
+
 int
 reach_msquic_receive_contract_test(uint32_t scenario, uint32_t iterations)
 {
@@ -2092,6 +2983,12 @@ reach_msquic_receive_contract_test(uint32_t scenario, uint32_t iterations)
         return ReceiveTestEmptyFin() ? REACH_MSQUIC_OK : REACH_MSQUIC_ERROR;
     case REACH_MSQUIC_RECEIVE_TEST_RETENTION_BUDGET:
         return ReceiveTestRetentionBudget() ? REACH_MSQUIC_OK : REACH_MSQUIC_ERROR;
+    case REACH_MSQUIC_RECEIVE_TEST_MAPPED_PRECHARGE:
+        return ReceiveTestMappedPrecharge() ? REACH_MSQUIC_OK : REACH_MSQUIC_ERROR;
+    case REACH_MSQUIC_RECEIVE_TEST_MAPPED_SIXTEEN_STREAMS:
+        return ReceiveTestMappedSixteenStreams() ? REACH_MSQUIC_OK : REACH_MSQUIC_ERROR;
+    case REACH_MSQUIC_RECEIVE_TEST_MAPPED_TAIL_BODY:
+        return ReceiveTestMappedTailBody() ? REACH_MSQUIC_OK : REACH_MSQUIC_ERROR;
     default:
         return REACH_MSQUIC_ERROR;
     }

@@ -88,6 +88,156 @@ final class PortableMemoryStream: SessionHostStream, @unchecked Sendable {
     }
 }
 
+private struct PortableLeasedFrame: Sendable {
+    var type: FrameType
+    var body: [UInt8]
+
+    init<Frame: WireFrame>(_ frame: Frame) throws {
+        type = Frame.frameType
+        body = Array(try JSONEncoder().encode(frame))
+    }
+}
+
+private final class PortableFrameLeaseProbe: @unchecked Sendable {
+    typealias Continuation = CheckedContinuation<RawFrame?, Never>
+
+    private let lock = NSLock()
+    private let frames: [PortableLeasedFrame]
+    private var index = 0
+    private var released: Set<Int> = []
+    private var waiter: (index: Int, continuation: Continuation)?
+    private var requestsStorage = 0
+    private var blockedStorage = 0
+    private var activeStorage = 0
+    private var peakStorage = 0
+
+    init(_ frames: [PortableLeasedFrame]) {
+        self.frames = frames
+    }
+
+    func next() async -> RawFrame? {
+        await withCheckedContinuation { continuation in
+            request(continuation)
+        }
+    }
+
+    private func request(_ continuation: Continuation) {
+        var exhausted = false
+        let delivery: (Int, PortableLeasedFrame)? = lock.withLock {
+            requestsStorage += 1
+            guard index < frames.count else {
+                exhausted = true
+                return nil
+            }
+            if index > 0, !released.contains(index - 1) {
+                precondition(waiter == nil)
+                blockedStorage += 1
+                waiter = (index, continuation)
+                return nil
+            }
+            let delivery = (index, frames[index])
+            index += 1
+            activeStorage += 1
+            peakStorage = max(peakStorage, activeStorage)
+            return delivery
+        }
+        if let delivery {
+            continuation.resume(returning: makeFrame(index: delivery.0, frame: delivery.1))
+        } else if exhausted {
+            continuation.resume(returning: nil)
+        }
+    }
+
+    private func makeFrame(index: Int, frame: PortableLeasedFrame) -> RawFrame {
+        let pointer = UnsafeMutableRawPointer.allocate(
+            byteCount: frame.body.count,
+            alignment: MemoryLayout<UInt8>.alignment
+        )
+        frame.body.withUnsafeBytes { bytes in
+            pointer.copyMemory(from: bytes.baseAddress!, byteCount: bytes.count)
+        }
+        let body = Data(
+            bytesNoCopy: pointer,
+            count: frame.body.count,
+            deallocator: .custom { [self] pointer, _ in
+                pointer.deallocate()
+                release(index)
+            }
+        )
+        return RawFrame(type: frame.type, body: body)
+    }
+
+    private func release(_ releasedIndex: Int) {
+        let delivery: (Continuation, Int, PortableLeasedFrame)? = lock.withLock {
+            precondition(released.insert(releasedIndex).inserted)
+            activeStorage -= 1
+            guard let waiter, waiter.index == releasedIndex + 1 else { return nil }
+            self.waiter = nil
+            let delivery = (waiter.continuation, index, frames[index])
+            index += 1
+            activeStorage += 1
+            peakStorage = max(peakStorage, activeStorage)
+            return delivery
+        }
+        if let delivery {
+            delivery.0.resume(returning: makeFrame(index: delivery.1, frame: delivery.2))
+        }
+    }
+
+    var snapshot: (requests: Int, blocked: Int, active: Int, peak: Int, released: Int) {
+        lock.withLock {
+            (requestsStorage, blockedStorage, activeStorage, peakStorage, released.count)
+        }
+    }
+}
+
+private final class PortableLeasedStream: SessionHostStream, @unchecked Sendable {
+    let frames: AsyncThrowingStream<RawFrame, any Error>
+    let probe: PortableFrameLeaseProbe
+    private let lock = NSLock()
+    private var encodedOutput: [Data] = []
+    private var sendingFinished = false
+    private var cancelled = false
+
+    init(_ input: [PortableLeasedFrame]) {
+        let probe = PortableFrameLeaseProbe(input)
+        self.probe = probe
+        frames = AsyncThrowingStream<RawFrame, any Error>(unfolding: {
+            await probe.next()
+        })
+    }
+
+    func send<Frame: WireFrame>(_ frame: Frame, for negotiatedVersion: UInt8) async throws {
+        let encoded = try FrameCodec.encode(frame, for: negotiatedVersion)
+        lock.withLock { encodedOutput.append(encoded) }
+    }
+
+    func finishSending() { lock.withLock { sendingFinished = true } }
+    func cancel() { lock.withLock { cancelled = true } }
+    func remoteEndpointDescription() -> String? { "127.0.0.1:47999" }
+
+    func outputFrames() throws -> [RawFrame] {
+        let snapshot = lock.withLock { encodedOutput }
+        return try snapshot.map { data in
+            var reassembler = FrameReassembler()
+            let decoded = try reassembler.feed(data)
+            return try #require(decoded.count == 1 ? decoded[0] : nil)
+        }
+    }
+}
+
+private final class PortableRetainingExtension: HostControlExtension, @unchecked Sendable {
+    private let lock = NSLock()
+    private var retained: RawFrame?
+
+    func handle(_ frame: RawFrame) async throws -> HostControlAction {
+        lock.withLock { retained = frame }
+        return .handled
+    }
+
+    func release() { lock.withLock { retained = nil } }
+}
+
 final class PortableReceiptRecorder: @unchecked Sendable {
     private let lock = NSLock()
     private var storage: [GenerationReceipt] = []
@@ -302,6 +452,98 @@ func portableOpenSession(
         let filling = try configuration.makeFilling()
         #expect(filling.modelID == "fixed-model")
         #expect(filling.loaderStartCount == 0)
+    }
+
+    @Test func ordinaryOpeningControlAndPumpFramesReleaseBeforeNextIteratorRequest() async throws {
+        let controlRegistry = SessionRegistry(receiptSink: { _ in }, replayEventSink: { _ in })
+        let controlHost = portableHost(filling: PortableImmediateFilling(), registry: controlRegistry)
+        let control = PortableLeasedStream(try [
+            PortableLeasedFrame(Hello(versions: [1], client: "lease-test")),
+            PortableLeasedFrame(SessionOpen(modelID: "fixed-model")),
+            PortableLeasedFrame(Ping(nonce: 91)),
+        ])
+        await controlHost.serve(control)
+        #expect(try control.outputFrames().map(\.type) == [.helloAck, .sessionOpened, .pong])
+        #expect(control.probe.snapshot.requests == 4)
+        #expect(control.probe.snapshot.blocked == 0)
+        #expect(control.probe.snapshot.active == 0)
+        #expect(control.probe.snapshot.peak == 1)
+        #expect(control.probe.snapshot.released == 3)
+        await controlHost.shutdown()
+
+        let generationProbe = PortableExecutionProbe()
+        let generationRegistry = SessionRegistry(receiptSink: { _ in }, replayEventSink: { _ in })
+        let admission = SlotAdmission(eventSink: { _ in })
+        let generationHost = portableHost(
+            filling: PortableControlledFilling(probe: generationProbe),
+            registry: generationRegistry,
+            admission: admission
+        )
+        let sessionID = await generationRegistry.openSession().sessionID
+        let genID = UUID()
+        let requestID = UUID()
+        let generation = PortableLeasedStream(try [
+            PortableLeasedFrame(GenerateBegin(
+                sessionID: sessionID,
+                genID: genID,
+                request: portableRequest(requestID)
+            )),
+            PortableLeasedFrame(EvAck(seq: 0)),
+            PortableLeasedFrame(GenerateCancel(genID: genID)),
+        ])
+        await generationHost.serve(generation)
+        #expect(generation.probe.snapshot.requests == 4)
+        #expect(generation.probe.snapshot.blocked == 0)
+        #expect(generation.probe.snapshot.active == 0)
+        #expect(generation.probe.snapshot.peak == 1)
+        #expect(generation.probe.snapshot.released == 3)
+        #expect(await portableEventually { generationProbe.snapshot.active == 0 })
+        #expect(await admission.counters.active == 0)
+        await generationHost.shutdown()
+    }
+
+    @Test func deliberatelyRetainedExtensionFrameBackpressuresWithoutAllocatingTheNextFrame() async throws {
+        let retainedExtension = PortableRetainingExtension()
+        let registry = SessionRegistry(receiptSink: { _ in }, replayEventSink: { _ in })
+        let filling = PortableImmediateFilling()
+        let host = SessionHost(
+            filling: filling,
+            registry: registry,
+            helloAck: { version in
+                HelloAck(version: version, cluster: "fixed-cluster", models: [])
+            },
+            sessionOpened: { "session \($0) opened from \($1)" },
+            info: { _ in },
+            error: { _ in },
+            controlExtension: { _ in retainedExtension }
+        )
+        let stream = PortableLeasedStream(try [
+            PortableLeasedFrame(Hello(versions: [1], client: "retaining-test")),
+            PortableLeasedFrame(ErrorFrame(
+                code: "retained-extension-frame",
+                message: String(repeating: "x", count: 1_024)
+            )),
+            PortableLeasedFrame(Ping(nonce: 92)),
+        ])
+        let serving = Task { await host.serve(stream) }
+
+        #expect(await portableEventually { stream.probe.snapshot.blocked == 1 })
+        let held = stream.probe.snapshot
+        #expect(held.requests == 3)
+        #expect(held.active == 1)
+        #expect(held.peak == 1)
+        #expect(held.released == 1)
+        #expect(try stream.outputFrames().map(\.type) == [.helloAck])
+
+        retainedExtension.release()
+        await serving.value
+        #expect(try stream.outputFrames().map(\.type) == [.helloAck, .pong])
+        #expect(stream.probe.snapshot.requests == 4)
+        #expect(stream.probe.snapshot.blocked == 1)
+        #expect(stream.probe.snapshot.active == 0)
+        #expect(stream.probe.snapshot.peak == 1)
+        #expect(stream.probe.snapshot.released == 3)
+        await host.shutdown()
     }
 
     @Test func negotiationOpenOrderedEventsAckAndShutdownUseTheSharedHost() async throws {
