@@ -149,8 +149,11 @@ public enum LinuxSystemdNotifier {
     }
 }
 
-private final class ListenerHandle: @unchecked Sendable {
+final class ListenerHandle: @unchecked Sendable {
+    typealias Destroyer = (OpaquePointer) -> Void
+
     let pointer: OpaquePointer
+    private let destroyer: Destroyer
     private let lock = NSLock()
     private var stopped = false
 
@@ -188,13 +191,21 @@ private final class ListenerHandle: @unchecked Sendable {
             throw LinuxTransportError.startup(detail)
         }
         pointer = resultPointer
+        destroyer = { pointer in
+            _ = reach_msquic_listener_destroy(pointer)
+        }
+    }
+
+    init(testing pointer: OpaquePointer, destroyer: @escaping Destroyer) {
+        self.pointer = pointer
+        self.destroyer = destroyer
     }
 
     deinit {
-        _ = reach_msquic_listener_destroy(pointer)
+        destroyer(pointer)
     }
 
-    func accept() -> ListenerAcceptResult {
+    fileprivate func accept() -> ListenerAcceptResult {
         var stream: OpaquePointer?
         let status = reach_msquic_listener_accept(pointer, 250, &stream)
         return ListenerAcceptResult(status: status, stream: stream)
@@ -249,15 +260,33 @@ private struct ListenerAcceptResult: @unchecked Sendable {
     var stream: OpaquePointer?
 }
 
-private final class StreamHandle: @unchecked Sendable {
-    let pointer: OpaquePointer
+final class StreamHandle: @unchecked Sendable {
+    typealias Releaser = (OpaquePointer) -> Void
 
-    init(transferring pointer: OpaquePointer) {
+    let pointer: OpaquePointer
+    private let listenerOwner: ListenerHandle
+    private let releaser: Releaser
+
+    init(
+        transferring pointer: OpaquePointer,
+        listenerOwner: ListenerHandle,
+        releaser: @escaping Releaser = { reach_msquic_stream_release($0) }
+    ) {
         self.pointer = pointer
+        self.listenerOwner = listenerOwner
+        self.releaser = releaser
     }
 
     deinit {
-        reach_msquic_stream_release(pointer)
+        // C stream release can dereference stream->connection->listener. Keep
+        // the exact accepting owner live through that call instead of relying
+        // on Swift's stored-property destruction order.
+        releaser(pointer)
+        withExtendedLifetime(listenerOwner) {}
+    }
+
+    func retainsListener(_ listener: ListenerHandle) -> Bool {
+        listenerOwner === listener
     }
 
     func peerCertificate() -> Data? {
@@ -353,9 +382,11 @@ struct FrameMappingIdentity: @unchecked Sendable {
 
 final class FrameStorageLease: @unchecked Sendable {
     typealias Releaser = @Sendable (FrameMappingIdentity, Int) -> Bool
+    typealias WaiterInstalledObserver = @Sendable () -> Void
 
     let identity: FrameMappingIdentity
     private let releaser: Releaser
+    private let waiterInstalledObserver: WaiterInstalledObserver
     private let lock = NSLock()
     private var transferredBytes = 0
     private var releaseStarted = false
@@ -363,9 +394,14 @@ final class FrameStorageLease: @unchecked Sendable {
     private var cancellationRequested = false
     private var waiter: CheckedContinuation<Void, any Error>?
 
-    init(identity: FrameMappingIdentity, releaser: @escaping Releaser) {
+    init(
+        identity: FrameMappingIdentity,
+        releaser: @escaping Releaser,
+        waiterInstalledObserver: @escaping WaiterInstalledObserver = {}
+    ) {
         self.identity = identity
         self.releaser = releaser
+        self.waiterInstalledObserver = waiterInstalledObserver
     }
 
     func recordTransfer(_ count: Int) {
@@ -401,17 +437,24 @@ final class FrameStorageLease: @unchecked Sendable {
     func waitForRelease() async throws {
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
+                let installed: Bool
                 lock.lock()
                 if released {
                     lock.unlock()
+                    installed = false
                     continuation.resume()
                 } else if cancellationRequested || Task.isCancelled {
                     lock.unlock()
+                    installed = false
                     continuation.resume(throwing: CancellationError())
                 } else {
                     precondition(waiter == nil)
                     waiter = continuation
                     lock.unlock()
+                    installed = true
+                }
+                if installed {
+                    waiterInstalledObserver()
                 }
             }
         } onCancel: {
@@ -631,12 +674,17 @@ private final class CFrameByteSource: LinuxFrameByteSource, @unchecked Sendable 
 
 final class LinuxFrameReader: @unchecked Sendable {
     private let source: any LinuxFrameByteSource
+    private let outstandingWaiterInstalledObserver: FrameStorageLease.WaiterInstalledObserver
     private let lock = NSLock()
     private var inputFinished = false
     private var outstandingLease: FrameStorageLease?
 
-    init(source: any LinuxFrameByteSource) {
+    init(
+        source: any LinuxFrameByteSource,
+        outstandingWaiterInstalledObserver: @escaping FrameStorageLease.WaiterInstalledObserver = {}
+    ) {
         self.source = source
+        self.outstandingWaiterInstalledObserver = outstandingWaiterInstalledObserver
     }
 
     private func hasFinishedInput() -> Bool {
@@ -709,9 +757,13 @@ final class LinuxFrameReader: @unchecked Sendable {
             guard source.registerBodyMapping(allocation) else {
                 throw LinuxTransportError.receive("transport refused frame body mapping")
             }
-            let lease = FrameStorageLease(identity: allocation.mappingIdentity) { [source] identity, transferred in
-                source.releaseBodyMapping(identity, transferredBytes: transferred)
-            }
+            let lease = FrameStorageLease(
+                identity: allocation.mappingIdentity,
+                releaser: { [source] identity, transferred in
+                    source.releaseBodyMapping(identity, transferredBytes: transferred)
+                },
+                waiterInstalledObserver: outstandingWaiterInstalledObserver
+            )
             allocation.bindLease(lease)
             var offset = 0
             var finished = false
@@ -822,8 +874,8 @@ public final class LinuxSessionStream: SessionHostStream, @unchecked Sendable {
     private let incoming: AsyncThrowingStream<RawFrame, any Error>
     private let peerDER: Data?
 
-    fileprivate init(transferring pointer: OpaquePointer) {
-        let handle = StreamHandle(transferring: pointer)
+    fileprivate init(transferring pointer: OpaquePointer, listenerOwner: ListenerHandle) {
+        let handle = StreamHandle(transferring: pointer, listenerOwner: listenerOwner)
         self.handle = handle
         let reader = LinuxFrameReader(source: CFrameByteSource(handle: handle))
         self.reader = reader
@@ -881,7 +933,7 @@ public final class ReachLinuxListener: @unchecked Sendable {
                 guard let pointer = result.stream else {
                     throw LinuxTransportError.receive("accepted stream was missing")
                 }
-                return LinuxSessionStream(transferring: pointer)
+                return LinuxSessionStream(transferring: pointer, listenerOwner: handle)
             case reachStatusTimeout:
                 continue
             case reachStatusClosed:

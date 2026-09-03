@@ -17,17 +17,23 @@ private final class ScriptedByteSource: LinuxFrameByteSource, @unchecked Sendabl
     private var mappingReleaseCount = 0
     private let failAfterReadRequests: Int?
     private let refuseMapping: Bool
+    private let lifetimeAnchor: AnyObject?
+    private let mappingReleaseObserver: @Sendable () -> Void
 
     init(
         _ bytes: Data,
         fragmentSize: Int,
         failAfterReadRequests: Int? = nil,
-        refuseMapping: Bool = false
+        refuseMapping: Bool = false,
+        lifetimeAnchor: AnyObject? = nil,
+        mappingReleaseObserver: @escaping @Sendable () -> Void = {}
     ) {
         self.bytes = bytes
         self.fragmentSize = max(fragmentSize, 1)
         self.failAfterReadRequests = failAfterReadRequests
         self.refuseMapping = refuseMapping
+        self.lifetimeAnchor = lifetimeAnchor
+        self.mappingReleaseObserver = mappingReleaseObserver
     }
 
     func read(into allocation: FrameAllocation, offset: Int, count: Int) async -> BlockingRead {
@@ -97,6 +103,7 @@ private final class ScriptedByteSource: LinuxFrameByteSource, @unchecked Sendabl
         retainedBytes -= transferredBytes
         mappingReleaseCount += 1
         lock.unlock()
+        mappingReleaseObserver()
         return true
     }
 
@@ -189,28 +196,211 @@ private final class MappingReleaseProbe: @unchecked Sendable {
     }
 }
 
-private final class DataOwnerBox {
-    var value: Data?
+private final class DataOwnerBox: @unchecked Sendable {
+    private var value: Data?
 
-    init(_ value: Data?) {
+    init(_ value: Data) {
         self.value = value
+    }
+
+    func makeCopyOwner() -> DataOwnerBox {
+        guard let value else { preconditionFailure("data owner was already cleared") }
+        return DataOwnerBox(value)
+    }
+
+    func observe<Result>(_ body: (Data) throws -> Result) rethrows -> Result {
+        guard let value else { preconditionFailure("data owner was already cleared") }
+        return try body(value)
+    }
+
+    func clearWithoutReading() {
+        value = nil
     }
 }
 
-private func nextBody(from reader: LinuxFrameReader) async throws -> Data {
+private func nextBodyOwner(from reader: LinuxFrameReader) async throws -> DataOwnerBox {
     guard let frame = try await reader.nextFrame() else {
         throw LinuxTransportError.streamClosed
     }
-    return frame.body
-}
-
-private func pingNonce(from frame: RawFrame?) throws -> UInt64 {
-    guard let frame else { throw LinuxTransportError.streamClosed }
-    return try frame.decode(Ping.self).nonce
+    return DataOwnerBox(frame.body)
 }
 
 private func encodedHello() throws -> Data {
     try FrameCodec.encode(Hello(versions: [1, 0], client: "linux-transport-test"))
+}
+
+private struct FocusedDiagnosticTimeout: Error {}
+
+private let focusedDiagnosticNanoseconds: UInt64 = 10_000_000_000
+
+private func withFocusedDiagnosticDeadline<Value: Sendable>(
+    onTimeout: @escaping @Sendable () -> Void,
+    operation: @escaping @Sendable () async throws -> Value
+) async throws -> Value {
+    try await withThrowingTaskGroup(of: Value.self) { group in
+        group.addTask {
+            try await withTaskCancellationHandler(
+                operation: operation,
+                onCancel: onTimeout
+            )
+        }
+        group.addTask {
+            try await Task.sleep(nanoseconds: focusedDiagnosticNanoseconds)
+            throw FocusedDiagnosticTimeout()
+        }
+        defer { group.cancelAll() }
+        guard let result = try await group.next() else {
+            throw FocusedDiagnosticTimeout()
+        }
+        return result
+    }
+}
+
+private final class WaiterInstalledProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var installed = false
+    private var cancelled = false
+    private var waiter: CheckedContinuation<Void, any Error>?
+
+    func signal() {
+        let continuation: CheckedContinuation<Void, any Error>?
+        lock.lock()
+        installed = true
+        continuation = waiter
+        waiter = nil
+        lock.unlock()
+        continuation?.resume()
+    }
+
+    func wait() async throws {
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                lock.lock()
+                if installed {
+                    lock.unlock()
+                    continuation.resume()
+                } else if cancelled || Task.isCancelled {
+                    lock.unlock()
+                    continuation.resume(throwing: CancellationError())
+                } else {
+                    precondition(waiter == nil)
+                    waiter = continuation
+                    lock.unlock()
+                }
+            }
+        } onCancel: {
+            self.cancel()
+        }
+    }
+
+    func cancel() {
+        let continuation: CheckedContinuation<Void, any Error>?
+        lock.lock()
+        cancelled = true
+        continuation = waiter
+        waiter = nil
+        lock.unlock()
+        continuation?.resume(throwing: CancellationError())
+    }
+}
+
+private final class LifetimeOrderProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: [String] = []
+
+    func record(_ event: String) {
+        lock.withLock { recorded.append(event) }
+    }
+
+    var events: [String] {
+        lock.withLock { recorded }
+    }
+}
+
+private final class NextFrameTaskBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var task: Task<RawFrame?, any Error>?
+
+    init(reader: LinuxFrameReader) {
+        task = Task { try await reader.nextFrame() }
+    }
+
+    func pingNonce() async throws -> UInt64 {
+        let task = lock.withLock { self.task }
+        guard let task else { throw LinuxTransportError.streamClosed }
+        guard let frame = try await task.value else {
+            throw LinuxTransportError.streamClosed
+        }
+        return try frame.decode(Ping.self).nonce
+    }
+
+    func cancel() {
+        lock.withLock { task }?.cancel()
+    }
+
+    func clearWithoutReading() {
+        lock.withLock { task = nil }
+    }
+}
+
+private func syntheticPointer(_ value: UInt) -> OpaquePointer {
+    OpaquePointer(bitPattern: value)!
+}
+
+private func mappedBodyOwner(
+    retaining stream: StreamHandle,
+    order: LifetimeOrderProbe
+) async throws -> DataOwnerBox {
+    let source = ScriptedByteSource(
+        try FrameCodec.encode(Ping(nonce: 11)),
+        fragmentSize: 17,
+        lifetimeAnchor: stream,
+        mappingReleaseObserver: { order.record("mapping") }
+    )
+    let reader = LinuxFrameReader(source: source)
+    let owner = try await withFocusedDiagnosticDeadline(
+        onTimeout: reader.cancel,
+        operation: { try await nextBodyOwner(from: reader) }
+    )
+    reader.cancel()
+    return owner
+}
+
+private func proveZeroBodyDoesNotLeak(retaining stream: StreamHandle) async throws {
+    let source = ScriptedByteSource(
+        Data([0, 0, 0, 1, FrameType.ping.rawValue]),
+        fragmentSize: 5,
+        lifetimeAnchor: stream
+    )
+    let reader = LinuxFrameReader(source: source)
+    let frame = try await withFocusedDiagnosticDeadline(
+        onTimeout: reader.cancel,
+        operation: reader.nextFrame
+    )
+    #expect(frame?.type == .ping)
+    #expect(frame?.body.isEmpty == true)
+}
+
+private func provePretransferRefusalDoesNotLeak(retaining stream: StreamHandle) async throws {
+    let source = ScriptedByteSource(
+        try FrameCodec.encode(Ping(nonce: 12)),
+        fragmentSize: 17,
+        refuseMapping: true,
+        lifetimeAnchor: stream
+    )
+    let reader = LinuxFrameReader(source: source)
+    do {
+        _ = try await withFocusedDiagnosticDeadline(
+            onTimeout: reader.cancel,
+            operation: reader.nextFrame
+        )
+        Issue.record("mapping refusal unexpectedly produced a frame")
+    } catch is FocusedDiagnosticTimeout {
+        throw FocusedDiagnosticTimeout()
+    } catch {
+        #expect(source.retained == 0)
+        #expect(source.snapshot.releases == 0)
+    }
 }
 
 @Suite(.serialized) struct LinuxTransportTests {
@@ -407,42 +597,192 @@ private func encodedHello() throws -> Data {
         let first = try FrameCodec.encode(Ping(nonce: 7))
         let second = try FrameCodec.encode(Ping(nonce: 8))
         let source = ScriptedByteSource(first + second, fragmentSize: 17)
-        let reader = LinuxFrameReader(source: source)
-        let held = DataOwnerBox(try await nextBody(from: reader))
-        let copy = DataOwnerBox(held.value)
-        let pointer = held.value!.withUnsafeBytes { UInt(bitPattern: $0.baseAddress!) }
+        let waiterInstalled = WaiterInstalledProbe()
+        let reader = LinuxFrameReader(
+            source: source,
+            outstandingWaiterInstalledObserver: waiterInstalled.signal
+        )
+        let held = try await withFocusedDiagnosticDeadline(
+            onTimeout: reader.cancel,
+            operation: { try await nextBodyOwner(from: reader) }
+        )
+        let copy = held.makeCopyOwner()
+        let pointer = held.observe { value in
+            value.withUnsafeBytes { UInt(bitPattern: $0.baseAddress!) }
+        }
         #expect(source.snapshot.destinations.allSatisfy { $0 == pointer })
-        #expect(copy.value?.withUnsafeBytes { UInt(bitPattern: $0.baseAddress!) } == pointer)
-        held.value = nil
+        copy.observe { value in
+            #expect(value.withUnsafeBytes { UInt(bitPattern: $0.baseAddress!) } == pointer)
+        }
 
         let readsBeforeWait = source.snapshot.reads
-        let next = Task { try await reader.nextFrame() }
-        for _ in 0 ..< 100 { await Task.yield() }
-        #expect(source.snapshot.reads == readsBeforeWait)
-        #expect(source.snapshot.releases == 0)
-        #expect(source.retained > 0)
+        let retainedBeforeWait = source.retained
+        #expect(retainedBeforeWait > 0)
+        let next = NextFrameTaskBox(reader: reader)
+        do {
+            try await withFocusedDiagnosticDeadline(
+                onTimeout: waiterInstalled.cancel,
+                operation: waiterInstalled.wait
+            )
+            #expect(source.snapshot.reads == readsBeforeWait)
+            #expect(source.snapshot.releases == 0)
+            #expect(source.retained == retainedBeforeWait)
 
-        copy.value = nil
-        #expect(try await pingNonce(from: next.value) == 8)
-        #expect(source.snapshot.releases == 1)
-        #expect(try await reader.nextFrame() == nil)
-        #expect(source.snapshot.releases == 2)
+            held.clearWithoutReading()
+            #expect(source.snapshot.reads == readsBeforeWait)
+            #expect(source.snapshot.releases == 0)
+            #expect(source.retained == retainedBeforeWait)
+
+            copy.clearWithoutReading()
+            let nonce = try await withFocusedDiagnosticDeadline(
+                onTimeout: {
+                    next.cancel()
+                    reader.cancel()
+                },
+                operation: next.pingNonce
+            )
+            #expect(nonce == 8)
+            #expect(source.snapshot.releases == 1)
+            next.clearWithoutReading()
+            let terminal = try await withFocusedDiagnosticDeadline(
+                onTimeout: reader.cancel,
+                operation: reader.nextFrame
+            )
+            #expect(terminal == nil)
+            #expect(source.snapshot.releases == 2)
+        } catch {
+            next.cancel()
+            reader.cancel()
+            next.clearWithoutReading()
+            throw error
+        }
     }
 
     @Test func cancelDoesNotReleaseRetainedMappedBodyEarly() async throws {
         let encoded = try FrameCodec.encode(Ping(nonce: 9))
         let source = ScriptedByteSource(encoded, fragmentSize: encoded.count)
         let reader = LinuxFrameReader(source: source)
-        let held = DataOwnerBox(try await nextBody(from: reader))
-        let expected = DataOwnerBox(held.value)
+        let held = try await withFocusedDiagnosticDeadline(
+            onTimeout: reader.cancel,
+            operation: { try await nextBodyOwner(from: reader) }
+        )
+        let expected = held.makeCopyOwner()
         reader.cancel()
         #expect(source.retained > 0)
         #expect(source.snapshot.releases == 0)
-        #expect(held.value == expected.value)
-        held.value = nil
+        held.observe { heldValue in
+            expected.observe { expectedValue in
+                #expect(heldValue == expectedValue)
+            }
+        }
+        held.clearWithoutReading()
         #expect(source.snapshot.releases == 0)
-        expected.value = nil
+        expected.clearWithoutReading()
         #expect(source.snapshot.releases == 1)
+    }
+
+    @Test func mappedBodyRetainsListenerUntilStreamReleaseCompletes() async throws {
+        let order = LifetimeOrderProbe()
+        var listener: ListenerHandle? = ListenerHandle(
+            testing: syntheticPointer(0x1000),
+            destroyer: { _ in order.record("listener") }
+        )
+        weak var listenerReference = listener
+        var stream: StreamHandle? = StreamHandle(
+            transferring: syntheticPointer(0x2000),
+            listenerOwner: listener!,
+            releaser: { _ in order.record("stream") }
+        )
+        #expect(stream?.retainsListener(listener!) == true)
+        weak var streamReference = stream
+        let bodyOwner = try await mappedBodyOwner(retaining: stream!, order: order)
+
+        listener = nil
+        stream = nil
+        #expect(listenerReference != nil)
+        #expect(streamReference != nil)
+        #expect(order.events.isEmpty)
+
+        bodyOwner.clearWithoutReading()
+        #expect(streamReference == nil)
+        #expect(listenerReference == nil)
+        #expect(order.events == ["mapping", "stream", "listener"])
+    }
+
+    @Test func listenerOwnerIsSharedAcrossAcceptedStreamsAndDestroyedLast() {
+        let order = LifetimeOrderProbe()
+        var listener: ListenerHandle? = ListenerHandle(
+            testing: syntheticPointer(0x3000),
+            destroyer: { _ in order.record("listener") }
+        )
+        weak var listenerReference = listener
+        var first: StreamHandle? = StreamHandle(
+            transferring: syntheticPointer(0x4000),
+            listenerOwner: listener!,
+            releaser: { _ in order.record("stream-1") }
+        )
+        var second: StreamHandle? = StreamHandle(
+            transferring: syntheticPointer(0x5000),
+            listenerOwner: listener!,
+            releaser: { _ in order.record("stream-2") }
+        )
+        #expect(first?.retainsListener(listener!) == true)
+        #expect(second?.retainsListener(listener!) == true)
+
+        listener = nil
+        first = nil
+        #expect(listenerReference != nil)
+        #expect(order.events == ["stream-1"])
+        second = nil
+        #expect(listenerReference == nil)
+        #expect(order.events == ["stream-1", "stream-2", "listener"])
+    }
+
+    @Test func zeroBodyAndPretransferRefusalDoNotLeakOrDestroyListenerEarly() async throws {
+        for scenario in ["zero-body", "pretransfer-refusal"] {
+            let order = LifetimeOrderProbe()
+            var listener: ListenerHandle? = ListenerHandle(
+                testing: syntheticPointer(0x6000),
+                destroyer: { _ in order.record("listener") }
+            )
+            weak var listenerReference = listener
+            var stream: StreamHandle? = StreamHandle(
+                transferring: syntheticPointer(0x7000),
+                listenerOwner: listener!,
+                releaser: { _ in order.record("stream") }
+            )
+            listener = nil
+            #expect(listenerReference != nil)
+            if scenario == "zero-body" {
+                try await proveZeroBodyDoesNotLeak(retaining: stream!)
+            } else {
+                try await provePretransferRefusalDoesNotLeak(retaining: stream!)
+            }
+            #expect(order.events.isEmpty)
+            stream = nil
+            #expect(listenerReference == nil)
+            #expect(order.events == ["stream", "listener"])
+        }
+    }
+
+    @Test func productionAcceptEdgeRequiresAndForwardsTheExactListenerOwner() throws {
+        let testFile = URL(fileURLWithPath: #filePath)
+        let sourceFile = testFile
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Sources/ReachLinuxTransport/LinuxTransport.swift")
+        let source = try String(contentsOf: sourceFile, encoding: .utf8)
+        #expect(source.contains(
+            "fileprivate init(transferring pointer: OpaquePointer, listenerOwner: ListenerHandle)"
+        ))
+        #expect(source.contains(
+            "let handle = StreamHandle(transferring: pointer, listenerOwner: listenerOwner)"
+        ))
+        #expect(source.contains(
+            "return LinuxSessionStream(transferring: pointer, listenerOwner: handle)"
+        ))
+        #expect(!source.contains("return LinuxSessionStream(transferring: pointer)"))
     }
 
     @Test func mappingRefusalAndPartialBodyFailureReleaseExactlyOnceWithoutHandoff() async throws {
