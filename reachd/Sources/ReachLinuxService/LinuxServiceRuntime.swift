@@ -274,6 +274,104 @@ struct LinuxShutdownClock: Sendable {
     )
 }
 
+struct LinuxSweepObservation: Sendable, Equatable {
+    var scheduledNanoseconds: UInt64
+    var observedNanoseconds: UInt64
+    var delayNanoseconds: UInt64
+    var skippedDeadlines: UInt64
+}
+
+struct LinuxSweepSchedule: Sendable {
+    static let intervalNanoseconds: UInt64 = 1_000_000_000
+
+    private(set) var nextDeadline: UInt64
+
+    init(startedAt: UInt64) {
+        let (deadline, overflow) = startedAt.addingReportingOverflow(Self.intervalNanoseconds)
+        nextDeadline = overflow ? UInt64.max : deadline
+    }
+
+    mutating func observed(at now: UInt64) -> LinuxSweepObservation {
+        let scheduled = nextDeadline
+        let delay = now >= scheduled ? now - scheduled : 0
+        var skipped: UInt64 = 0
+        repeat {
+            let (advanced, overflow) = nextDeadline.addingReportingOverflow(
+                Self.intervalNanoseconds
+            )
+            nextDeadline = overflow ? UInt64.max : advanced
+            if nextDeadline <= now, nextDeadline != UInt64.max { skipped += 1 }
+        } while nextDeadline <= now && nextDeadline != UInt64.max
+        return .init(
+            scheduledNanoseconds: scheduled,
+            observedNanoseconds: now,
+            delayNanoseconds: delay,
+            skippedDeadlines: skipped
+        )
+    }
+}
+
+struct LinuxSweepClock: Sendable {
+    var now: @Sendable () -> UInt64
+    var sleepUntil: @Sendable (UInt64) async throws -> Void
+
+    static let production = LinuxSweepClock(
+        now: { reach_msquic_monotonic_now_nanoseconds() },
+        sleepUntil: { deadline in
+            let now = reach_msquic_monotonic_now_nanoseconds()
+            guard now < deadline else { return }
+            try await Task.sleep(nanoseconds: deadline - now)
+        }
+    )
+}
+
+final class LinuxSessionSweeper: @unchecked Sendable {
+    typealias Sweep = @Sendable () async -> Int
+    typealias Observer = @Sendable (LinuxSweepObservation, Int) -> Void
+
+    private let task: Task<Void, Never>
+
+    init(
+        clock: LinuxSweepClock = .production,
+        sweep: @escaping Sweep,
+        observer: @escaping Observer = { observation, reaped in
+            print(
+                "[reachd] registry sweep delay_ns=\(observation.delayNanoseconds) " +
+                "skipped=\(observation.skippedDeadlines) reaped=\(reaped)"
+            )
+        }
+    ) {
+        let startedAt = clock.now()
+        task = Task {
+            var schedule = LinuxSweepSchedule(startedAt: startedAt)
+            while !Task.isCancelled {
+                do {
+                    try await clock.sleepUntil(schedule.nextDeadline)
+                } catch {
+                    return
+                }
+                guard !Task.isCancelled else { return }
+                let observation = schedule.observed(at: clock.now())
+                let reaped = await sweep()
+                observer(observation, reaped)
+            }
+        }
+    }
+
+    func cancel() {
+        task.cancel()
+    }
+
+    func wait() async {
+        await task.value
+    }
+
+    func cancelAndWait() async {
+        cancel()
+        await wait()
+    }
+}
+
 private actor LinuxShutdownRace {
     enum Outcome: Sendable {
         case settled((any Error)?)
@@ -390,6 +488,7 @@ public enum LinuxServiceRuntime {
         )
         try LinuxStatusWriter.write(initial)
         try LinuxSystemdNotifier.notify("READY=1\nSTATUS=Reach Linux listener ready")
+        let sweeper = LinuxSessionSweeper(sweep: { await host.sweep() })
 
         let acceptTask = Task {
             do {
@@ -440,6 +539,7 @@ public enum LinuxServiceRuntime {
         acceptTask.cancel()
         signalTask.cancel()
         statusTask.cancel()
+        sweeper.cancel()
 
         var shutdownError: Error?
         do {
@@ -459,6 +559,7 @@ public enum LinuxServiceRuntime {
                         return .success(())
                     },
                     host: { _ in
+                        await sweeper.wait()
                         await host.shutdown()
                         return .success(())
                     },

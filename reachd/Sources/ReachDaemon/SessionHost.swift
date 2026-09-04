@@ -1,3 +1,4 @@
+import Crypto
 import Foundation
 import ReachWire
 
@@ -51,6 +52,7 @@ public final class SessionHost: Sendable {
     private let error: @Sendable (String) -> Void
     private let isOrdinaryPeerDeparture: @Sendable (any Error) -> Bool
     private let controlExtension: HostControlExtensionFactory
+    private let shutdownGate = SessionHostShutdownGate()
 
     public init(
         filling: any SlotFilling,
@@ -102,15 +104,28 @@ public final class SessionHost: Sendable {
     }
 
     public func shutdown() async {
+        guard shutdownGate.begin() else {
+            await shutdownGate.wait()
+            return
+        }
         await admission.shutdown()
         await registry.shutdown()
+        await filling.shutdown()
+        shutdownGate.finish()
     }
 
-    package func sweep() async {
+    @discardableResult
+    package func sweep() async -> Int {
         await registry.sweep()
     }
 
     public func serve<Stream: SessionHostStream>(_ stream: Stream) async {
+        if let peerCertificate = stream.peerCertificateDER() {
+            let fingerprint = SHA256.hash(data: peerCertificate)
+                .map { String(format: "%02x", $0) }
+                .joined()
+            info("authenticated peer leaf sha256 \(fingerprint)")
+        }
         var iterator = stream.frames.makeAsyncIterator()
         do {
             guard let opening = try await nextOpening(from: &iterator) else {
@@ -206,7 +221,7 @@ public final class SessionHost: Sendable {
             case .broke(let error):
                 return .broke(error)
             case .sessionOpen:
-                let (sessionID, token) = await registry.openSession(version: version)
+                let (sessionID, token) = try await registry.openSessionIfAccepting(version: version)
                 try await stream.send(
                     SessionOpened(sessionID: sessionID, token: token, capabilities: filling.capabilities),
                     for: version
@@ -454,6 +469,53 @@ public final class SessionHost: Sendable {
         }
     }
 
+}
+
+private final class SessionHostShutdownGate: @unchecked Sendable {
+    private enum Phase {
+        case open
+        case running
+        case complete
+    }
+
+    private let lock = NSLock()
+    private var phase = Phase.open
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func begin() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard case .open = phase else { return false }
+        phase = .running
+        return true
+    }
+
+    func wait() async {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if case .complete = phase {
+                lock.unlock()
+                continuation.resume()
+            } else {
+                waiters.append(continuation)
+                lock.unlock()
+            }
+        }
+    }
+
+    func finish() {
+        let resumed: [CheckedContinuation<Void, Never>]
+        lock.lock()
+        guard case .running = phase else {
+            lock.unlock()
+            return
+        }
+        phase = .complete
+        resumed = waiters
+        waiters.removeAll()
+        lock.unlock()
+        resumed.forEach { $0.resume() }
+    }
 }
 
 package enum HostFrameEnding: Sendable {

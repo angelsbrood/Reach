@@ -562,7 +562,188 @@ private func expectLoopbackQuiescence(_ snapshot: EXOOperationSnapshot) {
     #expect(snapshot.started == snapshot.terminated)
 }
 
+private final class LoopbackCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage = 0
+
+    func increment() { lock.withLock { storage += 1 } }
+    var value: Int { lock.withLock { storage } }
+}
+
+private final class DelayedTerminationEXOTask: EXOHTTPTasking, @unchecked Sendable {
+    struct Snapshot: Sendable {
+        var cancellationCalls: Int
+        var logicalStreamFinished: Bool
+        var taskTerminated: Bool
+        var terminationWaiters: Int
+    }
+
+    private let lock = NSLock()
+    private var eventWaiter: CheckedContinuation<EXOHTTPEvent?, any Error>?
+    private var logicalStreamFinished = false
+    private var taskTerminated = false
+    private var cancellationCalls = 0
+    private var terminationWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func nextEvent() async throws -> EXOHTTPEvent? {
+        try await withCheckedThrowingContinuation { continuation in
+            let cancelled = lock.withLock { () -> Bool in
+                if logicalStreamFinished { return true }
+                precondition(eventWaiter == nil)
+                eventWaiter = continuation
+                return false
+            }
+            if cancelled { continuation.resume(throwing: CancellationError()) }
+        }
+    }
+
+    func cancel() {
+        let waiter = lock.withLock { () -> CheckedContinuation<EXOHTTPEvent?, any Error>? in
+            cancellationCalls += 1
+            guard !logicalStreamFinished else { return nil }
+            logicalStreamFinished = true
+            let result = eventWaiter
+            eventWaiter = nil
+            return result
+        }
+        waiter?.resume(throwing: CancellationError())
+    }
+
+    func waitForTermination() async {
+        await withCheckedContinuation { continuation in
+            let resumeNow = lock.withLock {
+                if taskTerminated { return true }
+                terminationWaiters.append(continuation)
+                return false
+            }
+            if resumeNow { continuation.resume() }
+        }
+    }
+
+    func acknowledgeTermination() {
+        let waiters = lock.withLock { () -> [CheckedContinuation<Void, Never>] in
+            taskTerminated = true
+            let result = terminationWaiters
+            terminationWaiters.removeAll()
+            return result
+        }
+        waiters.forEach { $0.resume() }
+    }
+
+    var snapshot: Snapshot {
+        lock.withLock {
+            .init(
+                cancellationCalls: cancellationCalls,
+                logicalStreamFinished: logicalStreamFinished,
+                taskTerminated: taskTerminated,
+                terminationWaiters: terminationWaiters.count
+            )
+        }
+    }
+}
+
+private final class DelayedTerminationEXOLoader: EXOHTTPLoading, @unchecked Sendable {
+    let operation = DelayedTerminationEXOTask()
+    private let lock = NSLock()
+    private var starts = 0
+
+    var startCount: Int { lock.withLock { starts } }
+
+    func start(_ request: URLRequest) -> any EXOHTTPTasking {
+        lock.withLock { starts += 1 }
+        return operation
+    }
+}
+
 @Suite(.serialized) struct LinuxLoopbackEXOTests {
+    @Test func providerRegistryClosesRegistrationRacesAndAwaitsRealTaskTermination() async throws {
+        let racingRegistry = EXOOperationRegistry()
+        let ticket = try #require(racingRegistry.reserve())
+        let cancellationCount = LoopbackCounter()
+        let firstRaceShutdown = Task { await racingRegistry.shutdown() }
+        let secondRaceShutdown = Task { await racingRegistry.shutdown() }
+        #expect(await portableEventually { racingRegistry.snapshot.closing })
+        racingRegistry.install(
+            EXOCancelOnce(kind: .settlement, probe: nil, action: cancellationCount.increment),
+            for: ticket
+        )
+        #expect(cancellationCount.value == 1)
+        #expect(racingRegistry.snapshot.registered == 1)
+        #expect(racingRegistry.reserve() == nil)
+        racingRegistry.finish(ticket)
+        await firstRaceShutdown.value
+        await secondRaceShutdown.value
+        #expect(racingRegistry.snapshot == .init(registered: 0, peakRegistered: 1, closing: true))
+
+        let loader = DelayedTerminationEXOLoader()
+        let probe = EXOOperationTestProbe()
+        let filling = try EXOFilling(
+            modelID: LoopbackEXOServer.modelID,
+            endpoint: "http://127.0.0.1:52415",
+            loader: loader,
+            clock: EXOContinuousClock(),
+            testProbe: probe
+        )
+        let retainedStream = filling.generate(loopbackRequest())
+        _ = retainedStream
+        #expect(await portableEventually {
+            loader.startCount == 1 && filling.operationRegistrySnapshot.registered == 1
+        })
+
+        let firstReturned = PortableFlag()
+        let secondReturned = PortableFlag()
+        let first = Task {
+            await filling.shutdown()
+            firstReturned.set()
+        }
+        let second = Task {
+            await filling.shutdown()
+            secondReturned.set()
+        }
+        #expect(await portableEventually {
+            let snapshot = loader.operation.snapshot
+            return snapshot.cancellationCalls == 1 && snapshot.terminationWaiters == 1
+        })
+        let held = loader.operation.snapshot
+        #expect(held.logicalStreamFinished)
+        #expect(!held.taskTerminated)
+        #expect(!firstReturned.value)
+        #expect(!secondReturned.value)
+        #expect(filling.operationRegistrySnapshot.registered == 1)
+        #expect(filling.operationRegistrySnapshot.closing)
+
+        var lateWasCancelled = false
+        do {
+            for try await _ in filling.generate(loopbackRequest()) {}
+        } catch is CancellationError {
+            lateWasCancelled = true
+        }
+        #expect(lateWasCancelled)
+        do {
+            try await filling.prewarm()
+            Issue.record("prewarm started after provider shutdown")
+        } catch is CancellationError {
+            // Expected: shutdown permanently closes this filling instance.
+        }
+        #expect(loader.startCount == 1)
+
+        loader.operation.acknowledgeTermination()
+        await first.value
+        await second.value
+        await filling.shutdown()
+        #expect(firstReturned.value)
+        #expect(secondReturned.value)
+        #expect(loader.operation.snapshot.taskTerminated)
+        #expect(filling.operationRegistrySnapshot == .init(
+            registered: 0,
+            peakRegistered: 1,
+            closing: true
+        ))
+        let settled = await probe.waitForQuiescence()
+        #expect(settled.outcome == "cancelled")
+        expectLoopbackQuiescence(settled)
+    }
+
     @Test func productionNetworkingCatalogGenerationAndCancellationAreBoundedAndQuiescent() async throws {
         let server = try LoopbackEXOServer()
         server.start()

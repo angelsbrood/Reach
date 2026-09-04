@@ -22,6 +22,7 @@ public final class EXOFilling: SlotFilling, @unchecked Sendable {
     let testProbe: EXOOperationTestProbe?
     let productionConfiguration: URLSessionConfiguration?
     let productionDelegate: EXOSessionDelegate?
+    private let operationRegistry = EXOOperationRegistry()
 
     public init(modelID: String, endpoint: String) throws {
         let validated = try EXOEndpoint(endpoint)
@@ -74,7 +75,15 @@ public final class EXOFilling: SlotFilling, @unchecked Sendable {
     }
 
     public func prewarm() async throws {
+        guard let ticket = operationRegistry.reserve() else {
+            throw CancellationError()
+        }
         let cancellation = EXOCancellationRegistry()
+        let registryCancel = EXOCancelOnce(kind: .settlement, probe: testProbe) {
+            cancellation.cancel()
+        }
+        operationRegistry.install(registryCancel, for: ticket)
+        defer { operationRegistry.finish(ticket) }
         let coordinator = EXOOperationCoordinator(
             mode: .catalog(modelID: modelID),
             loader: loader,
@@ -124,7 +133,15 @@ public final class EXOFilling: SlotFilling, @unchecked Sendable {
         }
 
         let (stream, continuation) = AsyncThrowingStream<WireEvent, Error>.makeStream()
+        guard let ticket = operationRegistry.reserve() else {
+            continuation.finish(throwing: CancellationError())
+            return stream
+        }
         let cancellation = EXOCancellationRegistry()
+        let registryCancel = EXOCancelOnce(kind: .settlement, probe: testProbe) {
+            cancellation.cancel()
+        }
+        operationRegistry.install(registryCancel, for: ticket)
         let emitter: @Sendable (WireEvent) -> Bool = { event in
             if case .terminated = continuation.yield(event) { return false }
             return true
@@ -143,7 +160,8 @@ public final class EXOFilling: SlotFilling, @unchecked Sendable {
 
         let retention = EXOSettlementRetention()
         testProbe?.started(.settlement)
-        retention.task = Task { [testProbe] in
+        retention.task = Task { [testProbe, operationRegistry] in
+            defer { operationRegistry.finish(ticket) }
             let outcome = await coordinator.run(request: httpRequest)
             testProbe?.record(outcome: outcome.label)
             switch outcome {
@@ -174,6 +192,14 @@ public final class EXOFilling: SlotFilling, @unchecked Sendable {
             }
         }
         return stream
+    }
+
+    public func shutdown() async {
+        await operationRegistry.shutdown()
+    }
+
+    package var operationRegistrySnapshot: EXOOperationRegistrySnapshot {
+        operationRegistry.snapshot
     }
 
     func catalogRequest() -> URLRequest {
@@ -1254,6 +1280,101 @@ final class EXOCancellationRegistry: @unchecked Sendable {
 
 final class EXOSettlementRetention: @unchecked Sendable {
     var task: Task<Void, Never>?
+}
+
+package struct EXOOperationRegistrySnapshot: Sendable, Equatable {
+    package var registered: Int
+    package var peakRegistered: Int
+    package var closing: Bool
+}
+
+/// The filling-level owner of every catalog and generation settlement.
+/// Reservation precedes task creation; installing cancellation after a racing
+/// shutdown immediately fires the same exactly-once handle. The final ticket
+/// leaves only after coordinator cleanup has joined every child.
+final class EXOOperationRegistry: @unchecked Sendable {
+    struct Ticket: Sendable, Hashable {
+        fileprivate var id: UInt64
+    }
+
+    private struct Entry {
+        var cancellation: EXOCancelOnce?
+    }
+
+    private let lock = NSLock()
+    private var nextID: UInt64 = 0
+    private var entries: [UInt64: Entry] = [:]
+    private var peakRegistered = 0
+    private var closing = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func reserve() -> Ticket? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !closing else { return nil }
+        let id = nextID
+        nextID &+= 1
+        entries[id] = Entry()
+        peakRegistered = max(peakRegistered, entries.count)
+        return Ticket(id: id)
+    }
+
+    func install(_ cancellation: EXOCancelOnce, for ticket: Ticket) {
+        let cancelNow: Bool
+        lock.lock()
+        if entries[ticket.id] != nil {
+            entries[ticket.id]!.cancellation = cancellation
+            cancelNow = closing
+        } else {
+            cancelNow = true
+        }
+        lock.unlock()
+        if cancelNow { cancellation.cancel() }
+    }
+
+    func finish(_ ticket: Ticket) {
+        let resumed: [CheckedContinuation<Void, Never>]
+        lock.lock()
+        entries.removeValue(forKey: ticket.id)
+        if closing, entries.isEmpty {
+            resumed = waiters
+            waiters.removeAll()
+        } else {
+            resumed = []
+        }
+        lock.unlock()
+        resumed.forEach { $0.resume() }
+    }
+
+    func shutdown() async {
+        let (cancellations, alreadyEmpty) = lock.withLock {
+            closing = true
+            return (entries.values.compactMap(\.cancellation), entries.isEmpty)
+        }
+
+        cancellations.forEach { $0.cancel() }
+        if alreadyEmpty { return }
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if entries.isEmpty {
+                lock.unlock()
+                continuation.resume()
+            } else {
+                waiters.append(continuation)
+                lock.unlock()
+            }
+        }
+    }
+
+    var snapshot: EXOOperationRegistrySnapshot {
+        lock.lock()
+        defer { lock.unlock() }
+        return .init(
+            registered: entries.count,
+            peakRegistered: peakRegistered,
+            closing: closing
+        )
+    }
 }
 
 // MARK: - Operation coordinator

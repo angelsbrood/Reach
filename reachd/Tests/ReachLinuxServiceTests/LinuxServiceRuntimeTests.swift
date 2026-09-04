@@ -227,7 +227,156 @@ private func expectShutdownTimeout(_ operation: () async throws -> Void) async {
     }
 }
 
+private final class SweepFixtureClock: @unchecked Sendable {
+    private struct Waiter {
+        var deadline: UInt64
+        var continuation: CheckedContinuation<Void, any Error>
+    }
+
+    struct Snapshot: Sendable {
+        var now: UInt64
+        var requestedDeadlines: [UInt64]
+        var waiting: Int
+    }
+
+    private let lock = NSLock()
+    private var value: UInt64
+    private var requestedDeadlines: [UInt64] = []
+    private var waiters: [UUID: Waiter] = [:]
+
+    init(_ value: UInt64) { self.value = value }
+
+    func now() -> UInt64 { lock.withLock { value } }
+
+    func sleep(until deadline: UInt64) async throws {
+        let id = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let outcome = lock.withLock { () -> Bool? in
+                    requestedDeadlines.append(deadline)
+                    if Task.isCancelled { return false }
+                    if value >= deadline { return true }
+                    waiters[id] = .init(deadline: deadline, continuation: continuation)
+                    return nil
+                }
+                if outcome == true { continuation.resume() }
+                if outcome == false { continuation.resume(throwing: CancellationError()) }
+            }
+        } onCancel: {
+            let continuation = self.lock.withLock {
+                self.waiters.removeValue(forKey: id)?.continuation
+            }
+            continuation?.resume(throwing: CancellationError())
+        }
+    }
+
+    func advance(to newValue: UInt64) {
+        let ready = lock.withLock { () -> [CheckedContinuation<Void, any Error>] in
+            precondition(newValue >= value)
+            value = newValue
+            let ids = waiters.compactMap { id, waiter in
+                waiter.deadline <= newValue ? id : nil
+            }
+            return ids.compactMap { waiters.removeValue(forKey: $0)?.continuation }
+        }
+        ready.forEach { $0.resume() }
+    }
+
+    var snapshot: Snapshot {
+        lock.withLock {
+            .init(now: value, requestedDeadlines: requestedDeadlines, waiting: waiters.count)
+        }
+    }
+}
+
+private final class SweepFixtureProbe: @unchecked Sendable {
+    struct Sample: Sendable, Equatable {
+        var observation: LinuxSweepObservation
+        var reaped: Int
+    }
+
+    private let lock = NSLock()
+    private var sweepCount = 0
+    private var samples: [Sample] = []
+
+    func sweep() async -> Int {
+        lock.withLock {
+            sweepCount += 1
+            return sweepCount
+        }
+    }
+
+    func record(_ observation: LinuxSweepObservation, reaped: Int) {
+        lock.withLock { samples.append(.init(observation: observation, reaped: reaped)) }
+    }
+
+    var snapshot: (sweeps: Int, samples: [Sample]) {
+        lock.withLock { (sweepCount, samples) }
+    }
+}
+
+private func sweepEventually(_ predicate: @escaping @Sendable () -> Bool) async -> Bool {
+    for _ in 0 ..< 5_000 {
+        if predicate() { return true }
+        await Task.yield()
+    }
+    return predicate()
+}
+
 @Suite(.serialized) struct LinuxServiceRuntimeTests {
+    @Test func sessionSweeperUsesAbsoluteDeadlinesAccountsJitterAndJoinsCancellation() async {
+        let startedAt: UInt64 = 10_000_000_000
+        let clock = SweepFixtureClock(startedAt)
+        let probe = SweepFixtureProbe()
+        let sweeper = LinuxSessionSweeper(
+            clock: .init(now: clock.now, sleepUntil: clock.sleep),
+            sweep: probe.sweep,
+            observer: probe.record
+        )
+
+        #expect(await sweepEventually {
+            clock.snapshot.requestedDeadlines == [startedAt + 1_000_000_000]
+        })
+        clock.advance(to: startedAt + 1_000_000_000)
+        #expect(await sweepEventually {
+            probe.snapshot.samples.count == 1 &&
+                clock.snapshot.requestedDeadlines.last == startedAt + 2_000_000_000
+        })
+
+        clock.advance(to: startedAt + 3_500_000_000)
+        #expect(await sweepEventually {
+            probe.snapshot.samples.count == 2 &&
+                clock.snapshot.requestedDeadlines.last == startedAt + 4_000_000_000
+        })
+        let samples = probe.snapshot.samples
+        #expect(samples == [
+            .init(
+                observation: .init(
+                    scheduledNanoseconds: startedAt + 1_000_000_000,
+                    observedNanoseconds: startedAt + 1_000_000_000,
+                    delayNanoseconds: 0,
+                    skippedDeadlines: 0
+                ),
+                reaped: 1
+            ),
+            .init(
+                observation: .init(
+                    scheduledNanoseconds: startedAt + 2_000_000_000,
+                    observedNanoseconds: startedAt + 3_500_000_000,
+                    delayNanoseconds: 1_500_000_000,
+                    skippedDeadlines: 1
+                ),
+                reaped: 2
+            ),
+        ])
+
+        await sweeper.cancelAndWait()
+        #expect(clock.snapshot.waiting == 0)
+        #expect(probe.snapshot.sweeps == 2)
+        await sweeper.cancelAndWait()
+        #expect(clock.snapshot.waiting == 0)
+    }
+
     @Test func statusIsPrivacySafeBoundedAndAtomicallyReplaced() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("reach-linux-status-\(UUID().uuidString)")

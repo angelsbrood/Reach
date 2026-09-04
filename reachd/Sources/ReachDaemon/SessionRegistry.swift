@@ -123,6 +123,7 @@ public actor SessionRegistry {
         case unknownSession
         case badToken
         case unknownGeneration
+        case shuttingDown
         /// The replay this re-attach asked for begins inside a span the buffer
         /// cap dropped, so serving it would hand back an answer with a hole in
         /// the middle and no way to say so.
@@ -140,6 +141,8 @@ public actor SessionRegistry {
                 "that session exists, but the token offered for it is not the one it was opened with"
             case .unknownGeneration:
                 "the cluster has no generation by that name on this session — it ended and was let go, or it did not outlive a restart"
+            case .shuttingDown:
+                "the cluster is stopping and cannot open or attach session work"
             case .replayOutgrewTheBuffer:
                 "it outgrew what the cluster holds for an app that is away — what already arrived is real, but what came after it is gone"
             }
@@ -176,17 +179,31 @@ public actor SessionRegistry {
         var lastSeen: ContinuousClock.Instant
     }
 
+    private struct GenerationKey: Hashable, Sendable {
+        var sessionID: UUID
+        var generationID: UUID
+    }
+
     private var sessions: [UUID: SessionRecord] = [:]
     private let limits: Limits
     private let receiptSink: GenerationReceiptSink
     private let replayEventSink: ReplayEventSink
+    private let generationTaskSettlement: @Sendable () async -> Void
     private var replayStore: ReplayStore
     private let clock = ContinuousClock()
+    /// Includes tasks whose residency row has already been swept. A row is
+    /// protocol state; this table is process ownership and is not cleared
+    /// until the corresponding task has actually returned.
+    private var generationTasks: [GenerationKey: Task<Void, Never>] = [:]
+    private var shuttingDown = false
+    private var shutdownComplete = false
+    private var shutdownWaiters: [CheckedContinuation<Void, Never>] = []
 
     public init(limits: Limits = Limits()) {
         self.limits = limits
         receiptSink = { receipt in HostLog.info(receipt.message) }
         replayEventSink = { message in HostLog.info(message) }
+        generationTaskSettlement = {}
         replayStore = ReplayStore(policy: Self.replayPolicy(
             perGenerationBytes: limits.bufferCapBytes,
             processBytes: nil
@@ -205,6 +222,27 @@ public actor SessionRegistry {
         self.limits = limits
         self.receiptSink = receiptSink
         self.replayEventSink = replayEventSink
+        generationTaskSettlement = {}
+        replayStore = ReplayStore(policy: Self.replayPolicy(
+            perGenerationBytes: limits.bufferCapBytes,
+            processBytes: replayProcessCapBytes
+        ))
+    }
+
+    /// Deterministic task-settlement seam. Production uses the initializer
+    /// above; tests may hold the last task after its stream has terminated to
+    /// prove shutdown's join and concurrent-caller behavior.
+    package init(
+        limits: Limits = Limits(),
+        replayProcessCapBytes: Int? = nil,
+        receiptSink: @escaping GenerationReceiptSink,
+        replayEventSink: @escaping ReplayEventSink,
+        generationTaskSettlement: @escaping @Sendable () async -> Void
+    ) {
+        self.limits = limits
+        self.receiptSink = receiptSink
+        self.replayEventSink = replayEventSink
+        self.generationTaskSettlement = generationTaskSettlement
         replayStore = ReplayStore(policy: Self.replayPolicy(
             perGenerationBytes: limits.bufferCapBytes,
             processBytes: replayProcessCapBytes
@@ -230,6 +268,17 @@ public actor SessionRegistry {
     public func openSession(
         version: UInt8 = Wire.baselineVersion
     ) -> (sessionID: UUID, token: String) {
+        makeSession(version: version)
+    }
+
+    package func openSessionIfAccepting(
+        version: UInt8 = Wire.baselineVersion
+    ) throws -> (sessionID: UUID, token: String) {
+        guard !shuttingDown else { throw RegistryError.shuttingDown }
+        return makeSession(version: version)
+    }
+
+    private func makeSession(version: UInt8) -> (sessionID: UUID, token: String) {
         let sessionID = UUID()
         let token = Data((0..<32).map { _ in UInt8.random(in: .min ... .max) }).base64EncodedString()
         sessions[sessionID] = SessionRecord(
@@ -241,6 +290,7 @@ public actor SessionRegistry {
     }
 
     public func validate(sessionID: UUID, token: String) throws {
+        guard !shuttingDown else { throw RegistryError.shuttingDown }
         guard var record = sessions[sessionID] else { throw RegistryError.unknownSession }
         guard record.tokenHash == SHA256.hash(data: Data(token.utf8)) else { throw RegistryError.badToken }
         record.lastSeen = clock.now
@@ -290,7 +340,8 @@ public actor SessionRegistry {
         genID: UUID,
         events: @escaping @Sendable () -> AsyncThrowingStream<WireEvent, Error>
     ) throws -> (stream: AsyncStream<Ev>, epoch: UInt64, version: UInt8) {
-        try begin(
+        guard !shuttingDown else { throw RegistryError.shuttingDown }
+        return try begin(
             sessionID: sessionID,
             genID: genID,
             receiptSource: .unknown,
@@ -306,6 +357,7 @@ public actor SessionRegistry {
         receiptSource: GenerationReceipt.Source,
         events: @escaping @Sendable () -> AsyncThrowingStream<WireEvent, Error>
     ) throws -> (stream: AsyncStream<Ev>, epoch: UInt64, version: UInt8) {
+        guard !shuttingDown else { throw RegistryError.shuttingDown }
         guard sessions[sessionID] != nil else { throw RegistryError.unknownSession }
         if sessions[sessionID]!.generations[genID] != nil {
             // First-frame-loss idempotency (ruling 4). This delegates, so it
@@ -321,14 +373,19 @@ public actor SessionRegistry {
         sessions[sessionID]!.generations[genID] = record
         receiptSink(.accepted(sessionID: sessionID, genID: genID, source: receiptSource))
 
+        let key = GenerationKey(sessionID: sessionID, generationID: genID)
+        let generationTaskSettlement = self.generationTaskSettlement
         let task = Task { [weak self] in
-            for await event in Self.terminating(events()) {
-                guard let self else { return }
-                let ending = await self.ingest(sessionID: sessionID, genID: genID, event: event)
-                if ending != nil { break }
+            guard let self else { return }
+            _ = await Self.consume(events()) { [weak self] event in
+                guard let self else { return .error }
+                return await self.ingest(sessionID: sessionID, genID: genID, event: event)
             }
+            await generationTaskSettlement()
+            await self.generationTaskDidFinish(key)
         }
         sessions[sessionID]!.generations[genID]!.task = task
+        generationTasks[key] = task
         return (stream, record.epoch, sessions[sessionID]!.version)
     }
 
@@ -343,6 +400,7 @@ public actor SessionRegistry {
         admission: SlotAdmission,
         events: @escaping @Sendable () -> AsyncThrowingStream<WireEvent, Error>
     ) async throws -> (stream: AsyncStream<Ev>, epoch: UInt64, version: UInt8) {
+        guard !shuttingDown else { throw RegistryError.shuttingDown }
         guard sessions[sessionID] != nil else { throw RegistryError.unknownSession }
         if sessions[sessionID]!.generations[genID] != nil {
             return try attach(sessionID: sessionID, genID: genID, fromSeq: nil)
@@ -358,9 +416,9 @@ public actor SessionRegistry {
         if sessions[sessionID]?.generations[genID] != nil {
             return try attach(sessionID: sessionID, genID: genID, fromSeq: nil)
         }
-        guard sessions[sessionID] != nil else {
+        guard !shuttingDown, sessions[sessionID] != nil else {
             await admission.abandon(reservation)
-            throw RegistryError.unknownSession
+            throw shuttingDown ? RegistryError.shuttingDown : RegistryError.unknownSession
         }
 
         var record = GenerationRecord()
@@ -369,53 +427,54 @@ public actor SessionRegistry {
         sessions[sessionID]!.generations[genID] = record
         receiptSink(.accepted(sessionID: sessionID, genID: genID, source: receiptSource))
 
+        let key = GenerationKey(sessionID: sessionID, generationID: genID)
+        let generationTaskSettlement = self.generationTaskSettlement
         let task = Task { [weak self] in
+            guard let self else { return }
             do {
                 let lease = try await admission.acquire(reservation)
                 if Task.isCancelled {
                     await admission.release(lease, outcome: .cancelled)
-                    return
-                }
-                var outcome = SlotAdmission.ReleaseOutcome.error
-                if let self {
-                    for await event in Self.terminating(events()) {
-                        let ending = await self.ingest(
+                } else {
+                    var outcome = SlotAdmission.ReleaseOutcome.error
+                    if let ending = await Self.consume(events(), ingest: { [weak self] event in
+                        guard let self else { return .error }
+                        return await self.ingest(
                             sessionID: sessionID,
                             genID: genID,
                             event: event
                         )
-                        if let ending {
-                            outcome = switch ending {
-                            case .complete: .complete
-                            case .cancelled: .cancelled
-                            case .error: .error
-                            }
-                            break
+                    }) {
+                        outcome = switch ending {
+                        case .complete: .complete
+                        case .cancelled: .cancelled
+                        case .error: .error
                         }
                     }
+                    if Task.isCancelled { outcome = .cancelled }
+                    await admission.release(lease, outcome: outcome)
                 }
-                if Task.isCancelled { outcome = .cancelled }
-                await admission.release(lease, outcome: outcome)
             } catch is CancellationError {
                 // `cancel` writes the wire terminal synchronously. The
                 // acquisition cancellation only removes a queued reservation.
             } catch let error as SlotAdmission.AdmissionError {
-                guard let self else { return }
                 _ = await self.ingest(
                     sessionID: sessionID,
                     genID: genID,
                     event: .finished(.error(error.description))
                 )
             } catch {
-                guard let self else { return }
                 _ = await self.ingest(
                     sessionID: sessionID,
                     genID: genID,
                     event: .finished(.error("\(error)"))
                 )
             }
+            await generationTaskSettlement()
+            await self.generationTaskDidFinish(key)
         }
         sessions[sessionID]!.generations[genID]!.task = task
+        generationTasks[key] = task
         return (stream, record.epoch, sessions[sessionID]!.version)
     }
 
@@ -429,6 +488,7 @@ public actor SessionRegistry {
         genID: UUID,
         fromSeq: UInt64?
     ) throws -> (stream: AsyncStream<Ev>, epoch: UInt64, version: UInt8) {
+        guard !shuttingDown else { throw RegistryError.shuttingDown }
         guard var session = sessions[sessionID] else { throw RegistryError.unknownSession }
         guard var record = session.generations[genID] else { throw RegistryError.unknownGeneration }
         // Decode and validate the exact stored frames before touching the
@@ -545,6 +605,7 @@ public actor SessionRegistry {
     /// reaped (for tests and logs).
     @discardableResult
     public func sweep() -> Int {
+        guard !shuttingDown else { return 0 }
         var reaped = 0
         let now = clock.now
         for (sessionID, var session) in sessions {
@@ -593,17 +654,34 @@ public actor SessionRegistry {
 
     package var replayCounters: ReplayStore.Counters { replayStore.counters }
 
+    package var activeGenerationTasks: Int { generationTasks.count }
+
     /// Process shutdown owns the final cleanup edge. No terminal is invented:
     /// clients already name daemon restart separately from a wire completion.
-    package func shutdown() {
+    package func shutdown() async {
+        if shuttingDown {
+            if shutdownComplete { return }
+            await withCheckedContinuation { shutdownWaiters.append($0) }
+            return
+        }
+        shuttingDown = true
         for session in sessions.values {
             for record in session.generations.values {
                 record.task?.cancel()
                 record.live?.finish()
             }
         }
+        let tasks = Array(generationTasks.values)
+        tasks.forEach { $0.cancel() }
         sessions.removeAll(keepingCapacity: false)
         replayStore.removeAll()
+        for task in tasks { await task.value }
+        generationTasks.removeAll(keepingCapacity: false)
+
+        shutdownComplete = true
+        let resumed = shutdownWaiters
+        shutdownWaiters.removeAll()
+        resumed.forEach { $0.resume() }
     }
 
     // MARK: Internals
@@ -733,29 +811,27 @@ public actor SessionRegistry {
         )
     }
 
-    /// Guarantees a `.finished` event even if the filling's stream throws
-    /// or ends without one.
-    private static func terminating(
-        _ events: AsyncThrowingStream<WireEvent, Error>
-    ) -> AsyncStream<WireEvent> {
-        AsyncStream { continuation in
-            let task = Task {
-                var sawFinish = false
-                do {
-                    for try await event in events {
-                        if case .finished = event { sawFinish = true }
-                        continuation.yield(event)
-                    }
-                } catch {
-                    continuation.yield(.finished(.error("\(error)")))
-                    sawFinish = true
-                }
-                if !sawFinish {
-                    continuation.yield(.finished(.complete))
-                }
-                continuation.finish()
+    private func generationTaskDidFinish(_ key: GenerationKey) {
+        generationTasks.removeValue(forKey: key)
+    }
+
+    /// Consumes the filling directly in the one registry-owned task. This
+    /// keeps shutdown's task table exhaustive while preserving the historical
+    /// synthesized terminal for a throwing or prematurely ending filling.
+    private static func consume(
+        _ events: AsyncThrowingStream<WireEvent, Error>,
+        ingest: @escaping @Sendable (WireEvent) async -> GenerationReceipt.Ending?
+    ) async -> GenerationReceipt.Ending? {
+        do {
+            for try await event in events {
+                if Task.isCancelled { return nil }
+                if let ending = await ingest(event) { return ending }
             }
-            continuation.onTermination = { _ in task.cancel() }
+        } catch {
+            guard !Task.isCancelled else { return nil }
+            return await ingest(.finished(.error("\(error)")))
         }
+        guard !Task.isCancelled else { return nil }
+        return await ingest(.finished(.complete))
     }
 }

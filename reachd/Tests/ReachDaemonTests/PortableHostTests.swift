@@ -12,17 +12,23 @@ final class PortableMemoryStream: SessionHostStream, @unchecked Sendable {
     private let input: AsyncThrowingStream<RawFrame, any Error>.Continuation
     private let lock = NSLock()
     private let endpoint: String?
+    private let peerCertificate: Data?
     private let failAfterSends: Int?
     private var encodedOutput: [Data] = []
     private var sendingFinished = false
     private var cancelled = false
 
-    init(endpoint: String? = "127.0.0.1:47000", failAfterSends: Int? = nil) {
+    init(
+        endpoint: String? = "127.0.0.1:47000",
+        failAfterSends: Int? = nil,
+        peerCertificate: Data? = nil
+    ) {
         let pair = AsyncThrowingStream<RawFrame, any Error>.makeStream()
         frames = pair.stream
         input = pair.continuation
         self.endpoint = endpoint
         self.failAfterSends = failAfterSends
+        self.peerCertificate = peerCertificate
     }
 
     func yield<Frame: WireFrame>(_ frame: Frame, version: UInt8 = Wire.baselineVersion) throws {
@@ -57,6 +63,8 @@ final class PortableMemoryStream: SessionHostStream, @unchecked Sendable {
     }
 
     func remoteEndpointDescription() -> String? { endpoint }
+
+    func peerCertificateDER() -> Data? { peerCertificate }
 
     var outputCount: Int {
         lock.lock()
@@ -323,6 +331,162 @@ private final class PortableExecutionProbe: @unchecked Sendable {
     }
 }
 
+final class PortableFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage = false
+
+    var value: Bool { lock.withLock { storage } }
+    func set() { lock.withLock { storage = true } }
+}
+
+private final class PortableBlockedTerminationProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: AsyncThrowingStream<WireEvent, any Error>.Continuation?
+    private var streamTerminationObserved = false
+    private var settlementEntered = false
+    private var settlementFinished = false
+    private var releaseSettlement = false
+    private var settlementWaiter: CheckedContinuation<Void, Never>?
+
+    func stream() -> AsyncThrowingStream<WireEvent, any Error> {
+        let pair = AsyncThrowingStream<WireEvent, any Error>.makeStream()
+        lock.withLock { continuation = pair.continuation }
+        pair.continuation.onTermination = { [weak self] _ in
+            guard let self else { return }
+            lock.withLock {
+                continuation = nil
+                streamTerminationObserved = true
+            }
+        }
+        pair.continuation.yield(.responseAppend(
+            entryID: "fixed-entry",
+            text: "fixed-delta",
+            segmentID: "fixed-segment",
+            tokenCount: 1
+        ))
+        return pair.stream
+    }
+
+    func settleTask() async {
+        await withCheckedContinuation { continuation in
+            let resumeNow = lock.withLock {
+                settlementEntered = true
+                if releaseSettlement { return true }
+                settlementWaiter = continuation
+                return false
+            }
+            if resumeNow { continuation.resume() }
+        }
+        lock.withLock { settlementFinished = true }
+    }
+
+    func allowTermination() {
+        let waiter = lock.withLock { () -> CheckedContinuation<Void, Never>? in
+            releaseSettlement = true
+            let result = settlementWaiter
+            settlementWaiter = nil
+            return result
+        }
+        waiter?.resume()
+    }
+
+    var snapshot: (entered: Bool, finished: Bool, streamTerminated: Bool) {
+        lock.withLock { (settlementEntered, settlementFinished, streamTerminationObserved) }
+    }
+}
+
+private final class PortableShutdownFillingProbe: @unchecked Sendable {
+    struct Snapshot: Sendable {
+        var activeChildren: Int
+        var streamTerminations: Int
+        var shutdownCalls: Int
+        var shutdownReturned: Bool
+    }
+
+    private let lock = NSLock()
+    private var continuation: AsyncThrowingStream<WireEvent, any Error>.Continuation?
+    private var activeChildren = 0
+    private var streamTerminations = 0
+    private var shutdownCalls = 0
+    private var shutdownReturned = false
+    private var releaseShutdown = false
+    private var shutdownWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func stream() -> AsyncThrowingStream<WireEvent, any Error> {
+        let pair = AsyncThrowingStream<WireEvent, any Error>.makeStream()
+        lock.withLock {
+            continuation = pair.continuation
+            activeChildren += 1
+        }
+        pair.continuation.onTermination = { [weak self] _ in
+            guard let self else { return }
+            lock.withLock { streamTerminations += 1 }
+        }
+        pair.continuation.yield(.responseAppend(
+            entryID: "fixed-entry",
+            text: "fixed-delta",
+            segmentID: "fixed-segment",
+            tokenCount: 1
+        ))
+        return pair.stream
+    }
+
+    func shutDown() async {
+        let stream = lock.withLock { () -> AsyncThrowingStream<WireEvent, any Error>.Continuation? in
+            shutdownCalls += 1
+            return continuation
+        }
+        stream?.finish()
+        await withCheckedContinuation { waiter in
+            let resumeNow = lock.withLock {
+                if releaseShutdown { return true }
+                shutdownWaiters.append(waiter)
+                return false
+            }
+            if resumeNow { waiter.resume() }
+        }
+        lock.withLock {
+            continuation = nil
+            activeChildren = 0
+            shutdownReturned = true
+        }
+    }
+
+    func allowShutdown() {
+        let waiters = lock.withLock { () -> [CheckedContinuation<Void, Never>] in
+            releaseShutdown = true
+            let result = shutdownWaiters
+            shutdownWaiters.removeAll()
+            return result
+        }
+        waiters.forEach { $0.resume() }
+    }
+
+    var snapshot: Snapshot {
+        lock.withLock {
+            .init(
+                activeChildren: activeChildren,
+                streamTerminations: streamTerminations,
+                shutdownCalls: shutdownCalls,
+                shutdownReturned: shutdownReturned
+            )
+        }
+    }
+}
+
+private struct PortableShutdownFilling: SlotFilling {
+    let modelID = "fixed-model"
+    let displayName = "Fixed Model"
+    let capabilities = ["text"]
+    let probe: PortableShutdownFillingProbe
+
+    func prewarm() async throws {}
+    func generate(_ request: WireGenerationRequest) -> AsyncThrowingStream<WireEvent, any Error> {
+        probe.stream()
+    }
+    func shutdown() async { await probe.shutDown() }
+}
+
 private struct PortableImmediateFilling: SlotFilling {
     let modelID = "fixed-model"
     let displayName = "Fixed Model"
@@ -419,6 +583,131 @@ func portableOpenSession(
 }
 
 @Suite(.serialized) struct PortableHostTests {
+    @Test func registryShutdownJoinsSweptOwnershipAndConcurrentCallers() async throws {
+        let probe = PortableBlockedTerminationProbe()
+        let registry = SessionRegistry(
+            receiptSink: { _ in },
+            replayEventSink: { _ in },
+            generationTaskSettlement: probe.settleTask
+        )
+        let session = await registry.openSession()
+        let begun = try await registry.begin(
+            sessionID: session.sessionID,
+            genID: UUID(),
+            events: probe.stream
+        )
+        _ = begun.stream
+        #expect(await portableEventually {
+            let active = await registry.activeGenerationTasks
+            let replay = await registry.replayCounters
+            return active == 1 && replay.currentBytes > 0
+        })
+
+        let firstReturned = PortableFlag()
+        let secondReturned = PortableFlag()
+        let first = Task {
+            await registry.shutdown()
+            firstReturned.set()
+        }
+        #expect(await portableEventually { probe.snapshot.entered })
+        let second = Task {
+            await registry.shutdown()
+            secondReturned.set()
+        }
+        for _ in 0 ..< 100 { await Task.yield() }
+
+        #expect(!firstReturned.value)
+        #expect(!secondReturned.value)
+        #expect(await registry.activeGenerationTasks == 1)
+        #expect(await registry.residentSessions == 0)
+        #expect(await registry.replayCounters.currentBytes == 0)
+        do {
+            _ = try await registry.openSessionIfAccepting()
+            Issue.record("registry accepted a session after shutdown began")
+        } catch {
+            #expect(error as? SessionRegistry.RegistryError == .shuttingDown)
+        }
+        do {
+            _ = try await registry.begin(
+                sessionID: session.sessionID,
+                genID: UUID(),
+                events: probe.stream
+            )
+            Issue.record("registry accepted generation work after shutdown began")
+        } catch {
+            #expect(error as? SessionRegistry.RegistryError == .shuttingDown)
+        }
+
+        probe.allowTermination()
+        await first.value
+        await second.value
+        #expect(firstReturned.value)
+        #expect(secondReturned.value)
+        #expect(probe.snapshot.finished)
+        #expect(probe.snapshot.streamTerminated)
+        #expect(await registry.activeGenerationTasks == 0)
+        await registry.shutdown()
+        #expect(await registry.activeGenerationTasks == 0)
+    }
+
+    @Test func hostShutdownOrdersAdmissionRegistryAndProviderAndIsIdempotent() async throws {
+        let registry = SessionRegistry(receiptSink: { _ in }, replayEventSink: { _ in })
+        let admission = SlotAdmission(eventSink: { _ in })
+        let probe = PortableShutdownFillingProbe()
+        let filling = PortableShutdownFilling(probe: probe)
+        let host = portableHost(filling: filling, registry: registry, admission: admission)
+        let session = await registry.openSession()
+        let begun = try await registry.begin(
+            sessionID: session.sessionID,
+            genID: UUID(),
+            receiptSource: .loopback,
+            admission: admission,
+            events: { filling.generate(portableRequest()) }
+        )
+        _ = begun.stream
+        #expect(await portableEventually {
+            let counters = await admission.counters
+            return counters.active == 1 && probe.snapshot.activeChildren == 1
+        })
+
+        let firstReturned = PortableFlag()
+        let secondReturned = PortableFlag()
+        let first = Task {
+            await host.shutdown()
+            firstReturned.set()
+        }
+        #expect(await portableEventually { probe.snapshot.shutdownCalls == 1 })
+        let second = Task {
+            await host.shutdown()
+            secondReturned.set()
+        }
+        for _ in 0 ..< 100 { await Task.yield() }
+
+        let held = probe.snapshot
+        #expect(held.shutdownCalls == 1)
+        #expect(held.activeChildren == 1)
+        #expect(!held.shutdownReturned)
+        #expect(!firstReturned.value)
+        #expect(!secondReturned.value)
+        #expect(await registry.activeGenerationTasks == 0)
+        #expect(await registry.residentSessions == 0)
+        let counters = await admission.counters
+        #expect(counters.active == 0)
+        #expect(counters.waiting == 0)
+
+        probe.allowShutdown()
+        await first.value
+        await second.value
+        await host.shutdown()
+        let settled = probe.snapshot
+        #expect(settled.shutdownCalls == 1)
+        #expect(settled.shutdownReturned)
+        #expect(settled.activeChildren == 0)
+        #expect(settled.streamTerminations == 1)
+        #expect(firstReturned.value)
+        #expect(secondReturned.value)
+    }
+
     @Test func sessionOpenedLogUsesTheInjectedSharedFormatter() async throws {
         let recorder = PortableMessageRecorder()
         let registry = SessionRegistry(receiptSink: { _ in }, replayEventSink: { _ in })
@@ -434,6 +723,30 @@ func portableOpenSession(
         )
         let (sessionID, _) = try await portableOpenSession(on: host)
         #expect(recorder.messages.contains("shared-format:\(sessionID):127.0.0.1:47000"))
+        await host.shutdown()
+    }
+
+    @Test func peerLeafFingerprintIsTheFirstHostObservation() async throws {
+        let recorder = PortableMessageRecorder()
+        let registry = SessionRegistry(receiptSink: { _ in }, replayEventSink: { _ in })
+        let host = SessionHost(
+            filling: PortableImmediateFilling(),
+            registry: registry,
+            helloAck: { version in
+                HelloAck(version: version, cluster: "fixed-cluster", models: [])
+            },
+            sessionOpened: { "session \($0) opened from \($1)" },
+            info: recorder.record,
+            error: recorder.record
+        )
+        let stream = PortableMemoryStream(peerCertificate: Data([1, 2, 3]))
+        try stream.yield(Hello(versions: [1], client: "fingerprint-test"))
+        try stream.yield(SessionOpen(modelID: "fixed-model"), version: 1)
+        stream.finishInput()
+
+        await host.serve(stream)
+
+        #expect(recorder.messages.first == "authenticated peer leaf sha256 039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81")
         await host.shutdown()
     }
 

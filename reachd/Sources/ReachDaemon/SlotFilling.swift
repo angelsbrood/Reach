@@ -23,10 +23,16 @@ public protocol SlotFilling: Sendable {
 
     /// Serve one generation. The stream finishes after `.finished`.
     func generate(_ request: WireGenerationRequest) -> AsyncThrowingStream<WireEvent, Error>
+
+    /// Stop accepting provider work, cancel every owned operation, and return
+    /// only after provider-side children have terminated.
+    func shutdown() async
 }
 
 public extension SlotFilling {
     var maximumConcurrentGenerations: Int { 1 }
+
+    func shutdown() async {}
 }
 
 /// Transcript → (role, text) mapping shared by fillings (spike S4c).
