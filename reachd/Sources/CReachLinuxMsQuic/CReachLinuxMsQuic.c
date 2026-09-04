@@ -26,6 +26,16 @@
 
 typedef struct reach_msquic_connection reach_msquic_connection;
 
+typedef struct reach_configuration_test_witness {
+    _Atomic uint64_t callback_dispatches;
+    _Atomic uint64_t context_release_events;
+    _Atomic uint64_t stop_latches;
+    _Atomic uint64_t late_dispatch_attempts;
+    _Atomic uint64_t late_dispatch_refusals;
+    _Atomic uint64_t post_release_callback_accesses;
+    _Atomic uint32_t released;
+} reach_configuration_test_witness;
+
 typedef struct reach_send_context {
     _Atomic uint32_t references;
     pthread_mutex_t lock;
@@ -83,6 +93,10 @@ struct reach_msquic_connection {
     uint32_t active_api_calls;
     int shutdown_complete;
     int handle_closed;
+    uint32_t configuration_ownership;
+    int shutdown_requested;
+    int shutdown_issued;
+    reach_configuration_test_witness *test_witness;
 };
 
 struct reach_msquic_listener {
@@ -106,11 +120,21 @@ struct reach_msquic_listener {
     int stopped;
 };
 
-static const uint8_t ReachAlpnBytes[REACH_ALPN_LENGTH] = "reach/0";
+static const uint8_t ReachAlpnBytes[REACH_ALPN_LENGTH] = {
+    'r', 'e', 'a', 'c', 'h', '/', '0',
+};
 static const QUIC_BUFFER ReachAlpn = {
     REACH_ALPN_LENGTH,
     (uint8_t *)ReachAlpnBytes,
 };
+
+static void
+SaturatingIncrement32(uint32_t *value)
+{
+    if (*value != UINT32_MAX) {
+        *value += 1;
+    }
+}
 
 static void
 SetError(char *buffer, size_t capacity, const char *operation, QUIC_STATUS status)
@@ -173,17 +197,51 @@ static void ConnectionRelease(reach_msquic_connection *connection)
     if (atomic_fetch_sub_explicit(&connection->references, 1, memory_order_acq_rel) != 1) {
         return;
     }
+    reach_configuration_test_witness *witness = connection->test_witness;
+    if (witness != NULL) {
+        (void)atomic_fetch_add_explicit(
+            &witness->context_release_events,
+            1,
+            memory_order_relaxed);
+        atomic_store_explicit(&witness->released, 1, memory_order_release);
+    }
+    reach_msquic_listener *listener = connection->listener;
+    (void)pthread_mutex_lock(&listener->lock);
+    SaturatingIncrement32(&listener->metrics.connection_context_releases);
+    (void)pthread_mutex_unlock(&listener->lock);
     free(connection->peer_certificate);
     (void)pthread_mutex_destroy(&connection->lock);
     free(connection);
 }
 
+static void
+CloseApplicationConnection(reach_msquic_listener *listener, HQUIC handle)
+{
+    listener->api->ConnectionClose(handle);
+    (void)pthread_mutex_lock(&listener->lock);
+    SaturatingIncrement32(&listener->metrics.application_connection_closes);
+    (void)pthread_mutex_unlock(&listener->lock);
+}
+
 static HQUIC
-ConnectionBeginAPICall(reach_msquic_connection *connection)
+ConnectionRequestShutdown(reach_msquic_connection *connection)
 {
     HQUIC handle = NULL;
     (void)pthread_mutex_lock(&connection->lock);
-    if (!connection->closed && !connection->handle_closed && connection->handle != NULL) {
+    if (!connection->shutdown_requested) {
+        connection->shutdown_requested = 1;
+        if (connection->test_witness != NULL) {
+            (void)atomic_fetch_add_explicit(
+                &connection->test_witness->stop_latches,
+                1,
+                memory_order_relaxed);
+        }
+    }
+    if (connection->configuration_ownership ==
+            REACH_MSQUIC_CONNECTION_OWNERSHIP_APPLICATION &&
+        !connection->shutdown_issued && !connection->closed &&
+        !connection->handle_closed && connection->handle != NULL) {
+        connection->shutdown_issued = 1;
         connection->active_api_calls += 1;
         handle = connection->handle;
     }
@@ -199,7 +257,9 @@ ConnectionEndAPICall(reach_msquic_connection *connection)
     if (connection->active_api_calls > 0) {
         connection->active_api_calls -= 1;
     }
-    if (connection->shutdown_complete && connection->active_api_calls == 0 &&
+    if (connection->configuration_ownership ==
+            REACH_MSQUIC_CONNECTION_OWNERSHIP_APPLICATION &&
+        connection->shutdown_complete && connection->active_api_calls == 0 &&
         !connection->handle_closed && connection->handle != NULL) {
         close_handle = connection->handle;
         connection->handle = NULL;
@@ -207,8 +267,64 @@ ConnectionEndAPICall(reach_msquic_connection *connection)
     }
     (void)pthread_mutex_unlock(&connection->lock);
     if (close_handle != NULL) {
-        connection->listener->api->ConnectionClose(close_handle);
+        CloseApplicationConnection(connection->listener, close_handle);
     }
+}
+
+static void
+ConnectionBeginConfiguration(reach_msquic_connection *connection)
+{
+    ConnectionRetain(connection);
+    (void)pthread_mutex_lock(&connection->lock);
+    connection->active_api_calls += 1;
+    (void)pthread_mutex_unlock(&connection->lock);
+}
+
+typedef struct reach_configuration_completion {
+    HQUIC shutdown_handle;
+    HQUIC close_handle;
+} reach_configuration_completion;
+
+static reach_configuration_completion
+ConnectionCompleteConfiguration(
+    reach_msquic_connection *connection,
+    uint32_t ownership)
+{
+    reach_configuration_completion completion = {0};
+    (void)pthread_mutex_lock(&connection->lock);
+    connection->configuration_ownership = ownership;
+    if (connection->active_api_calls > 0) {
+        connection->active_api_calls -= 1;
+    }
+    if (ownership == REACH_MSQUIC_CONNECTION_OWNERSHIP_MSQUIC) {
+        /* Returning configuration failure transfers rejection cleanup back to
+         * MsQuic.  The application must neither close nor retain this handle. */
+        connection->handle = NULL;
+        connection->handle_closed = 1;
+    } else if (connection->shutdown_complete && connection->active_api_calls == 0 &&
+        !connection->handle_closed && connection->handle != NULL) {
+        completion.close_handle = connection->handle;
+        connection->handle = NULL;
+        connection->handle_closed = 1;
+    } else if (connection->shutdown_requested && !connection->shutdown_issued &&
+        !connection->closed && !connection->handle_closed && connection->handle != NULL) {
+        connection->shutdown_issued = 1;
+        connection->active_api_calls += 1;
+        completion.shutdown_handle = connection->handle;
+    }
+    (void)pthread_mutex_unlock(&connection->lock);
+    return completion;
+}
+
+static void
+RecordLocalApplicationShutdown(reach_msquic_listener *listener)
+{
+    (void)pthread_mutex_lock(&listener->lock);
+    listener->metrics.last_shutdown_origin =
+        REACH_MSQUIC_SHUTDOWN_ORIGIN_LOCAL_APPLICATION;
+    listener->metrics.last_shutdown_status = QUIC_STATUS_SUCCESS;
+    listener->metrics.last_shutdown_error_code = REACH_SHUTDOWN_ERROR;
+    (void)pthread_mutex_unlock(&listener->lock);
 }
 
 static void StreamRetain(reach_msquic_stream *stream)
@@ -614,15 +730,17 @@ ResumeSuspendedReceives(reach_msquic_listener *listener)
     }
 }
 
-static void
+static int
 RemoveConnectionLocked(reach_msquic_listener *listener, reach_msquic_connection *connection)
 {
     for (uint32_t index = 0; index < REACH_MSQUIC_MAX_CONNECTIONS; ++index) {
         if (listener->connections[index] == connection) {
             listener->connections[index] = NULL;
-            return;
+            SaturatingIncrement32(&listener->metrics.connection_registrations_removed);
+            return 1;
         }
     }
+    return 0;
 }
 
 static QUIC_STATUS QUIC_API
@@ -889,11 +1007,19 @@ ConnectionCallback(HQUIC handle, void *opaque, QUIC_CONNECTION_EVENT *event)
     reach_msquic_listener *listener = connection->listener;
 
     switch (event->Type) {
-    case QUIC_CONNECTION_EVENT_PEER_CERTIFICATE_RECEIVED:
+    case QUIC_CONNECTION_EVENT_PEER_CERTIFICATE_RECEIVED: {
+        const QUIC_BUFFER *certificate =
+            (const QUIC_BUFFER *)event->PEER_CERTIFICATE_RECEIVED.Certificate;
+        (void)pthread_mutex_lock(&listener->lock);
+        SaturatingIncrement32(&listener->metrics.peer_certificate_callbacks);
+        listener->metrics.last_peer_certificate_length =
+            certificate == NULL ? 0 : certificate->Length;
+        (void)pthread_mutex_unlock(&listener->lock);
         CopyPeerCertificate(
             connection,
-            (const QUIC_BUFFER *)event->PEER_CERTIFICATE_RECEIVED.Certificate);
+            certificate);
         break;
+    }
     case QUIC_CONNECTION_EVENT_CONNECTED: {
         QUIC_HANDSHAKE_INFO handshake = {0};
         uint32_t handshake_length = sizeof(handshake);
@@ -905,9 +1031,24 @@ ConnectionCallback(HQUIC handle, void *opaque, QUIC_CONNECTION_EVENT *event)
         int alpn_matches =
             event->CONNECTED.NegotiatedAlpnLength == ReachAlpn.Length &&
             memcmp(event->CONNECTED.NegotiatedAlpn, ReachAlpn.Buffer, ReachAlpn.Length) == 0;
+        (void)pthread_mutex_lock(&listener->lock);
+        SaturatingIncrement32(&listener->metrics.connected_callbacks);
+        listener->metrics.last_tls_query_status = (int32_t)status;
+        listener->metrics.last_tls_handshake_info_length = handshake_length;
+        listener->metrics.last_tls_protocol_version = handshake.TlsProtocolVersion;
+        listener->metrics.last_negotiated_alpn_length =
+            event->CONNECTED.NegotiatedAlpnLength;
+        listener->metrics.last_negotiated_alpn_match = alpn_matches ? 1U : 0U;
+        (void)pthread_mutex_unlock(&listener->lock);
         if (QUIC_FAILED(status) || handshake_length != sizeof(handshake) ||
             handshake.TlsProtocolVersion != QUIC_TLS_PROTOCOL_1_3 ||
             !alpn_matches) {
+            (void)pthread_mutex_lock(&listener->lock);
+            listener->metrics.last_shutdown_origin =
+                REACH_MSQUIC_SHUTDOWN_ORIGIN_LOCAL_APPLICATION;
+            listener->metrics.last_shutdown_status = (int32_t)status;
+            listener->metrics.last_shutdown_error_code = REACH_SHUTDOWN_ERROR;
+            (void)pthread_mutex_unlock(&listener->lock);
             listener->api->ConnectionShutdown(
                 handle,
                 QUIC_CONNECTION_SHUTDOWN_FLAG_NONE,
@@ -922,7 +1063,27 @@ ConnectionCallback(HQUIC handle, void *opaque, QUIC_CONNECTION_EVENT *event)
         (void)pthread_mutex_unlock(&listener->lock);
         break;
     }
+    case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_TRANSPORT:
+        (void)pthread_mutex_lock(&listener->lock);
+        listener->metrics.last_shutdown_origin = REACH_MSQUIC_SHUTDOWN_ORIGIN_TRANSPORT;
+        listener->metrics.last_shutdown_status =
+            (int32_t)event->SHUTDOWN_INITIATED_BY_TRANSPORT.Status;
+        listener->metrics.last_shutdown_error_code =
+            event->SHUTDOWN_INITIATED_BY_TRANSPORT.ErrorCode;
+        (void)pthread_mutex_unlock(&listener->lock);
+        break;
+    case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_PEER:
+        (void)pthread_mutex_lock(&listener->lock);
+        listener->metrics.last_shutdown_origin = REACH_MSQUIC_SHUTDOWN_ORIGIN_PEER;
+        listener->metrics.last_shutdown_status = 0;
+        listener->metrics.last_shutdown_error_code =
+            event->SHUTDOWN_INITIATED_BY_PEER.ErrorCode;
+        (void)pthread_mutex_unlock(&listener->lock);
+        break;
     case QUIC_CONNECTION_EVENT_PEER_STREAM_STARTED: {
+        (void)pthread_mutex_lock(&listener->lock);
+        SaturatingIncrement32(&listener->metrics.peer_stream_callbacks);
+        (void)pthread_mutex_unlock(&listener->lock);
         int permitted = 0;
         (void)pthread_mutex_lock(&connection->lock);
         /* Network.framework can acknowledge CONNECTED before MsQuic delivers
@@ -1004,10 +1165,14 @@ ConnectionCallback(HQUIC handle, void *opaque, QUIC_CONNECTION_EVENT *event)
     }
     case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE: {
         HQUIC close_handle = NULL;
+        uint32_t ownership = REACH_MSQUIC_CONNECTION_OWNERSHIP_NONE;
         (void)pthread_mutex_lock(&connection->lock);
         connection->closed = 1;
         connection->shutdown_complete = 1;
-        if (connection->active_api_calls == 0 && !connection->handle_closed &&
+        ownership = connection->configuration_ownership;
+        if (connection->configuration_ownership ==
+                REACH_MSQUIC_CONNECTION_OWNERSHIP_APPLICATION &&
+            connection->active_api_calls == 0 && !connection->handle_closed &&
             connection->handle != NULL) {
             close_handle = connection->handle;
             connection->handle = NULL;
@@ -1015,16 +1180,24 @@ ConnectionCallback(HQUIC handle, void *opaque, QUIC_CONNECTION_EVENT *event)
         }
         (void)pthread_mutex_unlock(&connection->lock);
         (void)pthread_mutex_lock(&listener->lock);
-        RemoveConnectionLocked(listener, connection);
-        if (listener->metrics.active_connections > 0) {
+        int removed = RemoveConnectionLocked(listener, connection);
+        if (removed && listener->metrics.active_connections > 0) {
             listener->metrics.active_connections -= 1;
+        }
+        SaturatingIncrement32(&listener->metrics.connection_shutdown_completions);
+        listener->metrics.last_shutdown_handshake_completed =
+            event->SHUTDOWN_COMPLETE.HandshakeCompleted ? 1U : 0U;
+        if (ownership != REACH_MSQUIC_CONNECTION_OWNERSHIP_NONE) {
+            listener->metrics.last_connection_ownership = ownership;
         }
         (void)pthread_cond_broadcast(&listener->changed);
         (void)pthread_mutex_unlock(&listener->lock);
         if (close_handle != NULL) {
-            listener->api->ConnectionClose(close_handle);
+            CloseApplicationConnection(listener, close_handle);
         }
-        ConnectionRelease(connection);
+        if (removed) {
+            ConnectionRelease(connection);
+        }
         break;
     }
     default:
@@ -1072,11 +1245,16 @@ ListenerCallback(HQUIC handle, void *opaque, QUIC_LISTENER_EVENT *event)
     }
     listener->connections[slot] = connection;
     listener->metrics.active_connections += 1;
+    SaturatingIncrement32(&listener->metrics.configuration_attempts);
     if (listener->metrics.active_connections > listener->metrics.peak_connections) {
         listener->metrics.peak_connections = listener->metrics.active_connections;
     }
     (void)pthread_mutex_unlock(&listener->lock);
 
+    /* The extra reference and active-call token keep the callback context and
+     * handle state valid across synchronous/reentrant callback delivery from
+     * ConnectionSetConfiguration. */
+    ConnectionBeginConfiguration(connection);
     listener->api->SetCallbackHandler(
         event->NEW_CONNECTION.Connection,
         (void *)ConnectionCallback,
@@ -1084,15 +1262,48 @@ ListenerCallback(HQUIC handle, void *opaque, QUIC_LISTENER_EVENT *event)
     QUIC_STATUS status = listener->api->ConnectionSetConfiguration(
         event->NEW_CONNECTION.Connection,
         listener->configuration);
+    uint32_t ownership = QUIC_FAILED(status) ?
+        REACH_MSQUIC_CONNECTION_OWNERSHIP_MSQUIC :
+        REACH_MSQUIC_CONNECTION_OWNERSHIP_APPLICATION;
+    reach_configuration_completion completion =
+        ConnectionCompleteConfiguration(connection, ownership);
+
+    (void)pthread_mutex_lock(&listener->lock);
+    listener->metrics.last_configuration_status = (int32_t)status;
+    listener->metrics.last_connection_ownership = ownership;
+    if (QUIC_FAILED(status)) {
+        SaturatingIncrement32(&listener->metrics.configuration_failed);
+    } else {
+        SaturatingIncrement32(&listener->metrics.configuration_succeeded);
+    }
+    (void)pthread_mutex_unlock(&listener->lock);
+
     if (QUIC_FAILED(status)) {
         (void)pthread_mutex_lock(&listener->lock);
-        RemoveConnectionLocked(listener, connection);
-        listener->metrics.active_connections -= 1;
-        listener->metrics.refused_connections += 1;
+        int removed = RemoveConnectionLocked(listener, connection);
+        if (removed && listener->metrics.active_connections > 0) {
+            listener->metrics.active_connections -= 1;
+        }
+        SaturatingIncrement32(&listener->metrics.refused_connections);
+        (void)pthread_cond_broadcast(&listener->changed);
         (void)pthread_mutex_unlock(&listener->lock);
-        listener->api->ConnectionClose(event->NEW_CONNECTION.Connection);
-        ConnectionRelease(connection);
+        if (removed) {
+            ConnectionRelease(connection);
+        }
+    } else {
+        if (completion.shutdown_handle != NULL) {
+            RecordLocalApplicationShutdown(listener);
+            listener->api->ConnectionShutdown(
+                completion.shutdown_handle,
+                QUIC_CONNECTION_SHUTDOWN_FLAG_NONE,
+                REACH_SHUTDOWN_ERROR);
+            ConnectionEndAPICall(connection);
+        }
+        if (completion.close_handle != NULL) {
+            CloseApplicationConnection(listener, completion.close_handle);
+        }
     }
+    ConnectionRelease(connection);
     return status;
 }
 
@@ -1369,8 +1580,9 @@ reach_msquic_listener_stop_until(
     }
     for (uint32_t index = 0; index < REACH_MSQUIC_MAX_CONNECTIONS; ++index) {
         if (connections[index] != NULL) {
-            HQUIC handle = ConnectionBeginAPICall(connections[index]);
+            HQUIC handle = ConnectionRequestShutdown(connections[index]);
             if (handle != NULL) {
+                RecordLocalApplicationShutdown(listener);
                 listener->api->ConnectionShutdown(
                     handle,
                     QUIC_CONNECTION_SHUTDOWN_FLAG_NONE,
@@ -2965,6 +3177,461 @@ ReceiveTestMappedSixteenStreams(void)
     free(source);
     ReceiveTestListenerDestroy(&listener);
     return passed;
+}
+
+typedef struct reach_configuration_test_capture {
+    QUIC_CONNECTION_CALLBACK_HANDLER callback;
+    void *callback_context;
+    QUIC_STATUS configuration_status;
+    int deliver_reentrant_shutdown;
+    int block_configuration;
+    pthread_mutex_t barrier_lock;
+    pthread_cond_t barrier_changed;
+    int configuration_entered;
+    int release_configuration;
+    uint64_t close_calls;
+    uint64_t shutdown_calls;
+    reach_configuration_test_witness witness;
+} reach_configuration_test_capture;
+
+static void QUIC_API
+ConfigurationTestSetCallbackHandler(HQUIC handle, void *handler, void *context)
+{
+    reach_configuration_test_capture *capture = (reach_configuration_test_capture *)handle;
+    capture->callback = (QUIC_CONNECTION_CALLBACK_HANDLER)handler;
+    capture->callback_context = context;
+    ((reach_msquic_connection *)context)->test_witness = &capture->witness;
+}
+
+static int
+ConfigurationTestDeliverShutdown(
+    reach_configuration_test_capture *capture,
+    HQUIC handle,
+    int attempted_late_dispatch)
+{
+    if (attempted_late_dispatch) {
+        (void)atomic_fetch_add_explicit(
+            &capture->witness.late_dispatch_attempts,
+            1,
+            memory_order_relaxed);
+    }
+    if (atomic_load_explicit(&capture->witness.released, memory_order_acquire)) {
+        if (attempted_late_dispatch) {
+            (void)atomic_fetch_add_explicit(
+                &capture->witness.late_dispatch_refusals,
+                1,
+                memory_order_relaxed);
+        }
+        return 0;
+    }
+    if (capture->callback == NULL || capture->callback_context == NULL) {
+        return 0;
+    }
+    (void)atomic_fetch_add_explicit(
+        &capture->witness.callback_dispatches,
+        1,
+        memory_order_relaxed);
+    if (atomic_load_explicit(&capture->witness.released, memory_order_acquire)) {
+        (void)atomic_fetch_add_explicit(
+            &capture->witness.post_release_callback_accesses,
+            1,
+            memory_order_relaxed);
+        return 0;
+    }
+    QUIC_CONNECTION_EVENT event = {0};
+    event.Type = QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE;
+    event.SHUTDOWN_COMPLETE.HandshakeCompleted = TRUE;
+    (void)capture->callback(handle, capture->callback_context, &event);
+    return 1;
+}
+
+static QUIC_STATUS QUIC_API
+ConfigurationTestSetConfiguration(HQUIC handle, HQUIC configuration)
+{
+    (void)configuration;
+    reach_configuration_test_capture *capture = (reach_configuration_test_capture *)handle;
+    if (capture->block_configuration) {
+        (void)pthread_mutex_lock(&capture->barrier_lock);
+        capture->configuration_entered = 1;
+        (void)pthread_cond_broadcast(&capture->barrier_changed);
+        while (!capture->release_configuration) {
+            (void)pthread_cond_wait(&capture->barrier_changed, &capture->barrier_lock);
+        }
+        (void)pthread_mutex_unlock(&capture->barrier_lock);
+    }
+    if (capture->deliver_reentrant_shutdown) {
+        (void)ConfigurationTestDeliverShutdown(capture, handle, 0);
+    }
+    return capture->configuration_status;
+}
+
+static void QUIC_API
+ConfigurationTestShutdown(
+    HQUIC handle,
+    QUIC_CONNECTION_SHUTDOWN_FLAGS flags,
+    QUIC_UINT62 error_code)
+{
+    (void)flags;
+    (void)error_code;
+    reach_configuration_test_capture *capture = (reach_configuration_test_capture *)handle;
+    capture->shutdown_calls += 1;
+    (void)ConfigurationTestDeliverShutdown(capture, handle, 0);
+}
+
+static void QUIC_API
+ConfigurationTestClose(HQUIC handle)
+{
+    reach_configuration_test_capture *capture = (reach_configuration_test_capture *)handle;
+    capture->close_calls += 1;
+}
+
+typedef struct reach_configuration_listener_thread_context {
+    reach_msquic_listener *listener;
+    QUIC_LISTENER_EVENT event;
+    QUIC_STATUS status;
+} reach_configuration_listener_thread_context;
+
+static void *
+ConfigurationTestListenerThread(void *opaque)
+{
+    reach_configuration_listener_thread_context *context = opaque;
+    context->status = ListenerCallback(NULL, context->listener, &context->event);
+    return NULL;
+}
+
+typedef struct reach_configuration_stop_thread_context {
+    reach_msquic_listener *listener;
+    uint64_t deadline;
+    int status;
+    uint64_t completed_at;
+} reach_configuration_stop_thread_context;
+
+static void *
+ConfigurationTestStopThread(void *opaque)
+{
+    reach_configuration_stop_thread_context *context = opaque;
+    context->status = reach_msquic_listener_stop_until(
+        context->listener,
+        context->deadline);
+    context->completed_at = reach_msquic_monotonic_now_nanoseconds();
+    return NULL;
+}
+
+static int
+ConfigurationTestCaptureInitialize(
+    reach_configuration_test_capture *capture,
+    QUIC_STATUS status,
+    int reentrant,
+    int blocked)
+{
+    memset(capture, 0, sizeof(*capture));
+    capture->configuration_status = status;
+    capture->deliver_reentrant_shutdown = reentrant;
+    capture->block_configuration = blocked;
+    atomic_init(&capture->witness.callback_dispatches, 0);
+    atomic_init(&capture->witness.context_release_events, 0);
+    atomic_init(&capture->witness.stop_latches, 0);
+    atomic_init(&capture->witness.late_dispatch_attempts, 0);
+    atomic_init(&capture->witness.late_dispatch_refusals, 0);
+    atomic_init(&capture->witness.post_release_callback_accesses, 0);
+    atomic_init(&capture->witness.released, 0);
+    if (!blocked) {
+        return 1;
+    }
+    if (pthread_mutex_init(&capture->barrier_lock, NULL) != 0) {
+        return 0;
+    }
+    if (!ConditionInitialize(&capture->barrier_changed)) {
+        (void)pthread_mutex_destroy(&capture->barrier_lock);
+        return 0;
+    }
+    return 1;
+}
+
+static void
+ConfigurationTestCaptureDestroy(reach_configuration_test_capture *capture)
+{
+    if (!capture->block_configuration) {
+        return;
+    }
+    (void)pthread_cond_destroy(&capture->barrier_changed);
+    (void)pthread_mutex_destroy(&capture->barrier_lock);
+}
+
+static int
+ConfigurationTestAwaitEntry(reach_configuration_test_capture *capture)
+{
+    struct timespec deadline = DeadlineAfter(1000);
+    (void)pthread_mutex_lock(&capture->barrier_lock);
+    while (!capture->configuration_entered) {
+        int status = pthread_cond_timedwait(
+            &capture->barrier_changed,
+            &capture->barrier_lock,
+            &deadline);
+        if (status != 0) {
+            (void)pthread_mutex_unlock(&capture->barrier_lock);
+            return 0;
+        }
+    }
+    (void)pthread_mutex_unlock(&capture->barrier_lock);
+    return 1;
+}
+
+static void
+ConfigurationTestReleaseConfiguration(reach_configuration_test_capture *capture)
+{
+    (void)pthread_mutex_lock(&capture->barrier_lock);
+    capture->release_configuration = 1;
+    (void)pthread_cond_broadcast(&capture->barrier_changed);
+    (void)pthread_mutex_unlock(&capture->barrier_lock);
+}
+
+static int
+ConfigurationTestAwaitStopLatch(reach_configuration_test_capture *capture)
+{
+    uint64_t now = reach_msquic_monotonic_now_nanoseconds();
+    uint64_t deadline = now + 1000000000ULL;
+    while (atomic_load_explicit(&capture->witness.stop_latches, memory_order_acquire) == 0) {
+        if (reach_msquic_monotonic_now_nanoseconds() >= deadline) {
+            return 0;
+        }
+        (void)sched_yield();
+    }
+    return 1;
+}
+
+int
+reach_msquic_configuration_contract_test(
+    uint32_t iterations,
+    reach_msquic_configuration_contract_result *out_result)
+{
+    if (iterations == 0 || out_result == NULL) {
+        return REACH_MSQUIC_ERROR;
+    }
+    memset(out_result, 0, sizeof(*out_result));
+
+    QUIC_API_TABLE api = {0};
+    api.SetCallbackHandler = ConfigurationTestSetCallbackHandler;
+    api.ConnectionSetConfiguration = ConfigurationTestSetConfiguration;
+    api.ConnectionShutdown = ConfigurationTestShutdown;
+    api.ConnectionClose = ConfigurationTestClose;
+
+    reach_msquic_listener listener = {0};
+    listener.api = &api;
+    listener.configuration = (HQUIC)(uintptr_t)0x2;
+    if (pthread_mutex_init(&listener.lock, NULL) != 0) {
+        return REACH_MSQUIC_ERROR;
+    }
+    if (!ConditionInitialize(&listener.changed)) {
+        (void)pthread_mutex_destroy(&listener.lock);
+        return REACH_MSQUIC_ERROR;
+    }
+
+    uint32_t saturated_counter = UINT32_MAX;
+    SaturatingIncrement32(&saturated_counter);
+    int passed = saturated_counter == UINT32_MAX;
+    uint64_t shutdown_calls = 0;
+    uint64_t stop_deadline_settlements = 0;
+    uint64_t callback_dispatches = 0;
+    uint64_t context_release_events = 0;
+    uint64_t stop_latches = 0;
+    uint64_t late_dispatch_attempts = 0;
+    uint64_t late_dispatch_refusals = 0;
+    uint64_t post_release_callback_accesses = 0;
+    for (uint32_t iteration = 0; iteration < iterations && passed; ++iteration) {
+        for (uint32_t variant = 0; variant < 6 && passed; ++variant) {
+            int succeeds = variant == 2 || variant == 3 || variant == 5;
+            int blocked = variant >= 4;
+            reach_configuration_test_capture capture;
+            passed = ConfigurationTestCaptureInitialize(
+                &capture,
+                succeeds ? QUIC_STATUS_SUCCESS : QUIC_STATUS_INVALID_STATE,
+                variant == 1 || variant == 3,
+                blocked);
+            if (!passed) {
+                break;
+            }
+            reach_configuration_listener_thread_context callback_context = {
+                .listener = &listener,
+                .status = QUIC_STATUS_ABORTED,
+            };
+            callback_context.event.Type = QUIC_LISTENER_EVENT_NEW_CONNECTION;
+            callback_context.event.NEW_CONNECTION.Connection = (HQUIC)&capture;
+
+            uint32_t removals_before =
+                listener.metrics.connection_registrations_removed;
+            uint32_t releases_before = listener.metrics.connection_context_releases;
+            uint32_t closes_before = listener.metrics.application_connection_closes;
+            uint32_t refused_before = listener.metrics.refused_connections;
+            uint32_t completions_before =
+                listener.metrics.connection_shutdown_completions;
+            QUIC_STATUS status = QUIC_STATUS_ABORTED;
+            int stop_status = REACH_MSQUIC_ERROR;
+            uint64_t stop_completed_at = 0;
+            if (!blocked) {
+                status = ListenerCallback(NULL, &listener, &callback_context.event);
+                if (succeeds && !capture.deliver_reentrant_shutdown) {
+                    passed = ConfigurationTestDeliverShutdown(
+                        &capture,
+                        (HQUIC)&capture,
+                        0);
+                }
+            } else {
+                pthread_t callback_thread;
+                pthread_t stop_thread;
+                int callback_created = pthread_create(
+                    &callback_thread,
+                    NULL,
+                    ConfigurationTestListenerThread,
+                    &callback_context) == 0;
+                passed = callback_created && ConfigurationTestAwaitEntry(&capture);
+                uint64_t now = reach_msquic_monotonic_now_nanoseconds();
+                reach_configuration_stop_thread_context stop_context = {
+                    .listener = &listener,
+                    .deadline = now + 5000000000ULL,
+                    .status = REACH_MSQUIC_ERROR,
+                };
+                int stop_created = passed && pthread_create(
+                    &stop_thread,
+                    NULL,
+                    ConfigurationTestStopThread,
+                    &stop_context) == 0;
+                passed = passed && stop_created && ConfigurationTestAwaitStopLatch(&capture);
+                ConfigurationTestReleaseConfiguration(&capture);
+                if (callback_created) {
+                    (void)pthread_join(callback_thread, NULL);
+                    status = callback_context.status;
+                }
+                if (stop_created) {
+                    (void)pthread_join(stop_thread, NULL);
+                    stop_status = stop_context.status;
+                    stop_completed_at = stop_context.completed_at;
+                }
+                passed = passed && stop_status == REACH_MSQUIC_OK &&
+                    stop_completed_at > 0 && stop_completed_at <= stop_context.deadline;
+                if (stop_status == REACH_MSQUIC_OK &&
+                    stop_completed_at > 0 && stop_completed_at <= stop_context.deadline) {
+                    stop_deadline_settlements += 1;
+                }
+                (void)pthread_mutex_lock(&listener.lock);
+                listener.stopping = 0;
+                listener.stopped = 0;
+                listener.shutdown_deadline_nanoseconds = 0;
+                (void)pthread_mutex_unlock(&listener.lock);
+            }
+
+            int late_dispatched = ConfigurationTestDeliverShutdown(
+                &capture,
+                (HQUIC)&capture,
+                1);
+
+            uint64_t expected_callbacks =
+                variant == 0 || variant == 4 ? 0U : 1U;
+            uint64_t expected_completions = expected_callbacks;
+
+            passed = status == capture.configuration_status &&
+                !late_dispatched &&
+                listener.metrics.active_connections == 0 &&
+                listener.metrics.connection_registrations_removed ==
+                    removals_before + 1 &&
+                listener.metrics.connection_context_releases == releases_before + 1 &&
+                listener.metrics.application_connection_closes ==
+                    closes_before + (succeeds ? 1U : 0U) &&
+                listener.metrics.refused_connections ==
+                    refused_before + (succeeds ? 0U : 1U) &&
+                listener.metrics.connection_shutdown_completions ==
+                    completions_before + expected_completions &&
+                capture.close_calls == (succeeds ? 1U : 0U) &&
+                capture.shutdown_calls == (variant == 5 ? 1U : 0U) &&
+                atomic_load_explicit(
+                    &capture.witness.callback_dispatches,
+                    memory_order_relaxed) == expected_callbacks &&
+                atomic_load_explicit(
+                    &capture.witness.context_release_events,
+                    memory_order_relaxed) == 1 &&
+                atomic_load_explicit(
+                    &capture.witness.stop_latches,
+                    memory_order_relaxed) == (blocked ? 1U : 0U) &&
+                atomic_load_explicit(
+                    &capture.witness.late_dispatch_attempts,
+                    memory_order_relaxed) == 1 &&
+                atomic_load_explicit(
+                    &capture.witness.late_dispatch_refusals,
+                    memory_order_relaxed) == 1 &&
+                atomic_load_explicit(
+                    &capture.witness.post_release_callback_accesses,
+                    memory_order_relaxed) == 0;
+
+            shutdown_calls += capture.shutdown_calls;
+            callback_dispatches += atomic_load_explicit(
+                &capture.witness.callback_dispatches,
+                memory_order_relaxed);
+            context_release_events += atomic_load_explicit(
+                &capture.witness.context_release_events,
+                memory_order_relaxed);
+            stop_latches += atomic_load_explicit(
+                &capture.witness.stop_latches,
+                memory_order_relaxed);
+            late_dispatch_attempts += atomic_load_explicit(
+                &capture.witness.late_dispatch_attempts,
+                memory_order_relaxed);
+            late_dispatch_refusals += atomic_load_explicit(
+                &capture.witness.late_dispatch_refusals,
+                memory_order_relaxed);
+            post_release_callback_accesses += atomic_load_explicit(
+                &capture.witness.post_release_callback_accesses,
+                memory_order_relaxed);
+            ConfigurationTestCaptureDestroy(&capture);
+        }
+    }
+
+    out_result->attempts = listener.metrics.configuration_attempts;
+    out_result->succeeded = listener.metrics.configuration_succeeded;
+    out_result->failed = listener.metrics.configuration_failed;
+    out_result->connection_closes = listener.metrics.application_connection_closes;
+    out_result->registration_removals =
+        listener.metrics.connection_registrations_removed;
+    out_result->context_releases = listener.metrics.connection_context_releases;
+    out_result->refused_connections = listener.metrics.refused_connections;
+    out_result->active_connections = listener.metrics.active_connections;
+    out_result->shutdown_calls = shutdown_calls;
+    out_result->shutdown_completions =
+        listener.metrics.connection_shutdown_completions;
+    out_result->stop_latches = stop_latches;
+    out_result->stop_deadline_settlements = stop_deadline_settlements;
+    out_result->callback_dispatches = callback_dispatches;
+    out_result->context_release_events = context_release_events;
+    out_result->late_dispatch_attempts = late_dispatch_attempts;
+    out_result->late_dispatch_refusals = late_dispatch_refusals;
+    out_result->post_release_callback_accesses = post_release_callback_accesses;
+
+    uint64_t iterations64 = (uint64_t)iterations;
+    uint64_t doubled = iterations64 * 2U;
+    uint64_t tripled = iterations64 * 3U;
+    uint64_t quadrupled = iterations64 * 4U;
+    uint64_t sextupled = iterations64 * 6U;
+    passed = passed &&
+        out_result->attempts == sextupled &&
+        out_result->succeeded == tripled &&
+        out_result->failed == tripled &&
+        out_result->connection_closes == tripled &&
+        out_result->registration_removals == sextupled &&
+        out_result->context_releases == sextupled &&
+        out_result->refused_connections == tripled &&
+        out_result->active_connections == 0 &&
+        out_result->shutdown_calls == iterations64 &&
+        out_result->shutdown_completions == quadrupled &&
+        out_result->stop_latches == doubled &&
+        out_result->stop_deadline_settlements == doubled &&
+        out_result->callback_dispatches == quadrupled &&
+        out_result->context_release_events == sextupled &&
+        out_result->late_dispatch_attempts == sextupled &&
+        out_result->late_dispatch_refusals == sextupled &&
+        out_result->post_release_callback_accesses == 0;
+
+    (void)pthread_cond_destroy(&listener.changed);
+    (void)pthread_mutex_destroy(&listener.lock);
+    return passed ? REACH_MSQUIC_OK : REACH_MSQUIC_ERROR;
 }
 
 int

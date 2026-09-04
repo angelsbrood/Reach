@@ -62,6 +62,28 @@ public struct LinuxServiceStatus: Codable, Sendable, Equatable {
     public var acceptedStreams: UInt32
     public var refusedConnections: UInt32
     public var refusedStreams: UInt32
+    public var configurationAttempts: UInt32
+    public var configurationSucceeded: UInt32
+    public var configurationFailed: UInt32
+    public var lastConfigurationStatus: Int32
+    public var connectionRegistrationsRemoved: UInt32
+    public var connectionContextReleases: UInt32
+    public var applicationConnectionCloses: UInt32
+    public var peerCertificateCallbacks: UInt32
+    public var lastPeerCertificateLength: UInt32
+    public var connectedCallbacks: UInt32
+    public var lastTLSQueryStatus: Int32
+    public var lastTLSHandshakeInfoLength: UInt32
+    public var lastTLSProtocolVersion: UInt32
+    public var lastNegotiatedALPNLength: UInt32
+    public var lastNegotiatedALPNMatch: UInt32
+    public var peerStreamCallbacks: UInt32
+    public var connectionShutdownCompletions: UInt32
+    public var lastConnectionOwnership: UInt32
+    public var lastShutdownOrigin: UInt32
+    public var lastShutdownStatus: Int32
+    public var lastShutdownErrorCode: UInt64
+    public var lastShutdownHandshakeCompleted: UInt32
     public var lastError: String?
 
     public init(
@@ -70,7 +92,7 @@ public struct LinuxServiceStatus: Codable, Sendable, Equatable {
         metrics: LinuxTransportMetrics,
         lastError: String? = nil
     ) {
-        schemaVersion = 1
+        schemaVersion = 2
         pid = getpid()
         self.ready = ready
         modelID = configuration.modelID
@@ -82,6 +104,28 @@ public struct LinuxServiceStatus: Codable, Sendable, Equatable {
         acceptedStreams = metrics.acceptedStreams
         refusedConnections = metrics.refusedConnections
         refusedStreams = metrics.refusedStreams
+        configurationAttempts = metrics.configurationAttempts
+        configurationSucceeded = metrics.configurationSucceeded
+        configurationFailed = metrics.configurationFailed
+        lastConfigurationStatus = metrics.lastConfigurationStatus
+        connectionRegistrationsRemoved = metrics.connectionRegistrationsRemoved
+        connectionContextReleases = metrics.connectionContextReleases
+        applicationConnectionCloses = metrics.applicationConnectionCloses
+        peerCertificateCallbacks = metrics.peerCertificateCallbacks
+        lastPeerCertificateLength = metrics.lastPeerCertificateLength
+        connectedCallbacks = metrics.connectedCallbacks
+        lastTLSQueryStatus = metrics.lastTLSQueryStatus
+        lastTLSHandshakeInfoLength = metrics.lastTLSHandshakeInfoLength
+        lastTLSProtocolVersion = metrics.lastTLSProtocolVersion
+        lastNegotiatedALPNLength = metrics.lastNegotiatedALPNLength
+        lastNegotiatedALPNMatch = metrics.lastNegotiatedALPNMatch
+        peerStreamCallbacks = metrics.peerStreamCallbacks
+        connectionShutdownCompletions = metrics.connectionShutdownCompletions
+        lastConnectionOwnership = metrics.lastConnectionOwnership
+        lastShutdownOrigin = metrics.lastShutdownOrigin
+        lastShutdownStatus = metrics.lastShutdownStatus
+        lastShutdownErrorCode = metrics.lastShutdownErrorCode
+        lastShutdownHandshakeCompleted = metrics.lastShutdownHandshakeCompleted
         self.lastError = lastError.map(Self.boundedError)
     }
 

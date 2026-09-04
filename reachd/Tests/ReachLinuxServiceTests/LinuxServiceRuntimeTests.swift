@@ -392,7 +392,29 @@ private func sweepEventually(_ predicate: @escaping @Sendable () -> Bool) async 
             activeStreams: 1,
             refusedStreams: 3,
             peakConnections: 4,
-            peakStreams: 6
+            peakStreams: 6,
+            configurationAttempts: 9,
+            configurationSucceeded: 4,
+            configurationFailed: 5,
+            lastConfigurationStatus: -7,
+            connectionRegistrationsRemoved: 8,
+            connectionContextReleases: 8,
+            applicationConnectionCloses: 4,
+            peerCertificateCallbacks: 4,
+            lastPeerCertificateLength: 417,
+            connectedCallbacks: 4,
+            lastTLSQueryStatus: 0,
+            lastTLSHandshakeInfoLength: 36,
+            lastTLSProtocolVersion: 0x3000,
+            lastNegotiatedALPNLength: 7,
+            lastNegotiatedALPNMatch: 1,
+            peerStreamCallbacks: 6,
+            connectionShutdownCompletions: 8,
+            lastConnectionOwnership: 1,
+            lastShutdownOrigin: 3,
+            lastShutdownStatus: 0,
+            lastShutdownErrorCode: 19,
+            lastShutdownHandshakeCompleted: 1
         )
         let status = LinuxServiceStatus(
             configuration: try fixedConfiguration(),
@@ -416,8 +438,23 @@ private func sweepEventually(_ predicate: @escaping @Sendable () -> Bool) async 
         #expect(encoded == Set([
             "schemaVersion", "pid", "ready", "modelID", "boundAddress", "boundPort",
             "activeConnections", "activeStreams", "acceptedConnections", "acceptedStreams",
-            "refusedConnections", "refusedStreams", "lastError",
+            "refusedConnections", "refusedStreams", "configurationAttempts",
+            "configurationSucceeded", "configurationFailed", "lastConfigurationStatus",
+            "connectionRegistrationsRemoved", "connectionContextReleases",
+            "applicationConnectionCloses", "peerCertificateCallbacks",
+            "lastPeerCertificateLength", "connectedCallbacks", "lastTLSQueryStatus",
+            "lastTLSHandshakeInfoLength", "lastTLSProtocolVersion",
+            "lastNegotiatedALPNLength", "lastNegotiatedALPNMatch", "peerStreamCallbacks",
+            "connectionShutdownCompletions", "lastConnectionOwnership",
+            "lastShutdownOrigin", "lastShutdownStatus", "lastShutdownErrorCode",
+            "lastShutdownHandshakeCompleted", "lastError",
         ]))
+        #expect(decoded.schemaVersion == 2)
+        #expect(decoded.configurationAttempts == 9)
+        #expect(decoded.lastConfigurationStatus == -7)
+        #expect(decoded.lastTLSHandshakeInfoLength == 36)
+        #expect(decoded.lastNegotiatedALPNMatch == 1)
+        #expect(decoded.lastShutdownErrorCode == 19)
 
         var stopped = status
         stopped.ready = false

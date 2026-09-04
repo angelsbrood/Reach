@@ -95,6 +95,28 @@ public struct LinuxTransportMetrics: Sendable, Equatable, Codable {
     public var peakPhysicalReceiveBytes: UInt64
     public var virtualReceiveBytes: UInt64
     public var suspendedReceiveStreams: UInt32
+    public var configurationAttempts: UInt32
+    public var configurationSucceeded: UInt32
+    public var configurationFailed: UInt32
+    public var lastConfigurationStatus: Int32
+    public var connectionRegistrationsRemoved: UInt32
+    public var connectionContextReleases: UInt32
+    public var applicationConnectionCloses: UInt32
+    public var peerCertificateCallbacks: UInt32
+    public var lastPeerCertificateLength: UInt32
+    public var connectedCallbacks: UInt32
+    public var lastTLSQueryStatus: Int32
+    public var lastTLSHandshakeInfoLength: UInt32
+    public var lastTLSProtocolVersion: UInt32
+    public var lastNegotiatedALPNLength: UInt32
+    public var lastNegotiatedALPNMatch: UInt32
+    public var peerStreamCallbacks: UInt32
+    public var connectionShutdownCompletions: UInt32
+    public var lastConnectionOwnership: UInt32
+    public var lastShutdownOrigin: UInt32
+    public var lastShutdownStatus: Int32
+    public var lastShutdownErrorCode: UInt64
+    public var lastShutdownHandshakeCompleted: UInt32
 
     public init(
         rawConnections: UInt32,
@@ -113,7 +135,29 @@ public struct LinuxTransportMetrics: Sendable, Equatable, Codable {
         physicalReceiveBytes: UInt64 = 0,
         peakPhysicalReceiveBytes: UInt64 = 0,
         virtualReceiveBytes: UInt64 = 0,
-        suspendedReceiveStreams: UInt32 = 0
+        suspendedReceiveStreams: UInt32 = 0,
+        configurationAttempts: UInt32 = 0,
+        configurationSucceeded: UInt32 = 0,
+        configurationFailed: UInt32 = 0,
+        lastConfigurationStatus: Int32 = 0,
+        connectionRegistrationsRemoved: UInt32 = 0,
+        connectionContextReleases: UInt32 = 0,
+        applicationConnectionCloses: UInt32 = 0,
+        peerCertificateCallbacks: UInt32 = 0,
+        lastPeerCertificateLength: UInt32 = 0,
+        connectedCallbacks: UInt32 = 0,
+        lastTLSQueryStatus: Int32 = 0,
+        lastTLSHandshakeInfoLength: UInt32 = 0,
+        lastTLSProtocolVersion: UInt32 = 0,
+        lastNegotiatedALPNLength: UInt32 = 0,
+        lastNegotiatedALPNMatch: UInt32 = 0,
+        peerStreamCallbacks: UInt32 = 0,
+        connectionShutdownCompletions: UInt32 = 0,
+        lastConnectionOwnership: UInt32 = 0,
+        lastShutdownOrigin: UInt32 = 0,
+        lastShutdownStatus: Int32 = 0,
+        lastShutdownErrorCode: UInt64 = 0,
+        lastShutdownHandshakeCompleted: UInt32 = 0
     ) {
         self.rawConnections = rawConnections
         self.acceptedConnections = acceptedConnections
@@ -132,6 +176,28 @@ public struct LinuxTransportMetrics: Sendable, Equatable, Codable {
         self.peakPhysicalReceiveBytes = peakPhysicalReceiveBytes
         self.virtualReceiveBytes = virtualReceiveBytes
         self.suspendedReceiveStreams = suspendedReceiveStreams
+        self.configurationAttempts = configurationAttempts
+        self.configurationSucceeded = configurationSucceeded
+        self.configurationFailed = configurationFailed
+        self.lastConfigurationStatus = lastConfigurationStatus
+        self.connectionRegistrationsRemoved = connectionRegistrationsRemoved
+        self.connectionContextReleases = connectionContextReleases
+        self.applicationConnectionCloses = applicationConnectionCloses
+        self.peerCertificateCallbacks = peerCertificateCallbacks
+        self.lastPeerCertificateLength = lastPeerCertificateLength
+        self.connectedCallbacks = connectedCallbacks
+        self.lastTLSQueryStatus = lastTLSQueryStatus
+        self.lastTLSHandshakeInfoLength = lastTLSHandshakeInfoLength
+        self.lastTLSProtocolVersion = lastTLSProtocolVersion
+        self.lastNegotiatedALPNLength = lastNegotiatedALPNLength
+        self.lastNegotiatedALPNMatch = lastNegotiatedALPNMatch
+        self.peerStreamCallbacks = peerStreamCallbacks
+        self.connectionShutdownCompletions = connectionShutdownCompletions
+        self.lastConnectionOwnership = lastConnectionOwnership
+        self.lastShutdownOrigin = lastShutdownOrigin
+        self.lastShutdownStatus = lastShutdownStatus
+        self.lastShutdownErrorCode = lastShutdownErrorCode
+        self.lastShutdownHandshakeCompleted = lastShutdownHandshakeCompleted
     }
 }
 
@@ -231,7 +297,29 @@ final class ListenerHandle: @unchecked Sendable {
             physicalReceiveBytes: raw.physical_receive_bytes,
             peakPhysicalReceiveBytes: raw.peak_physical_receive_bytes,
             virtualReceiveBytes: raw.virtual_receive_bytes,
-            suspendedReceiveStreams: raw.suspended_receive_streams
+            suspendedReceiveStreams: raw.suspended_receive_streams,
+            configurationAttempts: raw.configuration_attempts,
+            configurationSucceeded: raw.configuration_succeeded,
+            configurationFailed: raw.configuration_failed,
+            lastConfigurationStatus: raw.last_configuration_status,
+            connectionRegistrationsRemoved: raw.connection_registrations_removed,
+            connectionContextReleases: raw.connection_context_releases,
+            applicationConnectionCloses: raw.application_connection_closes,
+            peerCertificateCallbacks: raw.peer_certificate_callbacks,
+            lastPeerCertificateLength: raw.last_peer_certificate_length,
+            connectedCallbacks: raw.connected_callbacks,
+            lastTLSQueryStatus: raw.last_tls_query_status,
+            lastTLSHandshakeInfoLength: raw.last_tls_handshake_info_length,
+            lastTLSProtocolVersion: raw.last_tls_protocol_version,
+            lastNegotiatedALPNLength: raw.last_negotiated_alpn_length,
+            lastNegotiatedALPNMatch: raw.last_negotiated_alpn_match,
+            peerStreamCallbacks: raw.peer_stream_callbacks,
+            connectionShutdownCompletions: raw.connection_shutdown_completions,
+            lastConnectionOwnership: raw.last_connection_ownership,
+            lastShutdownOrigin: raw.last_shutdown_origin,
+            lastShutdownStatus: raw.last_shutdown_status,
+            lastShutdownErrorCode: raw.last_shutdown_error_code,
+            lastShutdownHandshakeCompleted: raw.last_shutdown_handshake_completed
         )
     }
 

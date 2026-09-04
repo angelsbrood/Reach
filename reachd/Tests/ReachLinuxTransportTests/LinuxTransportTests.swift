@@ -507,6 +507,29 @@ private func provePretransferRefusalDoesNotLeak(retaining stream: StreamHandle) 
         #expect(deadline.hasExpired(now: deadline.monotonicNanoseconds))
     }
 
+    @Test func connectionConfigurationStopLatchAndLifetimeAreExactAcrossReentrantSettlement() {
+        var result = reach_msquic_configuration_contract_result()
+        #expect(reach_msquic_configuration_contract_test(10_000, &result) ==
+            Int32(REACH_MSQUIC_OK))
+        #expect(result.attempts == 60_000)
+        #expect(result.succeeded == 30_000)
+        #expect(result.failed == 30_000)
+        #expect(result.connection_closes == 30_000)
+        #expect(result.registration_removals == 60_000)
+        #expect(result.context_releases == 60_000)
+        #expect(result.refused_connections == 30_000)
+        #expect(result.active_connections == 0)
+        #expect(result.shutdown_calls == 10_000)
+        #expect(result.shutdown_completions == 40_000)
+        #expect(result.stop_latches == 20_000)
+        #expect(result.stop_deadline_settlements == 20_000)
+        #expect(result.callback_dispatches == 40_000)
+        #expect(result.context_release_events == 60_000)
+        #expect(result.late_dispatch_attempts == 60_000)
+        #expect(result.late_dispatch_refusals == 60_000)
+        #expect(result.post_release_callback_accesses == 0)
+    }
+
     @Test func packetizationDoesNotChangeFrameDecoding() async throws {
         let encoded = try encodedHello()
         for fragment in [1, 2, 3, 5, 127, encoded.count, encoded.count * 2] {

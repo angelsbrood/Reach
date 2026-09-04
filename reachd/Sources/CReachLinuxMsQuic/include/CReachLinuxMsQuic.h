@@ -54,6 +54,19 @@ enum {
     REACH_MSQUIC_SHUTDOWN_TEST_DESTRUCTOR_REUSE = 3,
 };
 
+enum {
+    REACH_MSQUIC_CONNECTION_OWNERSHIP_NONE = 0,
+    REACH_MSQUIC_CONNECTION_OWNERSHIP_APPLICATION = 1,
+    REACH_MSQUIC_CONNECTION_OWNERSHIP_MSQUIC = 2,
+};
+
+enum {
+    REACH_MSQUIC_SHUTDOWN_ORIGIN_NONE = 0,
+    REACH_MSQUIC_SHUTDOWN_ORIGIN_LOCAL_APPLICATION = 1,
+    REACH_MSQUIC_SHUTDOWN_ORIGIN_TRANSPORT = 2,
+    REACH_MSQUIC_SHUTDOWN_ORIGIN_PEER = 3,
+};
+
 typedef struct reach_msquic_listener_configuration {
     const char *listen_address;
     uint16_t listen_port;
@@ -80,7 +93,49 @@ typedef struct reach_msquic_metrics {
     uint64_t peak_physical_receive_bytes;
     uint64_t virtual_receive_bytes;
     uint32_t suspended_receive_streams;
+    uint32_t configuration_attempts;
+    uint32_t configuration_succeeded;
+    uint32_t configuration_failed;
+    int32_t last_configuration_status;
+    uint32_t connection_registrations_removed;
+    uint32_t connection_context_releases;
+    uint32_t application_connection_closes;
+    uint32_t peer_certificate_callbacks;
+    uint32_t last_peer_certificate_length;
+    uint32_t connected_callbacks;
+    int32_t last_tls_query_status;
+    uint32_t last_tls_handshake_info_length;
+    uint32_t last_tls_protocol_version;
+    uint32_t last_negotiated_alpn_length;
+    uint32_t last_negotiated_alpn_match;
+    uint32_t peer_stream_callbacks;
+    uint32_t connection_shutdown_completions;
+    uint32_t last_connection_ownership;
+    uint32_t last_shutdown_origin;
+    int32_t last_shutdown_status;
+    uint64_t last_shutdown_error_code;
+    uint32_t last_shutdown_handshake_completed;
 } reach_msquic_metrics;
+
+typedef struct reach_msquic_configuration_contract_result {
+    uint64_t attempts;
+    uint64_t succeeded;
+    uint64_t failed;
+    uint64_t connection_closes;
+    uint64_t registration_removals;
+    uint64_t context_releases;
+    uint64_t refused_connections;
+    uint64_t active_connections;
+    uint64_t shutdown_calls;
+    uint64_t shutdown_completions;
+    uint64_t stop_latches;
+    uint64_t stop_deadline_settlements;
+    uint64_t callback_dispatches;
+    uint64_t context_release_events;
+    uint64_t late_dispatch_attempts;
+    uint64_t late_dispatch_refusals;
+    uint64_t post_release_callback_accesses;
+} reach_msquic_configuration_contract_result;
 
 /**
  * Creates and starts the exact Reach QUIC-v1/TLS-1.3/mTLS listener.
@@ -185,6 +240,16 @@ int reach_msquic_receive_contract_test(uint32_t scenario, uint32_t iterations);
 
 /** Deterministic proof that stop and destruction reuse one absolute deadline. */
 int reach_msquic_shutdown_contract_test(uint32_t scenario);
+
+/**
+ * Deterministic injected-table proof of connection-configuration ownership.
+ * Each iteration covers success and failure with ordinary and reentrant
+ * SHUTDOWN_COMPLETE delivery, plus barrier-controlled configuration/stop
+ * success and failure and a guarded attempted late dispatch.
+ */
+int reach_msquic_configuration_contract_test(
+    uint32_t iterations,
+    reach_msquic_configuration_contract_result *out_result);
 
 /** Frozen ABI/runtime proof surfaced to deterministic tests and diagnostics. */
 int reach_msquic_version_settings_layout(
