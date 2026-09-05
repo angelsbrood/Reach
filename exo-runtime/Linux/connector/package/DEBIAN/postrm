@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+case "${1:-}" in
+    remove|purge) rm -rf -- /run/reach-exo-connector ;;
+esac
+# Operator files, their static UID, and an operator-installed Reach drop-in persist.
+if command -v systemctl >/dev/null 2>&1; then systemctl daemon-reload; fi
+exit 0

@@ -7,9 +7,9 @@ unprivileged service in one disposable Ubuntu 26.04 arm64 guest, using
 Swift 6.3.3 and MsQuic 2.5.11. Private checks cover authenticated Apple/Linux
 sessions and synthetic EXO generation, bounded streams and framing,
 reattachment, cancellation, detached residency, graceful shutdown, crash
-recovery, enabled/disabled reboot, and removal. Physical-host operation, real
-models/providers, package upgrades/rollback and public release remain outside
-this verification boundary.
+recovery, enabled/disabled reboot, and removal. A separate bounded integration also covers the exact EXO/Qwen two-rank stack.
+Physical-host operation, general models/providers, package upgrades/rollback and
+public release remain outside this verification boundary.
 
 The service uses the shared `ReachHost` and ReachWire state machine and an
 operator-managed numeric-loopback EXO HTTP endpoint. The package subtree is
@@ -64,6 +64,28 @@ while starting with empty volatile session, provider-admission and replay state.
 Normal package removal disables/stops the service and removes its executable,
 libraries, unit and runtime/state directories. It preserves operator `/etc/reach`
 files; Debian may retain a residual-configuration package record after removal.
+
+## Linux EXO connector companion
+
+The separate private `reach-exo-connector` arm64 package places the connector
+beside Linux Reach. Reach keeps `exoEndpoint` at `http://127.0.0.1:52415`; the
+connector authenticates the coordinator gateway directly from the service
+host's private address. No Mac provider connector, gateway tunnel or worker-side
+proxy is part of that route. The Apple client and any test-side QUIC bridge are
+separate from the server's provider path.
+
+Follow the [companion build, verified-role projection and deployment recipe](../exo-runtime/Linux/connector/README.md).
+It uses a dedicated account and exact UID/modes for the connector's credentials;
+Reach must not receive access to those files. The package installs inertly and
+does not enable or start either service. Its main-process `READY=1` means local
+loopback serving, while Reach's unchanged preflight checks the provider.
+
+The shipped `reachd-ordering.conf` is an opt-in `Wants`/`After` example, installed
+only by the operator. Keep the provider cluster whole-ready before starting or
+rebooting the service host. Disabling the connector alone does not override a
+retained `Wants` dependency. Disable both units and explicitly remove the owned
+drop-in when both must remain stopped after reboot. Removal/purge preserves
+operator credentials, their account and the operator's Reach drop-in.
 
 ## Building the private unsigned Mac package
 

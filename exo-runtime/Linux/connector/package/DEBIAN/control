@@ -1,0 +1,10 @@
+Package: reach-exo-connector
+Version: 0.1.0
+Architecture: arm64
+Maintainer: Reach contributors
+Section: net
+Priority: optional
+Depends: systemd, passwd
+Description: Private Linux companion for the Reach EXO gateway
+ Loopback HTTP connector with an authenticated upstream and a dedicated
+ unprivileged systemd service. Operator credentials are required separately.

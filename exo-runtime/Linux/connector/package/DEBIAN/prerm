@@ -1,0 +1,15 @@
+#!/bin/sh
+set -eu
+case "${1:-}" in
+    remove|deconfigure)
+        if command -v systemctl >/dev/null 2>&1; then
+            if ! systemctl disable --now reach-exo-connector.service; then
+                if systemctl is-active --quiet reach-exo-connector.service; then
+                    echo 'connector did not stop; refusing package removal' >&2
+                    exit 1
+                fi
+            fi
+        fi
+        ;;
+esac
+exit 0

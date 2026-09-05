@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "listen_address": "127.0.0.1:52415",
+  "gateway_address": "192.168.118.3:53421",
+  "server_name": "reach-exo-gateway",
+  "tls": {
+    "ca": "/etc/reach-exo-connector/ca.pem",
+    "certificate": "/etc/reach-exo-connector/connector.pem",
+    "private_key": "/etc/reach-exo-connector/connector-key.pem"
+  }
+}

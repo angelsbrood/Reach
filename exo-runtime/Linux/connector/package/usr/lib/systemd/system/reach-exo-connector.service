@@ -1,0 +1,48 @@
+[Unit]
+Description=Reach EXO loopback connector
+After=network.target
+StartLimitIntervalSec=60s
+StartLimitBurst=3
+
+[Service]
+Type=notify
+NotifyAccess=main
+User=reach-exo-connector
+Group=reach-exo-connector
+ExecStart=/usr/lib/reach-exo-connector/reach-exo-connector /etc/reach-exo-connector/connector.json
+RuntimeDirectory=reach-exo-connector
+RuntimeDirectoryMode=0700
+WorkingDirectory=/run/reach-exo-connector
+UMask=0077
+Restart=on-failure
+RestartPreventExitStatus=64
+RestartSec=2s
+TimeoutStartSec=10s
+TimeoutStopSec=5s
+KillMode=control-group
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+DevicePolicy=closed
+ReadOnlyPaths=/etc/reach-exo-connector /tmp /var/tmp /dev/shm
+ReadWritePaths=/run/reach-exo-connector
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictSUIDSGID=yes
+LockPersonality=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+SystemCallArchitectures=native
+LimitNOFILE=1024
+TasksMax=128
+MemoryMax=256M
+
+[Install]
+WantedBy=multi-user.target

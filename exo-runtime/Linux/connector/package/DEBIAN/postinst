@@ -1,0 +1,31 @@
+#!/bin/sh
+set -eu
+case "${1:-}" in configure) ;; *) exit 0 ;; esac
+name=reach-exo-connector
+if getent passwd "$name" >/dev/null; then
+    record=$(getent passwd "$name")
+    expected_group=$(getent group "$name" | cut -d: -f3)
+    uid=$(printf '%s\n' "$record" | cut -d: -f3)
+    gid=$(printf '%s\n' "$record" | cut -d: -f4)
+    details=$(printf '%s\n' "$record" | cut -d: -f5-7)
+    [ "$uid" -ne 0 ] && [ "$gid" -ne 0 ] && [ "$gid" = "$expected_group" ] &&
+        [ "$details" = 'Reach EXO connector:/nonexistent:/usr/sbin/nologin' ] || {
+        echo 'conflicting connector account; no existing identity was modified' >&2; exit 1;
+    }
+else
+    if getent group "$name" >/dev/null; then
+        echo 'pre-existing group without the connector account refuses installation' >&2; exit 1
+    fi
+    systemd-sysusers /usr/lib/sysusers.d/reach-exo-connector.conf
+fi
+gid=$(getent group "$name" | cut -d: -f3)
+parent=/etc/reach-exo-connector
+if [ -e "$parent" ] || [ -L "$parent" ]; then
+    [ -d "$parent" ] && [ ! -L "$parent" ] && [ "$(stat -c '%u:%g:%a' "$parent")" = "0:$gid:710" ] || {
+        echo 'existing connector directory has conflicting ownership or mode; left unchanged' >&2; exit 1;
+    }
+else
+    install -d -o root -g "$name" -m 0710 "$parent"
+fi
+if command -v systemctl >/dev/null 2>&1; then systemctl daemon-reload; fi
+exit 0

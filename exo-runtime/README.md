@@ -259,3 +259,12 @@ issuance for that exact topology; it does not own rotation, revocation, remote
 enrollment, model acquisition, persistent topology, a feed or general version selection, physical
 host deployment, performance, Keeper, public relay, Linux reachd, or any other
 provider/model closure.
+
+## Separate Linux connector companion
+
+The private [Linux/arm64 connector companion](Linux/connector/README.md) adds an
+unprivileged `Type=notify` service for the existing loopback-to-mTLS proxy. It
+has a separate binary/package identity and does not change bundle B or its
+Darwin connector. Installation is inert; credential deployment is an explicitly
+checked projection of a verified S54 connector role. Its opt-in Reach ordering
+reports local connector readiness, while provider readiness remains separate.
