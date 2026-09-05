@@ -53,7 +53,7 @@ public enum PacketPublisher {
         guard logical + Int64(manifestData.count) <= 8_388_608 else { throw ControllerError.publication("packet-byte-limit") }
         try DurableFile.write(manifestData, to: staging.appendingPathComponent("MANIFEST.json"))
         try DurableFile.fsyncDirectory(staging)
-        _ = try verifyDirectory(staging, expectedRoot: SHA256.hex(manifestData))
+        _ = try verifyDirectory(staging, expectedRoot: SHA256.hex(manifestData), packetBasename: finalURL.lastPathComponent)
         let status = staging.path.withCString { source in
             finalURL.path.withCString { destination in
                 renameatx_np(AT_FDCWD, source, AT_FDCWD, destination, UInt32(RENAME_EXCL))
@@ -72,7 +72,7 @@ public enum PacketPublisher {
         try verifyDirectory(finalURL, expectedRoot: nil)
     }
 
-    private static func verifyDirectory(_ directory: URL, expectedRoot: String?) throws -> PublishedPacket {
+    private static func verifyDirectory(_ directory: URL, expectedRoot: String?, packetBasename: String? = nil) throws -> PublishedPacket {
         var directoryInfo = stat()
         guard lstat(directory.path, &directoryInfo) == 0, (directoryInfo.st_mode & S_IFMT) == S_IFDIR,
               directoryInfo.st_uid == getuid(), (directoryInfo.st_mode & 0o777) == 0o700 else {
@@ -81,6 +81,11 @@ public enum PacketPublisher {
         let names = try FileManager.default.contentsOfDirectory(atPath: directory.path).sorted()
         guard names.lastIndex(of: "MANIFEST.json") != nil else { throw ControllerError.verification("manifest-missing") }
         let manifestURL = directory.appendingPathComponent("MANIFEST.json")
+        var manifestInfo = stat()
+        guard lstat(manifestURL.path, &manifestInfo) == 0, (manifestInfo.st_mode & S_IFMT) == S_IFREG,
+              manifestInfo.st_nlink == 1, (manifestInfo.st_mode & 0o777) == 0o600 else {
+            throw ControllerError.verification("manifest-metadata")
+        }
         let manifestData = try Data(contentsOf: manifestURL, options: .mappedIfSafe)
         let root = SHA256.hex(manifestData)
         if let expectedRoot, root != expectedRoot { throw ControllerError.verification("root") }
@@ -110,7 +115,7 @@ public enum PacketPublisher {
         let outcomeData = try Data(contentsOf: outcomeURL)
         let outcomeKeys: Set<String> = ["actionTableDigest", "claimBoundaryDigest", "earliestStopOrdinal", "outcome", "packetBasename", "publicResults", "runLedgerDigest", "sliceLaunchSnapshotDigest", "version"]
         let outcome = try CanonicalJSON.decode(OutcomePayload.self, from: outcomeData, allowedTopLevelKeys: outcomeKeys)
-        guard outcome.packetBasename == directory.lastPathComponent,
+        guard outcome.packetBasename == (packetBasename ?? directory.lastPathComponent),
               try SHA256.file(directory.appendingPathComponent("action-table.json")) == outcome.actionTableDigest,
               try SHA256.file(directory.appendingPathComponent("run-ledger.json")) == outcome.runLedgerDigest,
               try SHA256.file(directory.appendingPathComponent("launch-snapshot.json")) == outcome.sliceLaunchSnapshotDigest else {
@@ -121,7 +126,7 @@ public enum PacketPublisher {
         let ledgerData = try Data(contentsOf: directory.appendingPathComponent("run-ledger.json"))
         let ledger = try CanonicalJSON.decode(RunLedgerPayload.self, from: ledgerData, allowedTopLevelKeys: ["records", "resourceVector"])
         guard records == ledger.records else { throw ControllerError.verification("row-vector-disagreement") }
-        try ledger.resourceVector.validateComplete(requireExact: true)
+        try ledger.resourceVector.validateComplete(requireExact: true, allowExceededMaximum: outcome.outcome != .pass)
         return PublishedPacket(rootDigest: root, manifest: manifest)
     }
 

@@ -7,6 +7,8 @@ public struct ProcessResult: Sendable {
     public let termination: String
     public let exitCode: Int32?
     public let signal: Int32?
+    public let spawnError: Int32?
+    public let processID: Int32?
     public let timeoutDetectedAt: UInt64?
     public let termSentAt: UInt64?
     public let killSentAt: UInt64?
@@ -17,129 +19,138 @@ public struct ProcessResult: Sendable {
     public let stderrCount: Int
     public let overflowed: Bool
     public let groupAssigned: Bool
-}
+    public let directChildReaped: Bool
+    public let captureComplete: Bool
 
-private final class CaptureBox: @unchecked Sendable {
-    private let lock = NSLock()
-    private var stdout = Data()
-    private var stderr = Data()
-    private var stdoutCount = 0
-    private var stderrCount = 0
-    private var overflow = false
-
-    func append(_ data: Data, stdout isStdout: Bool) -> Bool {
-        lock.lock(); defer { lock.unlock() }
-        if isStdout { stdoutCount += data.count } else { stderrCount += data.count }
-        let streamCount = isStdout ? stdoutCount : stderrCount
-        if streamCount > 1_048_576 || stdoutCount + stderrCount > 4_194_304 { overflow = true }
-        let targetRemaining = max(0, 1_048_576 - (isStdout ? stdout.count : stderr.count))
-        if targetRemaining > 0 {
-            let prefix = data.prefix(targetRemaining)
-            if isStdout { stdout.append(prefix) } else { stderr.append(prefix) }
-        }
-        return overflow
-    }
-
-    func result() -> (Data, Data, Int, Int, Bool) {
-        lock.lock(); defer { lock.unlock() }
-        return (stdout, stderr, stdoutCount, stderrCount, overflow)
+    /// Covers only the direct child, its assigned group and capture pipes.
+    public var cleanupComplete: Bool {
+        spawnError != nil || (directChildReaped && groupAbsentAt != nil && captureComplete)
     }
 }
 
 public enum ProcessRunner {
     public static func run(_ action: ActionSpec) throws -> ProcessResult {
-        let executable = URL(fileURLWithPath: action.executable)
-        guard executable.path.hasPrefix("/"), FileManager.default.isExecutableFile(atPath: executable.path) else {
-            throw ControllerError.process("executable")
+        guard RawClock.now() < action.workDeadlineNanoseconds,
+              action.workDeadlineNanoseconds < action.settlementDeadlineNanoseconds else {
+            throw ControllerError.process("deadline-expired-or-invalid")
         }
-        let outPipe = Pipe()
-        let errPipe = Pipe()
-        let process = Process()
-        process.executableURL = executable
-        process.arguments = action.arguments
-        process.environment = action.environment
-        process.currentDirectoryURL = URL(fileURLWithPath: action.workingDirectory)
-        process.standardInput = FileHandle.nullDevice
-        process.standardOutput = outPipe
-        process.standardError = errPipe
-
-        let capture = CaptureBox()
-        let readers = DispatchGroup()
-        func drain(_ handle: FileHandle, stdout: Bool) {
-            readers.enter()
-            DispatchQueue.global(qos: .utility).async {
-                defer { readers.leave() }
-                while true {
-                    let data = handle.readData(ofLength: 32 * 1024)
-                    if data.isEmpty { return }
-                    _ = capture.append(data, stdout: stdout)
-                }
-            }
+        guard action.executable.hasPrefix("/"), action.workingDirectory.hasPrefix("/"),
+              !([action.executable, action.workingDirectory] + action.arguments +
+                action.environment.flatMap { [$0.key, $0.value] }).contains(where: { $0.contains("\0") }) else {
+            throw ControllerError.process("invalid-argument")
         }
-        drain(outPipe.fileHandleForReading, stdout: true)
-        drain(errPipe.fileHandleForReading, stdout: false)
-
+        var out = [Int32](repeating: -1, count: 2), err = [Int32](repeating: -1, count: 2)
+        guard pipe(&out) == 0 else { throw ControllerError.process("pipe") }
+        defer { for fd in out where fd >= 0 { close(fd) } }
+        guard pipe(&err) == 0 else { throw ControllerError.process("pipe") }
+        defer { for fd in err where fd >= 0 { close(fd) } }
+        var files: posix_spawn_file_actions_t?
+        var attributes: posix_spawnattr_t?
+        func check(_ code: Int32) throws {
+            guard code == 0 else { throw ControllerError.process("spawn-setup-\(code)") }
+        }
+        try check(posix_spawn_file_actions_init(&files))
+        defer { posix_spawn_file_actions_destroy(&files) }
+        try check(posix_spawnattr_init(&attributes))
+        defer { posix_spawnattr_destroy(&attributes) }
+        try check(posix_spawn_file_actions_addopen(&files, STDIN_FILENO, "/dev/null", O_RDONLY, 0))
+        try check(posix_spawn_file_actions_adddup2(&files, out[1], STDOUT_FILENO))
+        try check(posix_spawn_file_actions_adddup2(&files, err[1], STDERR_FILENO))
+        for fd in out + err { try check(posix_spawn_file_actions_addclose(&files, fd)) }
+        if #available(macOS 26, *) {
+            try check(posix_spawn_file_actions_addchdir(&files, action.workingDirectory))
+        } else {
+            try check(posix_spawn_file_actions_addchdir_np(&files, action.workingDirectory))
+        }
+        // Establish the ordinary child group during spawn, not after exec.
+        try check(posix_spawnattr_setpgroup(&attributes, 0))
+        var mask = sigset_t(); sigemptyset(&mask)
+        var defaults = sigset_t(); sigemptyset(&defaults)
+        for value in [SIGTERM, SIGINT, SIGPIPE] { sigaddset(&defaults, value) }
+        try check(posix_spawnattr_setsigmask(&attributes, &mask))
+        try check(posix_spawnattr_setsigdefault(&attributes, &defaults))
+        try check(posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_CLOEXEC_DEFAULT)))
+        let arguments = ([action.executable] + action.arguments).map { strdup($0) } + [nil]
+        let environment = action.environment.keys.sorted().map { strdup("\($0)=\(action.environment[$0]!)") } + [nil]
+        defer { for pointer in arguments + environment { free(pointer) } }
+        var pid: pid_t = 0
         let t0 = RawClock.now()
-        try process.run()
-        let pid = process.processIdentifier
-        let groupAssigned = setpgid(pid, pid) == 0 || getpgid(pid) == pid
-        var timeoutAt: UInt64?
-        var termAt: UInt64?
-        var killAt: UInt64?
+        let spawnCode = arguments.withUnsafeBufferPointer { argv in
+            environment.withUnsafeBufferPointer { env in
+                posix_spawn(&pid, action.executable, &files, &attributes, argv.baseAddress!, env.baseAddress!)
+            }
+        }
+        close(out[1]); out[1] = -1
+        close(err[1]); err[1] = -1
+        if spawnCode != 0 {
+            return ProcessResult(rawT0: t0, rawT1: RawClock.now(), termination: "spawnFailure",
+                                 exitCode: nil, signal: nil, spawnError: spawnCode, processID: nil,
+                                 timeoutDetectedAt: nil, termSentAt: nil, killSentAt: nil, groupAbsentAt: nil,
+                                 stdout: Data(), stderr: Data(), stdoutCount: 0, stderrCount: 0,
+                                 overflowed: false, groupAssigned: false, directChildReaped: false, captureComplete: true)
+        }
+        for fd in [out[0], err[0]] { _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK) }
+        var output = Data(), errors = Data()
+        var outputCount = 0, errorCount = 0
+        var outputEOF = false, errorEOF = false, captureFailed = false
+        var reaped = false, waitStatus: Int32 = 0
+        var timeoutAt: UInt64?, termAt: UInt64?, killAt: UInt64?, absentAt: UInt64?
         var termination = "exit"
-
-        while process.isRunning {
-            let now = RawClock.now()
-            let overflow = capture.result().4
-            if overflow || now >= action.workDeadlineNanoseconds {
-                timeoutAt = overflow ? nil : now
-                termination = overflow ? "outputOverflow" : "timeout"
-                termAt = now
-                if groupAssigned { _ = kill(-pid, SIGTERM) } else { process.terminate() }
-                let termLimit = min(action.settlementDeadlineNanoseconds, now + 2_000_000_000)
-                while process.isRunning, RawClock.now() < termLimit { usleep(10_000) }
-                if process.isRunning {
-                    killAt = RawClock.now()
-                    if groupAssigned { _ = kill(-pid, SIGKILL) } else { _ = kill(pid, SIGKILL) }
+        func drain(_ fd: Int32, data: inout Data, count: inout Int, eof: inout Bool) {
+            guard !eof else { return }
+            var buffer = [UInt8](repeating: 0, count: 32 * 1024)
+            // A busy writer must not starve deadline and termination checks.
+            for _ in 0..<8 {
+                let n = read(fd, &buffer, buffer.count)
+                if n == 0 { eof = true; return }
+                if n < 0 {
+                    if errno != EAGAIN && errno != EINTR { captureFailed = true; eof = true }
+                    return
                 }
-                break
+                count += n
+                data.append(contentsOf: buffer.prefix(min(n, max(0, 1_048_576 - data.count))))
+            }
+        }
+        while true {
+            drain(out[0], data: &output, count: &outputCount, eof: &outputEOF)
+            drain(err[0], data: &errors, count: &errorCount, eof: &errorEOF)
+            if !reaped {
+                let waited = waitpid(pid, &waitStatus, WNOHANG)
+                if waited == pid { reaped = true }
+                else if waited < 0 && errno != EINTR { captureFailed = true }
+            }
+            let now = RawClock.now()
+            let groupAbsent = kill(-pid, 0) == -1 && errno == ESRCH
+            if groupAbsent, absentAt == nil { absentAt = now }
+            let overflow = outputCount > 1_048_576 || errorCount > 1_048_576
+            if overflow { termination = "outputOverflow" }
+            if reaped && groupAbsent && outputEOF && errorEOF { break }
+            if termAt == nil && (overflow || captureFailed || now >= action.workDeadlineNanoseconds || reaped) {
+                if !overflow && now >= action.workDeadlineNanoseconds && !reaped {
+                    timeoutAt = now; termination = "timeout"
+                }
+                termAt = now
+                _ = kill(-pid, SIGTERM)
+            }
+            if let termAt, killAt == nil, now >= termAt + 2_000_000_000, !groupAbsent {
+                killAt = now; _ = kill(-pid, SIGKILL)
+            }
+            if now >= action.settlementDeadlineNanoseconds {
+                if !groupAbsent && killAt == nil { killAt = now; _ = kill(-pid, SIGKILL) }
+                break // Never block indefinitely on a child or inherited pipe.
             }
             usleep(5_000)
         }
-        process.waitUntilExit()
-        outPipe.fileHandleForWriting.closeFile()
-        errPipe.fileHandleForWriting.closeFile()
-        _ = readers.wait(timeout: .now() + 2)
-
-        var absentAt: UInt64?
-        while RawClock.now() <= action.settlementDeadlineNanoseconds {
-            if !groupAssigned || (kill(-pid, 0) == -1 && errno == ESRCH) {
-                absentAt = RawClock.now()
-                break
-            }
-            usleep(5_000)
-        }
-        let t1 = RawClock.now()
-        let captured = capture.result()
-        let exitCode: Int32? = process.terminationReason == .exit ? process.terminationStatus : nil
-        let signal: Int32? = process.terminationReason == .uncaughtSignal ? process.terminationStatus : nil
+        let signal: Int32? = reaped && waitStatus & 0x7f != 0 ? waitStatus & 0x7f : nil
+        let exitCode: Int32? = reaped && signal == nil ? (waitStatus >> 8) & 0xff : nil
         if termination == "exit", signal != nil { termination = "signal" }
-        return ProcessResult(
-            rawT0: t0,
-            rawT1: t1,
-            termination: termination,
-            exitCode: exitCode,
-            signal: signal,
-            timeoutDetectedAt: timeoutAt,
-            termSentAt: termAt,
-            killSentAt: killAt,
-            groupAbsentAt: absentAt,
-            stdout: captured.0,
-            stderr: captured.1,
-            stdoutCount: captured.2,
-            stderrCount: captured.3,
-            overflowed: captured.4,
-            groupAssigned: groupAssigned
-        )
+        return ProcessResult(rawT0: t0, rawT1: RawClock.now(), termination: termination,
+                             exitCode: exitCode, signal: signal, spawnError: nil, processID: pid,
+                             timeoutDetectedAt: timeoutAt, termSentAt: termAt, killSentAt: killAt,
+                             groupAbsentAt: absentAt, stdout: output, stderr: errors,
+                             stdoutCount: outputCount, stderrCount: errorCount,
+                             overflowed: outputCount > 1_048_576 || errorCount > 1_048_576,
+                             groupAssigned: true, directChildReaped: reaped,
+                             captureComplete: outputEOF && errorEOF && !captureFailed)
     }
 }

@@ -6,16 +6,25 @@ These standing rules govern work across this repository unless the user explicit
 
 - Planning owns macro scope, invariants, path and resource ceilings, acceptance gates, and roadmap state.
 - Implementation owns ordinary source, test, packaging, and evidence corrections required to converge an opened slice.
-- Architecture reviews opening coherence and terminal actual bytes. Its verdict must be an explicit, visible `PASS` or `BLOCK`; silence and packet claims are not verdicts.
-- Opening authority covers the normal Planning -> Architecture -> Implementation -> Architecture convergence loop for that slice. Do not ask the user to reauthorize routine handbacks or corrections within the opened scope.
+- Architecture reviews material opening decisions when warranted and terminal actual bytes. Its verdict must be an explicit, visible `PASS` or `BLOCK`; silence and packet claims are not verdicts.
+- Opening authority covers the normal convergence loop for that slice. Do not ask the user to reauthorize routine handbacks or corrections within the opened scope.
+
+## Proportionate process
+
+- Fit requirements, evidence and review depth to the actual context and consequence of failure. Move briskly on local procedural bug fixes; do not turn them into security or formal-verification projects without a concrete need.
+- Use the smallest adequate loop: a clear outcome and scope, implementation, focused tests and a concise review. Separate opening review is for material architecture/risk decisions or an explicit user request, not a ritual for every fix or plan clarification.
+- Check feasibility of a critical platform assumption before making it an acceptance gate. Do not demand stronger guarantees than the task needs, such as exhaustive opaque-tool descendant history for ordinary build/test supervision. State observation limits honestly.
+- Ordinary failed builds/tests are inputs to correction and retry, not spent one-shot opportunities or terminal slices. Do not impose fixed attempt budgets, source-sealing machinery, bespoke evidence ledgers or repeated full-suite passes unless the actual risk justifies them.
+- Prefer existing tests, ordinary logs and concise actual-byte evidence. Hash artifacts when needed to bind a result; do not repeatedly seal unchanged planning documents or re-review administrative acknowledgements. A finding must identify a relevant defect or risk, not merely missing ceremony.
+- Preserve genuine safety, privacy, ownership and external-action boundaries. Proportionality narrows unnecessary proof obligations; it does not justify false success claims or ignoring known failures.
 
 ## Convergence loop
 
-1. Planning freezes or authenticates the bounded slice and sends it to Architecture for opening review.
-2. An opening `PASS` goes directly to Implementation.
+1. Planning defines or authenticates the bounded outcome and any necessary constraints. Send material opening decisions to Architecture when warranted or explicitly requested; otherwise route the authorized fix directly to Implementation.
+2. When opening review is required, its `PASS` goes directly to Implementation. Do not repeat it for routine clarifications or an explicitly authorized removal of an unnecessary requirement.
 3. An Architecture `BLOCK` is convergence feedback, not a loss of authority. Planning records or clarifies the findings, recuts bounded mechanics or evidence ceilings when needed, and returns the work directly to Implementation.
-4. Implementation fixes all in-scope findings and produces a terminal handback with actual-byte evidence.
-5. Planning authenticates the live bytes, repository state, path ceilings, hashes, and evidence, then sends the result directly to Architecture for final review.
+4. Implementation fixes all in-scope findings and produces a concise terminal handback with actual-byte evidence proportionate to the change.
+5. Planning authenticates the actual changed bytes, repository state and relevant evidence, then sends the result directly to Architecture for focused final review. Reuse unchanged evidence instead of duplicating the full validation effort.
 6. Repeat steps 3-5 until Architecture returns `PASS` or a genuine escalation boundary is reached.
 
 Planning may recut bounded mechanics, resource ceilings, fixtures, and evidence requirements needed to satisfy the already-opened slice. A plan-local phrase such as "separately gated" does not pause this convergence loop unless the user explicitly places the work on hold.

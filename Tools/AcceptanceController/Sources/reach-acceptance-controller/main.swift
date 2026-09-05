@@ -37,7 +37,7 @@ private func runFixture(_ name: String) -> Never {
     func emit(_ envelope: ResultEnvelope, exit code: Int32 = 0) -> Never {
         do {
             let data = try CanonicalJSON.encode(envelope)
-            guard ReceiptWriter.write(data, descriptor: STDOUT_FILENO) else { Darwin.exit(70) }
+            guard ReceiptWriter.write(data, descriptor: STDOUT_FILENO, appendNewline: false) else { Darwin.exit(70) }
             Darwin.exit(code)
         } catch { fail(70, "fixture-encoding") }
     }
@@ -75,11 +75,30 @@ private func runFixture(_ name: String) -> Never {
         for _ in 0..<20 { _ = chunk.withUnsafeBytes { Darwin.write(STDOUT_FILENO, $0.baseAddress, $0.count) } }
         Darwin.exit(0)
     case "timeout":
-        let descendant = Process()
-        descendant.executableURL = URL(fileURLWithPath: "/bin/sleep")
-        descendant.arguments = ["120"]
-        try? descendant.run()
-        descendant.waitUntilExit()
+        // The fixture parent stays long enough to reap its known group child.
+        _ = signal(SIGTERM, SIG_IGN)
+        var attributes: posix_spawnattr_t?
+        guard posix_spawnattr_init(&attributes) == 0 else { fail(70, "fixture-spawn-setup") }
+        var defaults = sigset_t(); sigemptyset(&defaults); sigaddset(&defaults, SIGTERM)
+        _ = posix_spawnattr_setsigdefault(&attributes, &defaults)
+        _ = posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETSIGDEF))
+        let argv = [strdup("/bin/sleep"), strdup("120"), nil]
+        var childEnvironment: [UnsafeMutablePointer<CChar>?] = [nil]
+        var descendant: pid_t = 0
+        let spawned = argv.withUnsafeBufferPointer {
+            posix_spawn(&descendant, "/bin/sleep", nil, &attributes, $0.baseAddress!, &childEnvironment)
+        }
+        posix_spawnattr_destroy(&attributes)
+        for pointer in argv { free(pointer) }
+        guard spawned == 0 else { fail(70, "fixture-spawn") }
+        if let path = environment["REACH_FIXTURE_CHILD_PID_FILE"] {
+            do {
+                try DurableFile.write(CanonicalJSON.encode(["pid": descendant, "pgid": getpgid(descendant)]),
+                                      to: URL(fileURLWithPath: path))
+            } catch { _ = kill(descendant, SIGKILL) }
+        }
+        var childStatus: Int32 = 0
+        while waitpid(descendant, &childStatus, 0) < 0 && errno == EINTR {}
         Darwin.exit(0)
     default:
         fail(64, "unknown-fixture")

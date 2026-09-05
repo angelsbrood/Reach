@@ -108,7 +108,7 @@ public final class AcceptanceController: @unchecked Sendable {
 
         try DurableFile.createDirectory(scratchURL)
         let ownerURL = scratchURL.appendingPathComponent("owner.json")
-        let owner = try CanonicalJSON.encode(["pid": Int(getpid()), "runID": spec.runID, "version": 1] as [String: AnyCodable])
+        let owner = try CanonicalJSON.encode(["pid": .integer(Int(getpid())), "runID": .string(spec.runID), "version": .integer(1)] as [String: AnyCodable])
         try DurableFile.write(owner, to: ownerURL)
         let journalURL = scratchURL.appendingPathComponent("journal")
         try DurableFile.createDirectory(journalURL)
@@ -120,6 +120,7 @@ public final class AcceptanceController: @unchecked Sendable {
         var publicResults: [String: [String: TypedValue]] = [:]
         var stopOrdinal: Int?
         var stopReason: String?
+        var controllerFailed = false
         var runResultBytes: Int64 = 0
 
         for action in spec.actions {
@@ -128,7 +129,7 @@ public final class AcceptanceController: @unchecked Sendable {
                 let record = ActionRecord(
                     ordinal: action.ordinal, actionID: action.id, state: .notStarted,
                     rawT0: nil, rawT1: nil, workDeadline: nil, settlementDeadline: nil,
-                    termination: nil, exitCode: nil, signal: nil, timeoutDetectedAt: nil,
+                    termination: nil, exitCode: nil, signal: nil, processID: nil, timeoutDetectedAt: nil,
                     termSentAt: nil, killSentAt: nil, groupAbsentAt: nil,
                     stdoutDigest: nil, stderrDigest: nil, stdoutBytes: nil, stderrBytes: nil,
                     result: nil, reason: "caused-by-\(stopOrdinal)", preVector: vector, postVector: vector
@@ -139,13 +140,17 @@ public final class AcceptanceController: @unchecked Sendable {
             }
 
             let pre = vector
+            let admittedAt = RawClock.now()
+            let window = action.workDeadlineNanoseconds > admittedAt ? action.workDeadlineNanoseconds - admittedAt : 0
+            try vector.assign(.actionWorkWindowNanoseconds, value: max(try vector.entry(.actionWorkWindowNanoseconds).used ?? 0, Int64(clamping: window)))
+            try vector.assign(.actionSettlementReserveNanoseconds, value: max(try vector.entry(.actionSettlementReserveNanoseconds).used ?? 0, Int64(clamping: action.settlementDeadlineNanoseconds - action.workDeadlineNanoseconds)))
             try vector.charge(.actionProcessLaunches)
             try vector.assign(.simultaneouslyLiveActions, value: 1)
             let started = ActionRecord(
                 ordinal: action.ordinal, actionID: action.id, state: .started,
                 rawT0: nil, rawT1: nil, workDeadline: action.workDeadlineNanoseconds,
                 settlementDeadline: action.settlementDeadlineNanoseconds, termination: nil,
-                exitCode: nil, signal: nil, timeoutDetectedAt: nil, termSentAt: nil,
+                exitCode: nil, signal: nil, processID: nil, timeoutDetectedAt: nil, termSentAt: nil,
                 killSentAt: nil, groupAbsentAt: nil, stdoutDigest: nil, stderrDigest: nil,
                 stdoutBytes: nil, stderrBytes: nil, result: nil, reason: nil,
                 preVector: pre, postVector: vector
@@ -153,18 +158,23 @@ public final class AcceptanceController: @unchecked Sendable {
             try writeRow(started, prefix: "started", at: journalURL, vector: &vector)
             let process = try ProcessRunner.run(action)
             try vector.assign(.simultaneouslyLiveActions, value: 0)
-            try vector.charge(.stdoutPhysicalBytes, by: Int64(process.stdoutCount))
-            try vector.charge(.stderrPhysicalBytes, by: Int64(process.stderrCount))
-            try vector.charge(.combinedOutputPhysicalBytes, by: Int64(process.stdoutCount + process.stderrCount))
-            try vector.assign(.unsettledProcessGroups, value: process.groupAbsentAt == nil ? 1 : 0)
+            for (dimension, count) in [(RunDimension.stdoutPhysicalBytes, process.stdoutCount), (.stderrPhysicalBytes, process.stderrCount), (.combinedOutputPhysicalBytes, process.stdoutCount + process.stderrCount)] {
+                try vector.observeMaximum(dimension, value: (try vector.entry(dimension).used ?? 0) + Int64(count))
+            }
+            if !process.cleanupComplete { try vector.markUnknown(.unsettledProcessGroups) }
             if process.termSentAt != nil { try vector.charge(.termSignals) }
             if process.killSentAt != nil { try vector.charge(.killSignals) }
 
             var envelope: ResultEnvelope?
             var reason: String?
-            if !process.groupAssigned || process.groupAbsentAt == nil || process.rawT1 > action.settlementDeadlineNanoseconds {
+            let outputLimit = try [RunDimension.stdoutPhysicalBytes, .stderrPhysicalBytes, .combinedOutputPhysicalBytes].contains {
+                let entry = try vector.entry($0); return (entry.used ?? 0) > entry.limit
+            }
+            if let code = process.spawnError {
+                reason = "spawn-failure-\(code)"; controllerFailed = true
+            } else if !process.cleanupComplete || !process.groupAssigned || process.rawT1 > action.settlementDeadlineNanoseconds {
                 reason = "containment"
-            } else if process.overflowed {
+            } else if process.overflowed || outputLimit {
                 reason = "output-limit"
             } else if process.termination == "timeout" {
                 reason = "timeout"
@@ -183,17 +193,17 @@ public final class AcceptanceController: @unchecked Sendable {
                         reason = parsed.reasonCode ?? "unexpected-result-kind"
                     }
                 } catch {
-                    reason = "result-refusal-\(String(describing: error))"
+                    // Decoder diagnostics can contain rejected values and field names.
+                    reason = "result-refusal"
                 }
             }
-            try vector.charge(.rawCaptureRemovals, by: 2)
             let stdoutDigest = SHA256.hex(process.stdout)
             let stderrDigest = SHA256.hex(process.stderr)
             let terminal = ActionRecord(
                 ordinal: action.ordinal, actionID: action.id, state: .settled,
                 rawT0: process.rawT0, rawT1: process.rawT1,
                 workDeadline: action.workDeadlineNanoseconds, settlementDeadline: action.settlementDeadlineNanoseconds,
-                termination: process.termination, exitCode: process.exitCode, signal: process.signal,
+                termination: process.termination, exitCode: process.exitCode, signal: process.signal, processID: process.processID,
                 timeoutDetectedAt: process.timeoutDetectedAt, termSentAt: process.termSentAt,
                 killSentAt: process.killSentAt, groupAbsentAt: process.groupAbsentAt,
                 stdoutDigest: stdoutDigest, stderrDigest: stderrDigest,
@@ -208,18 +218,17 @@ public final class AcceptanceController: @unchecked Sendable {
         try vector.assign(.runWallNanoseconds, value: Int64(RawClock.now() - runT0))
         try vector.assign(.publicationAttempts, value: 1)
         monitor.sampleNow()
-        var storage = monitor.stop()
+        let storage = monitor.stop()
         if let failure = storage.scanFailure { throw ControllerError.evidence("storage-scan-\(failure)") }
         try vector.assign(.observedPeakPhysicalBytes, value: storage.observedPeakPhysicalBytes)
         try vector.assign(.observedPeakLogicalBytes, value: storage.observedPeakLogicalBytes)
-        try vector.assign(.sampleGapNanoseconds, value: Int64(storage.maximumGapNanoseconds))
-        try vector.validateComplete(requireExact: true)
+        try vector.validateComplete(requireExact: true, allowExceededMaximum: stopOrdinal != nil)
 
         let actionTableData = try CanonicalJSON.encode(records)
-        let runLedgerData = try CanonicalJSON.encode(["records": records, "resourceVector": vector] as RunLedgerPayload)
+        let runLedgerData = try CanonicalJSON.encode(RunLedgerPayload(records: records, resourceVector: vector))
         let outcome = OutcomePayload(
             version: 1,
-            outcome: stopOrdinal == nil ? .pass : .stop,
+            outcome: controllerFailed ? .controllerFailure : (stopOrdinal == nil ? .pass : .stop),
             packetBasename: packetURL.lastPathComponent,
             actionTableDigest: SHA256.hex(actionTableData),
             runLedgerDigest: SHA256.hex(runLedgerData),
@@ -234,10 +243,10 @@ public final class AcceptanceController: @unchecked Sendable {
         let storageData = try CanonicalJSON.encode(storage)
         let payloads: [String: Data] = [
             "action-table.json": actionTableData,
-            "executable.json": try CanonicalJSON.encode(["sha256": spec.executableDigest, "version": 1] as [String: AnyCodable]),
+            "executable.json": try CanonicalJSON.encode(["sha256": .string(spec.executableDigest), "version": .integer(1)] as [String: AnyCodable]),
             "launch-snapshot.json": launchData,
             "outcome.json": outcomeData,
-            "raw-absence.json": try CanonicalJSON.encode(["rawFiles": 0, "removals": try vector.entry(.rawCaptureRemovals).used ?? -1, "version": 1] as [String: AnyCodable]),
+            "raw-absence.json": try CanonicalJSON.encode(["rawFiles": .integer(0), "capturePolicy": .string("bounded in-memory capture; only counts and prefix digests retained"), "version": .integer(1)] as [String: AnyCodable]),
             "resource-vector.json": try CanonicalJSON.encode(vector),
             "run-ledger.json": runLedgerData,
             "source-manifest.json": sourceManifestData,
@@ -253,7 +262,7 @@ public final class AcceptanceController: @unchecked Sendable {
         guard try CanonicalJSON.encode(receipt.outcome) == outcomeData else { throw ControllerError.evidence("receipt-projection") }
         return ControllerRunResult(
             outcome: outcome.outcome,
-            exitCode: outcome.outcome == .pass ? 0 : 20,
+            exitCode: outcome.outcome == .pass ? 0 : (outcome.outcome == .stop ? 20 : 70),
             receipt: receiptData,
             packetRootDigest: published.rootDigest
         )
@@ -304,6 +313,9 @@ public final class AcceptanceController: @unchecked Sendable {
 public struct RunLedgerPayload: Codable, Equatable, Sendable {
     public let records: [ActionRecord]
     public let resourceVector: RunResourceVector
+    public init(records: [ActionRecord], resourceVector: RunResourceVector) {
+        self.records = records; self.resourceVector = resourceVector
+    }
 }
 
 public enum AnyCodable: Codable, Equatable, Sendable {
@@ -331,9 +343,10 @@ public enum AnyCodable: Codable, Equatable, Sendable {
 }
 
 public enum ReceiptWriter {
-    public static func write(_ data: Data, descriptor: Int32) -> Bool {
+    public static func write(_ data: Data, descriptor: Int32, appendNewline: Bool = true) -> Bool {
+        _ = fcntl(descriptor, F_SETNOSIGPIPE, 1)
         var bytes = data
-        bytes.append(0x0A)
+        if appendNewline { bytes.append(0x0A) }
         return bytes.withUnsafeBytes { raw in
             guard let base = raw.baseAddress else { return true }
             var written = 0

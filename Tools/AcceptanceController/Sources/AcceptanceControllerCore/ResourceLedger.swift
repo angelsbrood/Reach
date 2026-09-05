@@ -16,19 +16,15 @@ public enum RunDimension: String, Codable, CaseIterable, Sendable {
     case canonicalResultBytes
     case journalFiles
     case journalLogicalBytes
-    case packetFiles
-    case packetLogicalBytes
     case observedPeakPhysicalBytes
     case observedPeakLogicalBytes
     case termSignals
     case killSignals
     case notStartedRows
-    case rawCaptureRemovals
     case workloadLaunchesAfterStop
     case publicationAttempts
     case packetWriters
     case unsettledProcessGroups
-    case sampleGapNanoseconds
 }
 
 public struct ResourceEntry: Codable, Equatable, Sendable {
@@ -68,19 +64,15 @@ public struct RunResourceVector: Codable, Equatable, Sendable {
             entry(.canonicalResultBytes, 1_048_576, 0, .maximum, .logicalBytes),
             entry(.journalFiles, 96),
             entry(.journalLogicalBytes, 8_388_608, 0, .maximum, .logicalBytes),
-            entry(.packetFiles, 96),
-            entry(.packetLogicalBytes, 8_388_608, 0, .maximum, .logicalBytes),
             entry(.observedPeakPhysicalBytes, 268_435_456, 0, .maximum, .observedPeak),
             entry(.observedPeakLogicalBytes, 268_435_456, 0, .maximum, .observedPeak),
             entry(.termSignals, 32),
             entry(.killSignals, 32),
             entry(.notStartedRows, 32),
-            entry(.rawCaptureRemovals, 64),
             entry(.workloadLaunchesAfterStop, 0, 0, .zero),
             entry(.publicationAttempts, 1, 0, .exact),
             entry(.packetWriters, 1, 1, .exact),
             entry(.unsettledProcessGroups, 0, 0, .zero),
-            entry(.sampleGapNanoseconds, 25_000_000, 0, .maximum, .durationNanoseconds),
         ])
     }
 
@@ -90,7 +82,7 @@ public struct RunResourceVector: Codable, Equatable, Sendable {
     }
 
     public mutating func charge(_ dimension: RunDimension, by amount: Int64 = 1) throws {
-        guard amount >= 0, var entry = entries[dimension.rawValue], let used = entry.used else {
+        guard amount >= 0, let entry = entries[dimension.rawValue], let used = entry.used else {
             throw ControllerError.evidence("invalid-charge-\(dimension.rawValue)")
         }
         let (next, overflow) = used.addingReportingOverflow(amount)
@@ -124,13 +116,22 @@ public struct RunResourceVector: Codable, Equatable, Sendable {
         entries[dimension.rawValue] = entry
     }
 
-    public func validateComplete(requireExact: Bool) throws {
+    /// An observed crossing belongs in a STOP record, even though admission rejects it.
+    public mutating func observeMaximum(_ dimension: RunDimension, value: Int64) throws {
+        guard value >= 0, var entry = entries[dimension.rawValue], entry.constraintKind == .maximum else {
+            throw ControllerError.evidence("invalid-observation")
+        }
+        entry.used = value; entry.remaining = entry.limit - value
+        entries[dimension.rawValue] = entry
+    }
+
+    public func validateComplete(requireExact: Bool, allowExceededMaximum: Bool = false) throws {
         guard entries.count == RunDimension.allCases.count else { throw ControllerError.evidence("incomplete-vector") }
         for dimension in RunDimension.allCases {
             let value = try entry(dimension)
             guard let used = value.used, used >= 0 else { throw ControllerError.evidence("unknown-\(dimension.rawValue)") }
             switch value.constraintKind {
-            case .maximum: guard used <= value.limit, value.remaining == value.limit - used else { throw ControllerError.evidence("maximum-invalid-\(dimension.rawValue)") }
+            case .maximum: guard (allowExceededMaximum || used <= value.limit), value.remaining == value.limit - used else { throw ControllerError.evidence("maximum-invalid-\(dimension.rawValue)") }
             case .zero: guard used == 0, value.remaining == 0 else { throw ControllerError.evidence("zero-invalid-\(dimension.rawValue)") }
             case .exact:
                 guard used <= value.limit else { throw ControllerError.evidence("exact-invalid-\(dimension.rawValue)") }
@@ -177,14 +178,17 @@ public final class TreeStorageMonitor: @unchecked Sendable {
     }
 
     public func sampleNow() {
+        lock.lock(); defer { lock.unlock() }
         do {
             let usage = try Self.measure(root: root)
             let sample = StorageSample(at: RawClock.now(), physicalBytes: usage.physical, logicalBytes: usage.logical)
-            lock.lock(); samples.append(sample); lock.unlock()
+            samples.append(sample)
         } catch {
-            lock.lock(); if failure == nil { failure = String(describing: error) }; lock.unlock()
+            if failure == nil { failure = String(describing: error) }
         }
     }
+
+    deinit { timer?.cancel() }
 
     public func stop() -> StorageSummary {
         timer?.cancel()

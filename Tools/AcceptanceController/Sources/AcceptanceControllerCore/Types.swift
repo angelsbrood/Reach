@@ -126,7 +126,7 @@ public struct ActionSpec: Codable, Equatable, Sendable {
         id: String,
         ordinal: Int,
         executable: String,
-        arguments: [String],
+        arguments: [String] = [],
         environment: [String: String] = [:],
         workingDirectory: String,
         workDeadlineNanoseconds: UInt64,
@@ -197,6 +197,7 @@ public struct ActionRecord: Codable, Equatable, Sendable {
     public let termination: String?
     public let exitCode: Int32?
     public let signal: Int32?
+    public let processID: Int32?
     public let timeoutDetectedAt: UInt64?
     public let termSentAt: UInt64?
     public let killSentAt: UInt64?
@@ -221,6 +222,15 @@ public struct OutcomePayload: Codable, Equatable, Sendable {
     public let earliestStopOrdinal: Int?
     public let publicResults: [String: [String: TypedValue]]
     public let claimBoundaryDigest: String
+
+    public init(version: Int, outcome: WorkloadOutcome, packetBasename: String,
+                actionTableDigest: String, runLedgerDigest: String, sliceLaunchSnapshotDigest: String,
+                earliestStopOrdinal: Int?, publicResults: [String: [String: TypedValue]], claimBoundaryDigest: String) {
+        self.version = version; self.outcome = outcome; self.packetBasename = packetBasename
+        self.actionTableDigest = actionTableDigest; self.runLedgerDigest = runLedgerDigest
+        self.sliceLaunchSnapshotDigest = sliceLaunchSnapshotDigest; self.earliestStopOrdinal = earliestStopOrdinal
+        self.publicResults = publicResults; self.claimBoundaryDigest = claimBoundaryDigest
+    }
 }
 
 public struct RunReceipt: Codable, Equatable, Sendable {
@@ -236,6 +246,9 @@ public struct VerificationReceipt: Codable, Equatable, Sendable {
     public let path: String
     public let packetRootDigest: String
     public let outcomeDigest: String
+    public init(version: Int, path: String, packetRootDigest: String, outcomeDigest: String) {
+        self.version = version; self.path = path; self.packetRootDigest = packetRootDigest; self.outcomeDigest = outcomeDigest
+    }
 }
 
 public enum CanonicalJSON {
@@ -252,11 +265,12 @@ public enum CanonicalJSON {
     ) throws -> T {
         guard data.count <= 256 * 1024 else { throw ControllerError.input("json-too-large") }
         guard String(data: data, encoding: .utf8) != nil else { throw ControllerError.input("invalid-utf8") }
-        try JSONDuplicateKeyScanner(data: data).validate()
+        var scanner = JSONDuplicateKeyScanner(data: data)
+        try scanner.validate()
         let object = try JSONSerialization.jsonObject(with: data)
         if let allowedTopLevelKeys {
             guard let dictionary = object as? [String: Any] else { throw ControllerError.input("object-required") }
-            guard Set(dictionary.keys) == allowedTopLevelKeys else { throw ControllerError.input("unknown-or-missing-field") }
+            guard Set(dictionary.keys).isSubset(of: allowedTopLevelKeys) else { throw ControllerError.input("unknown-field") }
         }
         let decoded = try JSONDecoder().decode(T.self, from: data)
         guard try encode(decoded) == data else { throw ControllerError.input("noncanonical-json") }

@@ -27,9 +27,8 @@ final class PublicationTests: XCTestCase {
     }
 
     func testManifestRootAndIndependentVerification() throws {
-        _ = TestLaunchCounts.shared
         let parent = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("reach-publication-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: parent, attributes: [.posixPermissions: 0o700])
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
         defer { try? FileManager.default.removeItem(at: parent) }
         let final = parent.appendingPathComponent("packet")
         let published = try PacketPublisher.publish(payloads: payloads(packetName: "packet"), finalURL: final)
@@ -37,46 +36,55 @@ final class PublicationTests: XCTestCase {
     }
 
     func testMutationOmissionExtraAndModeRefuse() throws {
-        _ = TestLaunchCounts.shared
         let parent = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("reach-mutation-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: parent, attributes: [.posixPermissions: 0o700])
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
         defer { try? FileManager.default.removeItem(at: parent) }
         let final = parent.appendingPathComponent("packet")
         _ = try PacketPublisher.publish(payloads: payloads(packetName: "packet"), finalURL: final)
         let extra = final.appendingPathComponent("extra")
-        FileManager.default.createFile(atPath: extra.path, contents: Data())
+        _ = FileManager.default.createFile(atPath: extra.path, contents: Data())
         XCTAssertThrowsError(try PacketPublisher.verify(final))
         try FileManager.default.removeItem(at: extra)
         let outcome = final.appendingPathComponent("outcome.json")
         try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: outcome.path)
         XCTAssertThrowsError(try PacketPublisher.verify(final))
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: outcome.path)
+        let manifest = final.appendingPathComponent("MANIFEST.json")
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: manifest.path)
+        XCTAssertThrowsError(try PacketPublisher.verify(final))
     }
 
     func testRenameExclRaceHasOneImmutableWinner() throws {
-        _ = TestLaunchCounts.shared
         let parent = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("reach-race-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: parent, attributes: [.posixPermissions: 0o700])
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
         defer { try? FileManager.default.removeItem(at: parent) }
         let final = parent.appendingPathComponent("packet")
         let body = try payloads(packetName: "packet")
-        let lock = NSLock()
-        var successes = 0
-        var collisions = 0
+        let counts = PublicationRaceCounts()
         let group = DispatchGroup()
         let gate = DispatchSemaphore(value: 0)
-        TestLaunchCounts.shared.chargePublisher(2)
         for _ in 0..<2 {
             group.enter()
             DispatchQueue.global().async {
                 gate.wait()
-                do { _ = try PacketPublisher.publish(payloads: body, finalURL: final); lock.withLock { successes += 1 } }
-                catch { lock.withLock { collisions += 1 } }
+                do { _ = try PacketPublisher.publish(payloads: body, finalURL: final); counts.record(success: true) }
+                catch { counts.record(success: false) }
                 group.leave()
             }
         }
         gate.signal(); gate.signal(); group.wait()
-        XCTAssertEqual(successes, 1)
-        XCTAssertEqual(collisions, 1)
+        XCTAssertEqual(counts.snapshot().0, 1)
+        XCTAssertEqual(counts.snapshot().1, 1)
         XCTAssertNoThrow(try PacketPublisher.verify(final))
     }
+}
+
+private final class PublicationRaceCounts: @unchecked Sendable {
+    private let lock = NSLock()
+    private var successes = 0
+    private var failures = 0
+    func record(success: Bool) {
+        lock.withLock { if success { successes += 1 } else { failures += 1 } }
+    }
+    func snapshot() -> (Int, Int) { lock.withLock { (successes, failures) } }
 }
