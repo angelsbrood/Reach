@@ -10,6 +10,25 @@ import (
 	"time"
 )
 
+func TestPlatformAdmission(t *testing.T) {
+	for _, test := range []struct {
+		goos, goarch string
+		supported    bool
+	}{
+		{"darwin", "arm64", true}, {"linux", "arm64", true},
+		{"darwin", "amd64", false}, {"linux", "amd64", false},
+		{"linux", "arm", false}, {"windows", "arm64", false},
+		{"freebsd", "arm64", false}, {"", "", false},
+	} {
+		t.Run(test.goos+"/"+test.goarch, func(t *testing.T) {
+			err := validatePlatform(test.goos, test.goarch)
+			if (err == nil) != test.supported {
+				t.Fatalf("platform admission differs: %v", err)
+			}
+		})
+	}
+}
+
 func TestCreateVerifyAndRecoveryCLI(t *testing.T) {
 	parent, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
@@ -75,6 +94,20 @@ func TestDirectOutputWriterRefusesZeroProgress(t *testing.T) {
 		t.Fatal("zero-progress writer was accepted")
 	}
 }
+
+func TestDirectOutputWriterCompletesShortWrites(t *testing.T) {
+	var output bytes.Buffer
+	if err := writeDirect(shortWriter{&output}, []byte("result\n")); err != nil {
+		t.Fatal(err)
+	}
+	if output.String() != "result\n" {
+		t.Fatalf("short output was truncated: %q", output.String())
+	}
+}
+
+type shortWriter struct{ *bytes.Buffer }
+
+func (w shortWriter) Write(data []byte) (int, error) { return w.Buffer.Write(data[:1]) }
 
 type zeroWriter struct{}
 

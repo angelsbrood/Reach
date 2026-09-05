@@ -1275,7 +1275,9 @@ A digest are in `exo-runtime/README.md`.
 ### Minting one private two-node authority offline
 
 Before copying configuration to either node, build the repository's private
-Darwin/arm64 `reach-exo-bootstrap` command and prepare one owner-private JSON
+Darwin/arm64 or Linux/arm64 `reach-exo-bootstrap` command with the explicit
+`build-bootstrap.sh darwin|linux` target and pinned Go 1.26.5, then prepare one
+owner-private JSON
 inventory. The inventory schema and build command are documented in
 `exo-runtime/README.md`. The command fixes the exact B package generation,
 Qwen snapshot, 14/14 layer assignment, ports, peer relationships and TLS role
@@ -1287,8 +1289,11 @@ commitment file. The published directory is only a prepared candidate. Parse
 the complete lowercase `authority_sha256` from that one-line JSON record, then
 run a separate fresh `verify` process with both the absolute authority root and
 that explicit digest. Do not infer the digest from anything inside the tree.
-Only a successful fresh verification accepts the authority for later physical
-deployment.
+Only a successful fresh verification accepts the authority for role deployment.
+Each OS creates and verifies its own authority at its original absolute root;
+relocating an authority between systems is not supported. Linux checks cover
+guest-local filesystem operations and ordinary process-crash recovery, without
+extending the accepted deployment boundary to physical hosts or network filesystems.
 
 The operator slice retains the sole CA private key. Coordinator, worker and
 connector slices each contain only their own leaf key and the public CA. Node
@@ -1298,8 +1303,9 @@ the prepared tree is not accepted deployment and makes verification fail.
 
 An interrupted ceremony is fail-closed. If stdout was absent or partial, use
 `recover --discard-uncommitted` with the same inventory, explicit confirmation,
-the exact deterministic `staging`, `prepared`, or `quarantine` target, and the
-observed `absent` or `partial` commitment state. Recovery checks durable
+the exact deterministic `staging`, `prepared`, or `quarantine` target, and an
+explicit operator assertion of `absent` or `partial` commitment state. Recovery
+does not reconstruct past stdout delivery. Recovery checks durable
 `PREPARE.json` provenance and removes it last. A complete or possibly complete
 commitment goes back to fresh verification; it is never an automatic-recovery
 input. Linked, mode-widened, foreign, damaged or mismatched state is left for

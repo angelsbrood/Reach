@@ -20,8 +20,8 @@ func main() {
 }
 
 func run(arguments []string, stdout io.Writer) error {
-	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
-		return errors.New("reach-exo-bootstrap requires Darwin/arm64")
+	if err := validatePlatform(runtime.GOOS, runtime.GOARCH); err != nil {
+		return err
 	}
 	if len(arguments) == 0 {
 		return errors.New("usage: reach-exo-bootstrap (create|verify|recover) [options]")
@@ -85,6 +85,13 @@ func run(arguments []string, stdout io.Writer) error {
 	default:
 		return fmt.Errorf("unknown bootstrap command %q", arguments[0])
 	}
+}
+
+func validatePlatform(goos, goarch string) error {
+	if goarch != "arm64" || (goos != "darwin" && goos != "linux") {
+		return errors.New("reach-exo-bootstrap requires Darwin/arm64 or Linux/arm64")
+	}
+	return nil
 }
 
 func privateFlagSet(name string) *flag.FlagSet {

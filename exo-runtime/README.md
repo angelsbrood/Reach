@@ -158,7 +158,7 @@ transaction.
 
 ## Offline cluster-authority bootstrap
 
-`reach-exo-bootstrap` is a private Darwin/arm64 operator command for creating
+`reach-exo-bootstrap` is a private Darwin/arm64 or Linux/arm64 operator command for creating
 the configuration and P-256 mTLS authority for exactly one coordinator, one
 worker, and one host connector. It imports the fixed package/configuration
 contracts above but is not included in the Linux payload and never discovers,
@@ -201,12 +201,17 @@ For the fixed account-owned tunnel boundary, change only `gateway_mode` to
 `loopback-tunnel`; the compiler then derives `127.0.0.1:53422` instead of the
 coordinator's direct private gateway.
 
-Build the operator command outside the package payload:
+Build the standalone operator command with Go 1.26.5 and an explicit target.
+The absolute output directory and Go caches must be outside the entire checkout;
+checkout aliases are rejected. After the pinned toolchain is present, the build
+uses no module or toolchain downloads. It emits the binary, target/source hashes,
+project license and Go notices. It creates no package, service or installer:
 
 ```sh
-CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 \
-  go build -trimpath -buildvcs=false -ldflags '-s -w -buildid=' \
-  -o /private/path/reach-exo-bootstrap ./cmd/reach-exo-bootstrap
+./scripts/build-bootstrap.sh linux /absolute/private/bootstrap-linux
+./scripts/build-bootstrap.sh darwin /absolute/private/bootstrap-darwin
+# Equivalent: make bootstrap TARGET_OS=linux OUTPUT_DIR=/absolute/private/bootstrap-linux
+make bootstrap-static-test
 ```
 
 Creation is deliberately two-phase. Capture its one-line stdout commitment in
@@ -229,7 +234,18 @@ The tree is a prepared candidate until that independent verification passes.
 It contains an operator-only CA key, one leaf key per deployment slice, exact
 node/connector JSON, a cluster manifest, and a self-excluding complete file
 manifest. The authority digest is not stored in the tree. Moving the root
-invalidates connector paths and verification.
+invalidates connector paths and verification. Each operator creates and verifies
+its authority on its own OS at the original absolute root; copying a tree between
+OSes is not a portability check. Directories remain owner-only 0700 and authority
+files 0600, with the existing regular-file, owner, single-link and canonical-path
+checks. Keep the sole CA private key on the creating operator host.
+
+Native Linux checks cover a guest-local filesystem, including directory sync,
+publication rename and ordinary process-crash recovery. They do not qualify
+network or host-mounted filesystems, physical power loss or hostile-root races.
+The authority format and canonical digest serialization remain schema 1; its
+frozen B and embedded Darwin connector identities are unchanged. The standalone
+bootstrap and separate Linux connector have independently recorded identities.
 
 If creation stops before a complete commitment was captured, inspect which
 single deterministic state remains and discard only that attributable state
@@ -244,7 +260,9 @@ with the same inventory:
 ```
 
 The target is exactly `staging`, `prepared`, or `quarantine`; commitment state
-is exactly `absent` or `partial`. A complete or uncertain complete commitment
+is exactly `absent` or `partial`, asserted explicitly by the operator. Recovery
+does not reconstruct whether stdout historically reached its recipient. A
+complete or uncertain complete commitment
 must be verified, never automatically deleted. Damaged provenance, links,
 widened modes, mismatched inventory, or a conflicting quarantine require
 manual disposition rather than broader deletion authority.

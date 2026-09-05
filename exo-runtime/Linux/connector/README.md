@@ -72,8 +72,10 @@ its runtime directory.
 
 ## Project a verified S54 connector role
 
-Use the unchanged S54 creator and independent verifier on its supported
-Darwin/arm64 operator host. The inventory must use `gateway_mode: direct-gateway`
+Use the schema-1 creator and independent verifier on a supported Darwin/arm64
+or Linux/arm64 operator host. The standalone [bootstrap build and workflow](../../README.md#offline-cluster-authority-bootstrap)
+supports both platforms. A Linux service guest may also host the unprivileged
+operator, distinct from both service accounts. The inventory must use `gateway_mode: direct-gateway`
 and the actual three distinct private node/connector addresses. Retain the
 complete externally held authority commitment and verify it before deployment:
 
@@ -85,7 +87,9 @@ reach-exo-bootstrap verify --authority-root /absolute/authority \
 Keep that original authority tree unchanged. Transfer only its verified
 `connector/connector.json` and the connector role's `tls/ca.pem`,
 `tls/connector.pem`, and `tls/connector-key.pem` into an owner-only staging
-directory on the service host. Check transferred bytes against the verified
+directory on the service host (or stage locally when that host is also the
+operator). Keep the original authority and CA private key under the operator
+account. Check staged bytes against the verified
 manifest. Never copy the CA private key or either provider's private key.
 
 S54's JSON binds its original absolute TLS paths. The deployed JSON therefore
