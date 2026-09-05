@@ -65,6 +65,20 @@ Normal package removal disables/stops the service and removes its executable,
 libraries, unit and runtime/state directories. It preserves operator `/etc/reach`
 files; Debian may retain a residual-configuration package record after removal.
 
+## Linux identity provisioning
+
+The separate private `reach-identity-bootstrap` tool creates a fresh Reach CA,
+server identity and one existing-format manual client bundle on Linux/arm64.
+An unprivileged operator supplies an explicit request, retains the new CA DER
+fingerprint and runs independent verification before deployment. Only verified
+server-role files go to `/etc/reach`; the CA signing key remains private to the
+operator, and the client bundle goes only to that client.
+
+Follow the [build, verification and role-separated deployment workflow](../Tools/ReachIdentityBootstrap/README.md).
+The tool uses Go 1.26.5 with no external modules and does not install/start Reach,
+modify the service schema, or change existing Mac issuance/enrollment. Package
+removal preserves the separate operator bundle and deployed `/etc/reach` files.
+
 ## Linux EXO connector companion
 
 The separate private `reach-exo-connector` arm64 package places the connector
