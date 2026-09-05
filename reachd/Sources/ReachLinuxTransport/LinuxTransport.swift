@@ -5,6 +5,22 @@ import Glibc
 import ReachHost
 import ReachWire
 
+/// C waits must not occupy Swift's cooperative executor. The transport's
+/// connection/stream ceilings bound callers, and each caller awaits its own
+/// dispatched operation before releasing any handle or receive allocation.
+enum LinuxBlockingIO {
+    static func run<Value: Sendable>(
+        _ operation: @escaping @Sendable () -> Value
+    ) async -> Value {
+        await withCheckedContinuation { continuation in
+            // Separate serial queues allow blocked waits to make progress
+            // independently, including when all sixteen streams are idle.
+            let queue = DispatchQueue(label: "reach.linux.blocking-io", qos: .userInitiated)
+            queue.async { continuation.resume(returning: operation()) }
+        }
+    }
+}
+
 private let reachStatusOK = Int32(REACH_MSQUIC_OK)
 private let reachStatusRefused = Int32(REACH_MSQUIC_REFUSED)
 private let reachStatusTimeout = Int32(REACH_MSQUIC_TIMEOUT)
@@ -735,9 +751,9 @@ private final class CFrameByteSource: LinuxFrameByteSource, @unchecked Sendable 
     }
 
     func read(into allocation: FrameAllocation, offset: Int, count: Int) async -> BlockingRead {
-        await Task.detached(priority: .userInitiated) { [handle] in
+        await LinuxBlockingIO.run { [handle] in
             handle.blockingRead(into: allocation, offset: offset, count: count)
-        }.value
+        }
     }
 
     func releaseRetainedBytes(_ count: Int) {
@@ -983,9 +999,9 @@ public final class LinuxSessionStream: SessionHostStream, @unchecked Sendable {
 
     public func send(_ frame: some WireFrame, for negotiatedVersion: UInt8) async throws {
         let encoded = try FrameCodec.encode(frame, for: negotiatedVersion)
-        let status = await Task.detached(priority: .userInitiated) { [handle] in
+        let status = await LinuxBlockingIO.run { [handle] in
             handle.blockingSend(encoded)
-        }.value
+        }
         guard status == reachStatusOK else {
             throw LinuxTransportError.send("MsQuic send status \(status)")
         }
@@ -1013,9 +1029,9 @@ public final class ReachLinuxListener: @unchecked Sendable {
 
     public func nextStream() async throws -> LinuxSessionStream? {
         while !Task.isCancelled {
-            let result = await Task.detached(priority: .userInitiated) { [handle] in
+            let result = await LinuxBlockingIO.run { [handle] in
                 handle.accept()
-            }.value
+            }
             switch result.status {
             case reachStatusOK:
                 guard let pointer = result.stream else {
@@ -1038,9 +1054,9 @@ public final class ReachLinuxListener: @unchecked Sendable {
     }
 
     public func stop(until deadline: LinuxShutdownDeadline) async throws {
-        let status = await Task.detached(priority: .high) { [handle] in
+        let status = await LinuxBlockingIO.run { [handle] in
             handle.stop(until: deadline)
-        }.value
+        }
         guard status == reachStatusOK else {
             throw LinuxTransportError.shutdownTimedOut
         }

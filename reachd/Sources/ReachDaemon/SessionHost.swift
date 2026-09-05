@@ -103,6 +103,35 @@ public final class SessionHost: Sendable {
         }
     }
 
+    /// Counts sampled for installed-service lifecycle diagnostics; no session tokens or payloads.
+    package struct LifecycleSnapshot: Sendable, Equatable {
+        package var sessions: Int
+        package var generationTasks: Int
+        package var replayBytes: Int
+        package var activeLeases: Int
+        package var waitingLeases: Int
+        package var admittedLeases: UInt64
+
+        package var message: String {
+            "sessions=\(sessions) generation_tasks=\(generationTasks) replay_bytes=\(replayBytes) " +
+            "active_leases=\(activeLeases) waiting_leases=\(waitingLeases) admitted_leases=\(admittedLeases)"
+        }
+    }
+
+    package var lifecycleSnapshot: LifecycleSnapshot {
+        get async {
+            let counters = await admission.counters
+            return await LifecycleSnapshot(
+                sessions: registry.residentSessions,
+                generationTasks: registry.activeGenerationTasks,
+                replayBytes: registry.replayCounters.currentBytes,
+                activeLeases: counters.active,
+                waitingLeases: counters.waiting,
+                admittedLeases: counters.admitted
+            )
+        }
+    }
+
     public func shutdown() async {
         guard shutdownGate.begin() else {
             await shutdownGate.wait()
@@ -561,8 +590,12 @@ enum HostLog {
         FileHandle.standardError.write(Data("[reachd] \(message)\n".utf8))
     }
 
+    package static func lifecycle(_ message: String) {
+        FileHandle.standardError.write(Data("[reachd] lifecycle \(message)\n".utf8))
+    }
+
     static func info(_ message: String) {
-        print("[reachd] \(message)")
+        FileHandle.standardError.write(Data("[reachd] \(message)\n".utf8))
     }
 }
 

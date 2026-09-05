@@ -1,4 +1,5 @@
 import CReachLinuxMsQuic
+import Dispatch
 import Foundation
 import Glibc
 import ReachWire
@@ -403,7 +404,34 @@ private func provePretransferRefusalDoesNotLeak(retaining stream: StreamHandle) 
     }
 }
 
+private final class BlockingIOProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var startedCount = 0
+    let release = DispatchSemaphore(value: 0)
+
+    func block() -> Bool {
+        lock.withLock { startedCount += 1 }
+        return release.wait(timeout: .now() + 3) == .success
+    }
+
+    var started: Int { lock.withLock { startedCount } }
+}
+
 @Suite(.serialized) struct LinuxTransportTests {
+    @Test func saturatedBlockingReadsLeaveCooperativeTasksRunnable() async throws {
+        let probe = BlockingIOProbe()
+        let workers = (0..<16).map { _ in Task { await LinuxBlockingIO.run { probe.block() } } }
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(2))
+        while probe.started < 16, clock.now < deadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        let allStartedBeforeDeadline = probe.started == 16 && clock.now < deadline
+        for _ in workers { probe.release.signal() }
+        for worker in workers { #expect(await worker.value) }
+        #expect(allStartedBeforeDeadline)
+    }
+
     @Test func exactMsQuicPreviewLayoutAndFiniteCeilings() {
         var size = 0
         var alignment = 0

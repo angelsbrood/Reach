@@ -546,6 +546,7 @@ public actor SessionRegistry {
         record.detachedAt = clock.now
         session.generations[genID] = record
         sessions[sessionID] = session
+        HostLog.lifecycle("generation detached session=\(sessionID) generation=\(genID) epoch=\(epoch)")
     }
 
     public func cancel(sessionID: UUID, genID: UUID, epoch: UInt64) {
@@ -618,6 +619,13 @@ public actor SessionRegistry {
                     expired = record.detachedAt.map { now - $0 > limits.completedRetention } ?? false
                 }
                 if expired {
+                    let age = record.detachedAt.map { now - $0 } ?? .zero
+                    let parts = age.components
+                    HostLog.lifecycle(
+                        "generation expired session=\(sessionID) generation=\(genID) " +
+                        "state=\(record.state.rawValue) detached_age_seconds=\(parts.seconds) " +
+                        "detached_age_attoseconds=\(parts.attoseconds)"
+                    )
                     session.generations.removeValue(forKey: genID)
                     replayStore.remove(Self.replayKey(sessionID: sessionID, genID: genID))
                     reaped += 1

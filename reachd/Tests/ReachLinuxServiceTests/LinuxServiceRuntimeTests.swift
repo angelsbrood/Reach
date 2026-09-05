@@ -393,6 +393,12 @@ private func sweepEventually(_ predicate: @escaping @Sendable () -> Bool) async 
             refusedStreams: 3,
             peakConnections: 4,
             peakStreams: 6,
+            retainedReceiveBytes: 16,
+            physicalOwnedReceiveBytes: 32,
+            physicalBorrowedReceiveBytes: 8,
+            physicalReceiveBytes: 40,
+            peakPhysicalReceiveBytes: 64,
+            virtualReceiveBytes: 128,
             configurationAttempts: 9,
             configurationSucceeded: 4,
             configurationFailed: 5,
@@ -437,6 +443,8 @@ private func sweepEventually(_ predicate: @escaping @Sendable () -> Bool) async 
         let encoded = try productStatusKeys(path)
         #expect(encoded == Set([
             "schemaVersion", "pid", "ready", "modelID", "boundAddress", "boundPort",
+            "retainedReceiveBytes", "physicalOwnedReceiveBytes", "physicalBorrowedReceiveBytes",
+            "physicalReceiveBytes", "virtualReceiveBytes", "peakPhysicalReceiveBytes",
             "activeConnections", "activeStreams", "acceptedConnections", "acceptedStreams",
             "refusedConnections", "refusedStreams", "configurationAttempts",
             "configurationSucceeded", "configurationFailed", "lastConfigurationStatus",
@@ -450,6 +458,8 @@ private func sweepEventually(_ predicate: @escaping @Sendable () -> Bool) async 
             "lastShutdownHandshakeCompleted", "lastError",
         ]))
         #expect(decoded.schemaVersion == 2)
+        #expect(decoded.retainedReceiveBytes == metrics.retainedReceiveBytes)
+        #expect(decoded.physicalReceiveBytes == metrics.physicalReceiveBytes)
         #expect(decoded.configurationAttempts == 9)
         #expect(decoded.lastConfigurationStatus == -7)
         #expect(decoded.lastTLSHandshakeInfoLength == 36)

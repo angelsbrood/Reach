@@ -1,31 +1,37 @@
 # Running the daemon
 
-## Linux service candidate — not accepted or operable
+## Private Linux service candidate
 
-S56 currently contains an **unaccepted implementation candidate** for a native
-Linux `reachd-linux` composition. It is under correction and must not be
-installed, enabled, or used as an operator runbook. Architecture has not
-accepted Apple/Linux interoperability, authenticated peer-DER delivery,
-stream/receive/cancellation limits, package lifecycle, restart behavior, or
-service teardown on these bytes.
+The native `reachd-linux` candidate has been exercised as an installed,
+unprivileged service in one disposable Ubuntu 26.04 arm64 guest, using
+Swift 6.3.3 and MsQuic 2.5.11. Private checks cover authenticated Apple/Linux
+sessions and synthetic EXO generation, bounded streams and framing,
+reattachment, cancellation, detached residency, graceful shutdown, crash
+recovery, enabled/disabled reboot, and removal. Physical-host operation, real
+models/providers, package upgrades/rollback and public release remain outside
+this verification boundary.
 
-The candidate is intentionally limited to the existing `ReachHost` and
-ReachWire state machine, a Linux-only MsQuic 2.5.11 adapter, and an externally
-managed numeric-loopback EXO HTTP endpoint. Its proposed package subtree is
-`reachd/Linux/package`; it excludes the Apple client, enrollment, Bonjour,
-MLX, model bytes, EXO lifecycle, and alternate application protocols. These
-are source boundaries, not earned deployment capability.
+The service uses the shared `ReachHost` and ReachWire state machine and an
+operator-managed numeric-loopback EXO HTTP endpoint. The package subtree is
+`reachd/Linux/package`; its runtime closure excludes the Apple client,
+enrollment, Bonjour, MLX and model bytes. The synthetic provider and loopback
+bridge used for acceptance are private test fixtures, separate from the product.
 
-The candidate configuration shape under test is one strict schema-1 document,
-at most 65,536 bytes:
+Installation creates the `reachd` system account but does not enable or start
+the service, create a cluster identity or write operator configuration.
+Configuration and identity material must be supplied explicitly before start.
+The strict schema-1 document at `/etc/reach/reachd.json` is at most 65,536 bytes.
+The configuration and each TLS file must be a regular, singly linked,
+non-symlink file owned by `root:reachd` with mode `0640`. The loopback example
+below matches the tested route:
 
 ```json
 {
   "schemaVersion": 1,
   "clusterDisplayName": "Synthetic Cluster",
-  "listen": { "address": "0.0.0.0", "port": 4433 },
+  "listen": { "address": "127.0.0.1", "port": 4433 },
   "advertisedRoads": [
-    { "address": "192.0.2.10", "port": 4433 }
+    { "address": "127.0.0.1", "port": 4433 }
   ],
   "tls": {
     "clusterCACertificatePath": "/etc/reach/tls/ca.pem",
@@ -37,11 +43,27 @@ at most 65,536 bytes:
 }
 ```
 
-The candidate is intended to refuse unknown, duplicate, missing, mistyped,
-non-NFC, noncanonical, widened, linked, or metadata-weakened input before bind,
-and to advertise only configured roads. Those behaviors and the proposed
-`/run/reach/status.json` record remain verification targets. No enablement,
-installation, removal, or identity-management procedure is accepted here.
+The actual systemd unit runs `/usr/lib/reach/reachd-linux` as `reachd:reachd`
+with no capabilities, `MemoryMax=1G`, `TasksMax=128`, a 10-second startup
+limit and one shared 15-second shutdown deadline. Readiness follows provider
+preflight and listener bind. Configuration, credential, provider-preflight and
+bind refusals exit 64 without automatic restart; an unexpected process failure
+uses the unit's two-second restart delay and three-starts-per-minute limit.
+Provider readiness and any operator firewall ordering must be established by
+the surrounding installation; the product does not manage the EXO process.
+
+`/run/reach/status.json` reports the process, configured listener, readiness,
+admission and receive-retention counters. Lifecycle logs expose detached age,
+sweep delay and joined shutdown counts without recording session tokens or
+transcript content. Blocking transport waits run outside Swift's cooperative
+executor so idle streams do not starve other streams, status updates or shutdown.
+
+The 30-second transport idle timeout precedes the distinct 120-second detached
+generation residency window. Restart preserves operator identity/configuration
+while starting with empty volatile session, provider-admission and replay state.
+Normal package removal disables/stops the service and removes its executable,
+libraries, unit and runtime/state directories. It preserves operator `/etc/reach`
+files; Debian may retain a residual-configuration package record after removal.
 
 ## Building the private unsigned Mac package
 

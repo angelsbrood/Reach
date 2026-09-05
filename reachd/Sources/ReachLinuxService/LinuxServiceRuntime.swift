@@ -56,6 +56,12 @@ public struct LinuxServiceStatus: Codable, Sendable, Equatable {
     public var modelID: String
     public var boundAddress: String
     public var boundPort: UInt16
+    public var retainedReceiveBytes: UInt64
+    public var physicalOwnedReceiveBytes: UInt64
+    public var physicalBorrowedReceiveBytes: UInt64
+    public var physicalReceiveBytes: UInt64
+    public var virtualReceiveBytes: UInt64
+    public var peakPhysicalReceiveBytes: UInt64
     public var activeConnections: UInt32
     public var activeStreams: UInt32
     public var acceptedConnections: UInt32
@@ -98,6 +104,12 @@ public struct LinuxServiceStatus: Codable, Sendable, Equatable {
         modelID = configuration.modelID
         boundAddress = configuration.listen.address
         boundPort = configuration.listen.port
+        retainedReceiveBytes = metrics.retainedReceiveBytes
+        physicalOwnedReceiveBytes = metrics.physicalOwnedReceiveBytes
+        physicalBorrowedReceiveBytes = metrics.physicalBorrowedReceiveBytes
+        physicalReceiveBytes = metrics.physicalReceiveBytes
+        virtualReceiveBytes = metrics.virtualReceiveBytes
+        peakPhysicalReceiveBytes = metrics.peakPhysicalReceiveBytes
         activeConnections = metrics.activeConnections
         activeStreams = metrics.activeStreams
         acceptedConnections = metrics.acceptedConnections
@@ -379,10 +391,10 @@ final class LinuxSessionSweeper: @unchecked Sendable {
         clock: LinuxSweepClock = .production,
         sweep: @escaping Sweep,
         observer: @escaping Observer = { observation, reaped in
-            print(
+            FileHandle.standardError.write(Data((
                 "[reachd] registry sweep delay_ns=\(observation.delayNanoseconds) " +
-                "skipped=\(observation.skippedDeadlines) reaped=\(reaped)"
-            )
+                "skipped=\(observation.skippedDeadlines) reaped=\(reaped)\n"
+            ).utf8))
         }
     ) {
         let startedAt = clock.now()
@@ -564,6 +576,7 @@ public enum LinuxServiceRuntime {
             }
         }
         let statusTask = Task {
+            var previousLifecycle: SessionHost.LifecycleSnapshot?
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(1))
                 guard !Task.isCancelled else { return }
@@ -573,6 +586,11 @@ public enum LinuxServiceRuntime {
                     metrics: listener.metrics()
                 )
                 try? LinuxStatusWriter.write(status)
+                let lifecycle = await host.lifecycleSnapshot
+                if lifecycle != previousLifecycle {
+                    FileHandle.standardError.write(Data("[reachd] lifecycle \(lifecycle.message)\n".utf8))
+                    previousLifecycle = lifecycle
+                }
             }
         }
 
@@ -643,6 +661,14 @@ public enum LinuxServiceRuntime {
         }
 
         if let shutdownError { throw shutdownError }
+        let settled = await host.lifecycleSnapshot
+        let finalMetrics = listener.metrics()
+        FileHandle.standardError.write(Data((
+            "[reachd] shutdown joined \(settled.message) stream_tasks=\(await registry.count) " +
+            "active_connections=\(finalMetrics.activeConnections) active_streams=\(finalMetrics.activeStreams) " +
+            "retained_receive_bytes=\(finalMetrics.retainedReceiveBytes) " +
+            "physical_receive_bytes=\(finalMetrics.physicalReceiveBytes)\n"
+        ).utf8))
         if case .failure(let detail) = reason {
             throw LinuxServiceRuntimeError.runtime(detail)
         }

@@ -91,15 +91,25 @@ rather than at the application layer. The ceremony speaks **`reach-enroll/0`**
 on a sibling listener with server-authenticated TLS only, because at enrollment
 time the client's certificate is the thing being asked for.
 
-S56 contains an **unaccepted Linux transport candidate** intended to carry this
-same session road through MsQuic using IETF QUIC v1, TLS 1.3, and `reach/0`,
-without an enrollment ALPN or TCP/HTTP3/sidecar fallback. Its private-CA peer
-authentication, peer-DER handoff, stream ceilings, borrowed-buffer ownership,
-cancellation, and Apple interoperability are still closeout predicates, not
-current wire capability. The accepted wire contract remains the existing
-ReachWire framing and 16 MiB frame ceiling; this candidate does not change it.
+The private Linux service candidate carries this same session road through
+MsQuic 2.5.11 using IETF QUIC v1, TLS 1.3 and `reach/0`. Disposable Ubuntu arm64
+checks exercised private-CA authentication, peer-DER handoff and production
+Apple transport interoperability. The Linux listener admits at most 16
+connections, eight bidirectional streams per connection and 16 active streams
+process-wide, with zero peer unidirectional stream credit. A compliant sender
+can remain blocked on stream credit; that differs from an application refusal.
+Unknown frame types and declarations above 16 MiB are refused before allocating
+an oversized body or invoking a provider. There is no resumption or 0-RTT path.
 
-Both are found over Bonjour — `_reach._udp` for sessions,
+The Linux service retains the shared generation/replay contract below: a stream
+reattaches to the same generation after its acknowledged sequence, without a
+second provider command or admission lease. Its 30-second transport idle
+timeout is distinct from the 120-second detached residency window, swept on an
+absolute one-second schedule. Shutdown awaits owned transport, host and provider
+work within one shared 15-second deadline. See [the service candidate boundary](running.md#private-linux-service-candidate)
+for the scope of these private installed-service checks.
+
+On macOS, both are found over Bonjour — `_reach._udp` for sessions,
 `_reach-enroll._udp` for the door, advertised under the same cluster name. The
 session advertisement carries `ca`, the base64url SHA-256 of the cluster CA's
 DER, and `v`, the daemon's supported dialects comma-separated in newest-first
