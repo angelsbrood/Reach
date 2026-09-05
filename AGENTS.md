@@ -26,6 +26,7 @@ These standing rules govern work across this repository unless the user explicit
 4. Implementation fixes all in-scope findings and produces a concise terminal handback with actual-byte evidence proportionate to the change.
 5. Planning authenticates the actual changed bytes, repository state and relevant evidence, then sends the result directly to Architecture for focused final review. Reuse unchanged evidence instead of duplicating the full validation effort.
 6. Repeat steps 3-5 until Architecture returns `PASS` or a genuine escalation boundary is reached.
+7. After terminal Architecture `PASS` and Planning closeout, commit the accepted, in-scope changes and push the intended branch as the final step. This is standing authorization; do not ask for another commit/push approval unless the user has explicitly withheld that step.
 
 Planning may recut bounded mechanics, resource ceilings, fixtures, and evidence requirements needed to satisfy the already-opened slice. A plan-local phrase such as "separately gated" does not pause this convergence loop unless the user explicitly places the work on hold.
 
@@ -33,6 +34,7 @@ Planning may recut bounded mechanics, resource ceilings, fixtures, and evidence 
 
 - Continue the exact existing task by task ID when possible and use its displayed title verbatim when identifying it.
 - A handoff means sending a clear, user-visible message to the responsible task; Planning does not silently absorb Implementation or Architecture work.
+- After a successful handoff, silently await the receiving task's handback by default. Do not routinely poll, inspect progress, or narrate waiting; monitor only when there is a clear situational requirement to do so.
 - If cross-task delivery fails and the user pastes a verdict or handback, treat that pasted content as authoritative workflow input, then authenticate live repository bytes before the next terminal handoff.
 - Do not create a successor Architecture or Implementation task merely because messaging is unreliable. Create a new task only when the user explicitly requests one.
 - Reuse unchanged evidence and require focused proof for changed dependencies or findings; do not restart blanket validation without cause.
@@ -41,11 +43,11 @@ Planning may recut bounded mechanics, resource ceilings, fixtures, and evidence 
 
 Ask the user only for a material macro or scope expansion, a destructive or external action not already authorized, an unavailable required resource or credential, an irreconcilable ownership conflict, or another genuine blocker. Ordinary Architecture findings, plan clarifications, implementation fixes, tests, evidence regeneration, and review handbacks do not require renewed authority.
 
-Commit, push, release, publication, portal changes, and later phases remain separate explicit authorities unless the user has already granted the specific action.
+The post-closeout commit/push in step 7 is authorized even where older plan text calls for separate approval. Commit/push before that point or outside the accepted scope, release, publication, portal changes, and later phases still require their own explicit authority.
 
 ## Repository hygiene
 
 - Preserve `.env.local` and `tasks/` without reading their contents.
-- Preserve unrelated user changes and keep staging empty unless a commit has been explicitly authorized.
+- Preserve unrelated user changes and keep staging empty until an authorized commit, including the post-closeout commit in step 7. Stage only the intended, in-scope changes; keep ignored/private planning and evidence unpublished.
 - Authenticate checkout-sensitive claims from current bytes: status, refs, hashes, path ceilings, and `git diff --check`.
 - Report acceptance only to the literal scope proven by the applicable gates.
