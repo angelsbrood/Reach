@@ -1,0 +1,1278 @@
+diff --git a/Libraries/MLXLMCommon/ResumableGuidedModelState.swift b/Libraries/MLXLMCommon/ResumableGuidedModelState.swift
+new file mode 100644
+--- /dev/null
++++ b/Libraries/MLXLMCommon/ResumableGuidedModelState.swift
+@@ -0,0 +1,226 @@
++// Local guided candidate: additive access to the accepted supported-state codecs.
++import Foundation
++import MLX
++
++public enum ResumableGuidedValues {
++    public static func encoder() -> JSONEncoder { ResumableTokenCheckpoint.encoder() }
++    public static func digest(_ data: Data) -> String { ResumableTokenCheckpoint.digest(data) }
++}
++
++public struct ResumableGuidedModelOptions: Codable, Equatable, Sendable {
++    public var logitWidth: Int
++    public var maximumTokens: Int
++    public var prefillStepSize: Int
++    public init(logitWidth: Int, maximumTokens: Int, prefillStepSize: Int = 512) {
++        self.logitWidth = logitWidth; self.maximumTokens = maximumTokens; self.prefillStepSize = prefillStepSize
++    }
++    public func validate() throws {
++        guard (1...4096).contains(logitWidth), (0...65_536).contains(maximumTokens),
++            (1...4096).contains(prefillStepSize) else { throw ResumableTokenError.unsupported("guided model options") }
++    }
++}
++
++struct GuidedModelDocument: Codable {
++    var version: Int = 1
++    var identity: ResumableTokenIdentity
++    var options: ResumableGuidedModelOptions
++    var specs: [ResumableCacheSpec]
++    var codecs: [ResumableCodecDescriptor]
++    var promptCount: Int
++    var generatedInputs: Int
++    var caches: [ResumableCacheRecord]
++    var state: [ResumableStateEntry]?
++    var logits: ResumableTensor?
++}
++
++public struct ResumableGuidedModelCheckpoint: Equatable, Sendable {
++    public static let maximumBytes = 8 * 1024 * 1024
++    public let data: Data
++    init(document: GuidedModelDocument) throws {
++        let payload = try ResumableGuidedValues.encoder().encode(document)
++        guard payload.count <= Self.maximumBytes else { throw ResumableTokenError.oversized }
++        let bytes = try ResumableGuidedValues.encoder().encode(ResumableTokenCheckpoint.Envelope(
++            payload: payload, sha256: ResumableGuidedValues.digest(payload)))
++        guard bytes.count <= Self.maximumBytes else { throw ResumableTokenError.oversized }
++        data = bytes
++    }
++    public init(data: Data) throws {
++        guard data.count <= Self.maximumBytes else { throw ResumableTokenError.oversized }
++        self.data = data; _ = try document()
++    }
++    func document() throws -> GuidedModelDocument {
++        do {
++            let envelope = try JSONDecoder().decode(ResumableTokenCheckpoint.Envelope.self, from: data)
++            guard ResumableGuidedValues.digest(envelope.payload) == envelope.sha256 else {
++                throw ResumableTokenError.invalid("guided model checksum")
++            }
++            struct Header: Decodable { let version: Int }
++            guard try JSONDecoder().decode(Header.self, from: envelope.payload).version == 1 else {
++                throw ResumableTokenError.incompatible
++            }
++            return try JSONDecoder().decode(GuidedModelDocument.self, from: envelope.payload)
++        } catch let error as ResumableTokenError { throw error }
++        catch { throw ResumableTokenError.invalid("guided model encoding") }
++    }
++}
++
++/// Serially confined model owner for a separate settled-logits schedule. It does not
++/// sample, mutate S72's driver, or accept guidance callbacks. Only the guided lane may
++/// consume its borrowed logits; the owner must not mutate or retain caches/tensors.
++public final class ResumableGuidedModelState {
++    private let model: any LanguageModel
++    private let identity: ResumableTokenIdentity
++    private let options: ResumableGuidedModelOptions
++    private let specs: [ResumableCacheSpec]
++    private let codecs: ResumableStateCodecs
++    private var caches: [KVCache]
++    private var state: LMOutput.State?
++    private var logits: MLXArray?
++    public let promptCount: Int
++    public private(set) var generatedInputs: Int
++    public private(set) var isClosed = false
++
++    private init(model: any LanguageModel, identity: ResumableTokenIdentity, options: ResumableGuidedModelOptions,
++                 specs: [ResumableCacheSpec], codecs: ResumableStateCodecs, promptCount: Int,
++                 generatedInputs: Int = 0, caches: [KVCache], state: LMOutput.State? = nil, logits: MLXArray? = nil) {
++        self.model = model; self.identity = identity; self.options = options; self.specs = specs; self.codecs = codecs
++        self.promptCount = promptCount; self.generatedInputs = generatedInputs; self.caches = caches
++        self.state = state; self.logits = logits
++    }
++    public static func assess(identity: ResumableTokenIdentity, options: ResumableGuidedModelOptions,
++                              cacheSpecs: [ResumableCacheSpec]) throws {
++        try identity.validate(); try options.validate()
++        guard cacheSpecs.count <= 128 else { throw ResumableTokenError.oversized }
++        for spec in cacheSpecs { try spec.validate() }
++    }
++    public static func prepare(model: any LanguageModel, tokens: [Int], identity: ResumableTokenIdentity,
++                               options: ResumableGuidedModelOptions, cacheSpecs: [ResumableCacheSpec],
++                               codecs: ResumableStateCodecs = .init()) throws -> ResumableGuidedModelState {
++        try assess(identity: identity, options: options, cacheSpecs: cacheSpecs)
++        guard !tokens.isEmpty, tokens.count <= 65_536, tokens.allSatisfy({ (0..<options.logitWidth).contains($0) }),
++            try ResumableTokenIdentity.inputDigest(tokens) == identity.input else {
++            throw ResumableTokenError.invalid("guided prompt binding")
++        }
++        let owner = ResumableGuidedModelState(model: model, identity: identity, options: options,
++            specs: cacheSpecs, codecs: codecs, promptCount: tokens.count, caches: cacheSpecs.map { $0.makeCache() })
++        do {
++            if options.maximumTokens > 0 {
++                for start in stride(from: 0, to: tokens.count, by: options.prefillStepSize) {
++                    try owner.forward(Array(tokens[start..<min(start + options.prefillStepSize, tokens.count)]))
++                }
++            }
++            _ = try owner.capture(); return owner
++        } catch { owner.close(); throw error }
++    }
++    public static func restore(_ checkpoint: ResumableGuidedModelCheckpoint, model: any LanguageModel,
++                               identity: ResumableTokenIdentity, options: ResumableGuidedModelOptions,
++                               cacheSpecs: [ResumableCacheSpec], codecs: ResumableStateCodecs = .init()) throws -> ResumableGuidedModelState {
++        try assess(identity: identity, options: options, cacheSpecs: cacheSpecs)
++        let d = try checkpoint.document()
++        guard d.identity == identity, d.options == options, d.specs == cacheSpecs, d.codecs == codecs.descriptors else {
++            throw ResumableTokenError.incompatible
++        }
++        guard (1...65_536).contains(d.promptCount), (0...options.maximumTokens).contains(d.generatedInputs),
++            d.caches.count == cacheSpecs.count, (options.maximumTokens == 0) == (d.logits == nil) else {
++            throw ResumableTokenError.invalid("guided model counters/logits")
++        }
++        if let logits = d.logits {
++            try logits.validate()
++            guard logits.shape == [1,1,options.logitWidth], ["float16","bfloat16","float32"].contains(logits.dtype) else {
++                throw ResumableTokenError.invalid("guided settled logits")
++            }
++        }
++        let consumed = options.maximumTokens == 0 ? 0 : d.promptCount + d.generatedInputs
++        for (record, spec) in zip(d.caches, cacheSpecs) {
++            try record.validate(spec: spec, consumed: consumed, window: options.prefillStepSize)
++        }
++        for entry in d.state ?? [] { try entry.payload.validate() }
++        let state = try codecs.restore(d.state)
++        let caches = try zip(d.caches, cacheSpecs).map { try $0.restore(spec: $1) }
++        let logits = try d.logits?.restored()
++        let owner = ResumableGuidedModelState(model: model, identity: identity, options: options,
++            specs: cacheSpecs, codecs: codecs, promptCount: d.promptCount, generatedInputs: d.generatedInputs,
++            caches: caches, state: state, logits: logits)
++        do { _ = try owner.capture(); return owner }
++        catch { owner.close(); throw error }
++    }
++    private func forward(_ tokens: [Int]) throws {
++        let input = MLXArray(tokens.map(Int32.init)).reshaped(1,-1)
++        let output = withPreparedCache(caches, lengths: [tokens.count]) {
++            model(.init(tokens: input), cache: caches.isEmpty ? nil : caches, state: state)
++        }
++        guard output.logits.shape == [1,tokens.count,options.logitWidth],
++            [.float16,.bfloat16,.float32].contains(output.logits.dtype),
++            output.logits.nbytes <= ResumableGuidedModelCheckpoint.maximumBytes else {
++            throw ResumableTokenError.unsupported("guided model logits")
++        }
++        for (cache,spec) in zip(caches,specs) { try spec.validateLive(cache) }
++        logits = output.logits[0..., (-1)..., 0...]
++        state = output.state
++        eval([logits!] + caches.flatMap { $0.innerState() })
++        _ = try codecs.capture(state)
++    }
++    public func settledLogits() throws -> MLXArray {
++        guard !isClosed else { throw ResumableTokenError.closed }
++        guard let logits else { throw ResumableTokenError.invalid("no logits at zero budget") }
++        return logits
++    }
++    /// Every ordinary sampled or forced ID is forwarded once, including the last
++    /// generated token. EOS/unknown are intercepted by the guided caller, not forwarded.
++    public func consume(_ token: Int) throws {
++        guard !isClosed else { throw ResumableTokenError.closed }
++        do {
++            guard (0..<options.logitWidth).contains(token), generatedInputs < options.maximumTokens else {
++                throw ResumableTokenError.invalid("guided model input/budget")
++            }
++            try forward([token]); generatedInputs += 1
++            _ = try capture()
++        } catch { close(); throw error }
++    }
++    public func capture() throws -> ResumableGuidedModelCheckpoint {
++        guard !isClosed else { throw ResumableTokenError.closed }
++        let consumed = options.maximumTokens == 0 ? 0 : promptCount + generatedInputs
++        let records = try zip(caches,specs).map {
++            try ResumableCacheRecord(capturing: $0, spec: $1, consumed: consumed, window: options.prefillStepSize)
++        }
++        return try .init(document: .init(identity: identity, options: options, specs: specs, codecs: codecs.descriptors,
++            promptCount: promptCount, generatedInputs: generatedInputs, caches: records, state: codecs.capture(state),
++            logits: logits.map { try .init(capturing: $0) }))
++    }
++    public func close() { isClosed = true; caches = []; state = nil; logits = nil }
++}
++
++/// Additive common-module access to the pinned detokenizer's actual internal values.
++public struct ResumableGuidedTextValue: Codable, Equatable, Sendable {
++    public var tokens: [Int] = []
++    public var emitted: Data = Data()
++    public var emittedTokenCount: Int = 0
++    public init() {}
++    public mutating func append(_ token: Int, tokenizer: any Tokenizer) throws -> Data? {
++        guard tokens.count < 65_536 else { throw ResumableTokenError.oversized }
++        tokens.append(token)
++        try ResumableTextState.checkDecode(tokenizer, tokens: tokens)
++        try ResumableTextState.checkDecode(tokenizer, tokens: [token])
++        var detokenizer = NaiveStreamingDetokenizer(tokenizer: tokenizer)
++        detokenizer.segmentTokens = tokens; detokenizer.segment = try ResumableTextState.string(emitted)
++        let text = detokenizer.next()
++        tokens = detokenizer.segmentTokens; emitted = Data(detokenizer.segment.utf8)
++        if text != nil { emittedTokenCount = tokens.count }
++        return text.map { Data($0.utf8) }
++    }
++    public func validate(tokenizer: any Tokenizer, generated: Int, vocabulary: Int) throws {
++        guard (0...65_536).contains(generated), tokens.count <= generated,
++            (0...tokens.count).contains(emittedTokenCount), tokens.allSatisfy({ (0..<vocabulary).contains($0) }),
++            (generated == 0) == tokens.isEmpty else { throw ResumableTokenError.invalid("guided text counts") }
++        let segment = try ResumableTextState.string(emitted)
++        let expected = emittedTokenCount == 0 ? "" : try ResumableTextState.checkDecode(tokenizer, tokens: Array(tokens.prefix(emittedTokenCount)))
++        guard Data(expected.utf8) == emitted else { throw ResumableTokenError.invalid("guided emitted segment") }
++        if emittedTokenCount < tokens.count {
++            try ResumableTextState.checkDecode(tokenizer,tokens:tokens)
++            try ResumableTextState.checkDecode(tokenizer,tokens:[tokens.last!])
++            var detokenizer = NaiveStreamingDetokenizer(tokenizer:tokenizer)
++            detokenizer.segmentTokens=tokens; detokenizer.segment=segment
++            guard detokenizer.next() == nil else { throw ResumableTokenError.invalid("guided unsettled text") }
++        }
++    }
++}
+diff --git a/Libraries/MLXGuidedGeneration/ResumableGuidedGeneration.swift b/Libraries/MLXGuidedGeneration/ResumableGuidedGeneration.swift
+new file mode 100644
+--- /dev/null
++++ b/Libraries/MLXGuidedGeneration/ResumableGuidedGeneration.swift
+@@ -0,0 +1,208 @@
++import Foundation
++import MLX
++import MLXLMCommon
++
++public struct ResumableGuidedOptions: Codable, Sendable {
++    public var model: ResumableGuidedModelOptions
++    public var sampling: String = "greedy-v1"
++    public var completionPolicy: String = "accepted-stop-v1"
++    public var completionReserve: Int
++    public var hardReserve: Int
++    public var closingBias: [Float]?
++    public var whitespaceBias: [Float]?
++    public var whitespaceTokenIDs: [Int]
++    public var whitespaceThreshold: Int
++    public init(model: ResumableGuidedModelOptions, completionReserve: Int = 64, hardReserve: Int = 0,
++                closingBias: [Float]? = nil, whitespaceBias: [Float]? = nil,
++                whitespaceTokenIDs: Set<Int> = [], whitespaceThreshold: Int = 3) {
++        self.model=model; self.completionReserve=completionReserve; self.hardReserve=hardReserve
++        self.closingBias=closingBias; self.whitespaceBias=whitespaceBias
++        self.whitespaceTokenIDs=whitespaceTokenIDs.sorted(); self.whitespaceThreshold=whitespaceThreshold
++    }
++    func validate(vocabulary: Int) throws {
++        try model.validate()
++        guard sampling=="greedy-v1", completionPolicy=="accepted-stop-v1",
++            (0...65_536).contains(completionReserve), (0...65_536).contains(hardReserve),
++            (0...65_536).contains(whitespaceThreshold), whitespaceTokenIDs.count<=vocabulary,
++            whitespaceTokenIDs==Set(whitespaceTokenIDs).sorted(),
++            whitespaceTokenIDs.allSatisfy({ (0..<vocabulary).contains($0) }) else { throw ResumableTokenError.unsupported("guided policy") }
++        for values in [closingBias,whitespaceBias].compactMap({ $0 }) {
++            guard values.count==vocabulary, values.allSatisfy({ $0.isFinite && abs($0)<=10_000 }) else {
++                throw ResumableTokenError.unsupported("guided bias bounds")
++            }
++        }
++    }
++    enum Zone: String { case normal, soft, hard }
++    func zone(at count: Int) -> Zone {
++        if hardReserve>0 && count>=model.maximumTokens-hardReserve { return .hard }
++        if count>=model.maximumTokens-completionReserve { return .soft }
++        return .normal
++    }
++    // Same mask-gated normal/soft/hard/latched-whitespace policy as the pinned loop.
++    func bias(at count: Int, mask: GuidedMask, whitespaceActive: Bool, eos: Int) -> MLXArray? {
++        guard mask.needsApply else { return nil }
++        var active: MLXArray?
++        if let values=closingBias {
++            switch zone(at:count) {
++            case .normal: break
++            case .soft: active=MLXArray(values)
++            case .hard:
++                var hard=values.map { $0>0 ? Float(0) : Float(-10_000) }
++                hard[eos] -= 10_000
++                active=MLXArray(hard)
++            }
++        }
++        if let values=whitespaceBias, whitespaceActive { active=active.map { $0+MLXArray(values) } ?? MLXArray(values) }
++        return active
++    }
++}
++
++/// Paused guided lane with a complete single-token recurrence. Each ordinary
++/// sampled token is forwarded before draining its accepted forced suffix; each
++/// forced token gets its own forward call. This deliberately does not reproduce
++/// the legacy callback loop's omitted sampled-token forward in its FF branch.
++/// No tools, stochastic sampling, generic processors, queues or host storage.
++public final class ResumableGuidedGeneration {
++    public struct Batch {
++        public let token: Int?
++        public let origin: ResumableGuidedOrigin?
++        public let records: [ResumableGuidedRecord]
++        public let checkpoint: ResumableGuidedCheckpoint
++    }
++    private let tokenizer: any Tokenizer
++    private var model: ResumableGuidedModelState?
++    private var modelCheckpoint: ResumableGuidedModelCheckpoint
++    private var grammar: ResumableGrammarState?
++    private var state: ResumableGuidedState
++    private var tracker: WhitespaceRunTracker
++    public private(set) var isClosed=false
++    public var terminalReason: ResumableGuidedEnd? { state.terminal }
++    public var pendingForcedTokens: [Int] { state.grammar.accepts.dropFirst(state.consumed).map(\.token) }
++    public var consumedTokens: Int { state.consumed }
++
++    private init(model: ResumableGuidedModelState, modelCheckpoint: ResumableGuidedModelCheckpoint,
++                 grammar: ResumableGrammarState, state: ResumableGuidedState,
++                 tracker: WhitespaceRunTracker, tokenizer: any Tokenizer) {
++        self.model=model; self.modelCheckpoint=modelCheckpoint; self.grammar=grammar; self.state=state
++        self.tracker=tracker; self.tokenizer=tokenizer
++        if state.terminal != nil { model.close(); self.model=nil; self.grammar=nil }
++    }
++    public static func prepare(model: any LanguageModel, tokens: [Int], identity: ResumableTokenIdentity,
++                               cacheSpecs: [ResumableCacheSpec], codecs: ResumableStateCodecs = .init(),
++                               tokenizer: any Tokenizer, specification: ResumableGrammarSpecification,
++                               options: ResumableGuidedOptions) throws -> ResumableGuidedGeneration {
++        try specification.validate(); try options.validate(vocabulary:specification.vocabulary.count)
++        try ResumableGuidedModelState.assess(identity:identity,options:options.model,cacheSpecs:cacheSpecs)
++        let grammar=try ResumableGrammarState(specification:specification,tokenizer:tokenizer)
++        let owner=try ResumableGuidedModelState.prepare(model:model,tokens:tokens,identity:identity,
++            options:options.model,cacheSpecs:cacheSpecs,codecs:codecs)
++        do {
++            let snapshot=try owner.capture()
++            let state=ResumableGuidedState(specification:specification,options:options,
++                modelDigest:ResumableGuidedValues.digest(snapshot.data),promptCount:tokens.count,grammar:grammar.record)
++            let result=ResumableGuidedGeneration(model:owner,modelCheckpoint:snapshot,grammar:grammar,state:state,
++                tracker:WhitespaceRunTracker(threshold:options.whitespaceThreshold,whitespaceTokenIDs:Set(options.whitespaceTokenIDs)),tokenizer:tokenizer)
++            _=try result.capture(); return result
++        } catch { owner.close(); throw error }
++    }
++    public static func restore(_ checkpoint: ResumableGuidedCheckpoint, model: any LanguageModel,
++                               identity: ResumableTokenIdentity, cacheSpecs: [ResumableCacheSpec],
++                               codecs: ResumableStateCodecs = .init(), tokenizer: any Tokenizer,
++                               specification: ResumableGrammarSpecification, options: ResumableGuidedOptions) throws -> ResumableGuidedGeneration {
++        try specification.validate(); try options.validate(vocabulary:specification.vocabulary.count)
++        let d=try checkpoint.document()
++        guard try ResumableGuidedValues.encoder().encode(specification)==ResumableGuidedValues.encoder().encode(d.guided.specification),
++            try ResumableGuidedValues.encoder().encode(options)==ResumableGuidedValues.encoder().encode(d.guided.options),
++            d.guided.modelDigest==ResumableGuidedValues.digest(d.model) else { throw ResumableTokenError.incompatible }
++        let tracker=try d.guided.validate(tokenizer:tokenizer)
++        guard d.guided.grammar.accepts.filter({ $0.origin != .ending }).allSatisfy({ $0.token<options.model.logitWidth }) else {
++            throw ResumableTokenError.invalid("guided accepted/model width")
++        }
++        let grammar=try ResumableGrammarState.restore(d.guided.grammar,specification:specification,tokenizer:tokenizer)
++        let child=try ResumableGuidedModelCheckpoint(data:d.model)
++        let owner=try ResumableGuidedModelState.restore(child,model:model,identity:identity,options:options.model,cacheSpecs:cacheSpecs,codecs:codecs)
++        guard owner.generatedInputs==d.guided.sampled+d.guided.forced, owner.promptCount==d.guided.promptCount else {
++            owner.close(); throw ResumableTokenError.invalid("guided model/output frontier")
++        }
++        return .init(model:owner,modelCheckpoint:child,grammar:grammar,state:d.guided,tracker:tracker,tokenizer:tokenizer)
++    }
++    public func capture() throws -> ResumableGuidedCheckpoint {
++        guard !isClosed else { throw ResumableTokenError.closed }
++        return try .init(document:.init(model:modelCheckpoint.data,guided:state))
++    }
++    public func advance() throws -> Batch? {
++        guard !isClosed else { throw ResumableTokenError.closed }
++        guard state.terminal==nil else { return nil }
++        do {
++            guard state.consumed<state.options.model.maximumTokens else { return try finish(.incomplete,token:nil,origin:nil,records:[]) }
++            guard let model, let grammar else { throw ResumableTokenError.invalid("missing guided owners") }
++            if state.consumed==state.grammar.accepts.count {
++                let token=try sample(model.settledLogits())
++                // Unknown alone cannot be a successful schema ending.
++                guard token != state.specification.unknownTokenID else { throw ResumableTokenError.unsupported("unknown guided ending") }
++                if state.options.whitespaceBias != nil { _=tracker.record(tokenID:token) }
++                try grammar.accept(token)
++                state.grammar=grammar.record
++                guard state.grammar.accepts.dropFirst(state.consumed).allSatisfy({ $0.origin == .ending || $0.token<state.options.model.logitWidth }) else {
++                    throw ResumableTokenError.unsupported("forced token outside model input range")
++                }
++            }
++            let entry=state.grammar.accepts[state.consumed]
++            state.consumed+=1
++            state.whitespaceCount=tracker.resumableState.count; state.whitespaceLatched=tracker.resumableState.latched
++            if entry.origin == .ending {
++                state.intercepted+=1
++                return try finish(.complete,token:entry.token,origin:.ending,records:[])
++            }
++            if entry.origin == .sampled { state.sampled+=1 } else { state.forced+=1 }
++            try model.consume(entry.token)
++            modelCheckpoint=try model.capture(); state.modelDigest=ResumableGuidedValues.digest(modelCheckpoint.data)
++            let records=try state.text.append(entry.token,tokenizer:tokenizer)
++            if state.consumed==state.options.model.maximumTokens {
++                return try finish(.incomplete,token:entry.token,origin:entry.origin,records:records)
++            }
++            return try batch(token:entry.token,origin:entry.origin,records:records)
++        } catch { close(); throw error }
++    }
++    private func sample(_ logits: MLXArray) throws -> Int {
++        let mask=state.grammar.mask, width=state.options.model.logitWidth, vocabulary=state.specification.vocabulary.count
++        guard !mask.terminated, mask.words.count==(vocabulary+31)/32 else { throw ResumableTokenError.invalid("guided sampling mask") }
++        var array=GuidedGenerationLoop.buildMaskArray(for:mask.result,vocabSize:vocabulary,logitDim:width)
++        if !mask.needsApply && width>vocabulary {
++            array=MLXArray((0..<width).map { $0<vocabulary ? Float(0) : -Float.infinity })
++        }
++        let values=logits.asArray(Float.self)
++        guard values.allSatisfy({ !$0.isNaN && $0 != .infinity }),
++            values.enumerated().contains(where:{ $0.element.isFinite && $0.offset<vocabulary && (!mask.needsApply || mask.allows($0.offset)) }) else {
++            throw ResumableTokenError.invalid("no finite grammar-allowed logits")
++        }
++        let bias=state.options.bias(at:state.consumed,mask:mask,whitespaceActive:tracker.isActive,eos:state.specification.eosTokenID)
++        let token=Int(GuidedGenerationLoop.applyMaskAndSample(logits:logits,maskArray:array,closingBias:bias))
++        guard token<vocabulary, !mask.needsApply || mask.allows(token) else { throw ResumableTokenError.invalid("guided mask exclusion") }
++        return token
++    }
++    public func cancel() throws -> Batch? {
++        guard !isClosed else { throw ResumableTokenError.closed }
++        guard state.terminal==nil else { return nil }
++        do { return try finish(.cancelled,token:nil,origin:nil,records:[]) }
++        catch { close(); throw error }
++    }
++    private func finish(_ reason: ResumableGuidedEnd, token: Int?, origin: ResumableGuidedOrigin?, records: [ResumableGuidedRecord]) throws -> Batch {
++        state.terminal=reason; model?.close(); model=nil; grammar=nil
++        var records=records
++        records.append(.terminal(.init(reason:reason,promptTokens:state.promptCount,sampledTokens:state.sampled,
++            forcedTokens:state.forced,interceptedEndings:state.intercepted,acceptedTokens:state.grammar.accepts.count,
++            pendingTokens:state.grammar.accepts.count-state.consumed,grammarTerminated:state.grammar.mask.terminated)))
++        return try batch(token:token,origin:origin,records:records)
++    }
++    private func batch(token: Int?, origin: ResumableGuidedOrigin?, records: [ResumableGuidedRecord]) throws -> Batch {
++        let checkpoint=try capture()
++        guard records.count<=2,
++            try ResumableGuidedValues.encoder().encode(state).count + ResumableGuidedValues.encoder().encode(records).count<=ResumableGuidedCheckpoint.maximumGuidanceBytes else {
++            throw ResumableTokenError.oversized
++        }
++        return .init(token:token,origin:origin,records:records,checkpoint:checkpoint)
++    }
++    /// Silent discard. Use cancel for a semantic terminal record; no model work here.
++    public func close() { isClosed=true; model?.close(); model=nil; grammar=nil }
++}
+diff --git a/Libraries/MLXGuidedGeneration/ResumableGuidedCheckpoint.swift b/Libraries/MLXGuidedGeneration/ResumableGuidedCheckpoint.swift
+new file mode 100644
+--- /dev/null
++++ b/Libraries/MLXGuidedGeneration/ResumableGuidedCheckpoint.swift
+@@ -0,0 +1,111 @@
++import Foundation
++import MLXLMCommon
++
++struct ResumableGuidedState: Codable {
++    var specification: ResumableGrammarSpecification
++    var options: ResumableGuidedOptions
++    var modelDigest: String
++    var promptCount: Int
++    var grammar: ResumableGrammarRecord
++    // Prefix of accepted IDs consumed by output (and, except EOS, by the model).
++    // The remaining accepted suffix consists exclusively of pending forced IDs.
++    var consumed: Int = 0
++    var sampled: Int = 0
++    var forced: Int = 0
++    var intercepted: Int = 0
++    var whitespaceCount: Int = 0
++    var whitespaceLatched: Bool = false
++    var text=ResumableGuidedTextState()
++    var terminal: ResumableGuidedEnd?
++
++    func validate(tokenizer: any Tokenizer) throws -> WhitespaceRunTracker {
++        try specification.validate(); try options.validate(vocabulary:specification.vocabulary.count)
++        let accepts=grammar.accepts
++        guard accepts.count<=65_536, (0...accepts.count).contains(consumed), consumed<=options.model.maximumTokens,
++            accepts.count-consumed<=4096, (1...65_536).contains(promptCount),
++            accepts.dropFirst(consumed).allSatisfy({ $0.origin == .forced }),
++            accepts.allSatisfy({ specification.vocabulary.indices.contains($0.token) }),
++            sampled>=0, forced>=0, (0...1).contains(intercepted) else {
++            throw ResumableTokenError.invalid("guided frontier/counters")
++        }
++        let prefix=accepts.prefix(consumed)
++        guard sampled==prefix.filter({ $0.origin == .sampled }).count,
++            forced==prefix.filter({ $0.origin == .forced }).count,
++            intercepted==prefix.filter({ $0.origin == .ending }).count,
++            sampled+forced+intercepted==consumed,
++            (intercepted==1)==grammar.mask.terminated else { throw ResumableTokenError.invalid("guided origin accounting") }
++        var tracker=WhitespaceRunTracker(threshold:options.whitespaceThreshold,whitespaceTokenIDs:Set(options.whitespaceTokenIDs))
++        if options.whitespaceBias != nil {
++            for entry in prefix where entry.origin != .forced { _=tracker.record(tokenID:entry.token) }
++        }
++        guard tracker.resumableState.count==whitespaceCount, tracker.resumableState.latched==whitespaceLatched else {
++            throw ResumableTokenError.invalid("guided whitespace latch")
++        }
++        switch terminal {
++        case nil:
++            guard !grammar.mask.terminated, consumed<options.model.maximumTokens || options.model.maximumTokens==0 else {
++                throw ResumableTokenError.invalid("active guided lifecycle")
++            }
++        case .complete:
++            guard grammar.mask.terminated, intercepted==1, consumed==accepts.count else { throw ResumableTokenError.invalid("guided completion") }
++        case .incomplete:
++            guard !grammar.mask.terminated, consumed==options.model.maximumTokens else { throw ResumableTokenError.invalid("guided incomplete ending") }
++        case .cancelled:
++            guard !grammar.mask.terminated else { throw ResumableTokenError.invalid("guided cancellation") }
++        }
++        try text.value.validate(tokenizer:tokenizer,generated:sampled+forced,vocabulary:specification.vocabulary.count)
++        // Derive the complete reachable value, including newline resets and
++        // nonlinear decode, from bounded consumed history. Discard private
++        // text; this does not publish records, increment usage or call a model.
++        var reachableText=ResumableGuidedTextValue()
++        for entry in prefix where entry.origin != .ending {
++            _=try reachableText.append(entry.token,tokenizer:tokenizer)
++        }
++        guard reachableText==text.value else {
++            throw ResumableTokenError.invalid("guided output history")
++        }
++        return tracker
++    }
++}
++
++struct ResumableGuidedDocument: Codable {
++    var version: Int = 1
++    var prerequisiteIdentity: String = ResumableGuidedCheckpoint.prerequisiteIdentity
++    var model: Data
++    var guided: ResumableGuidedState
++}
++
++public struct ResumableGuidedCheckpoint: Equatable, Sendable {
++    public static let maximumBytes=16*1024*1024
++    public static let maximumGuidanceBytes=1024*1024
++    public static let prerequisiteIdentity="S72:35a3be79e989c39ae568f97a70baf8bdb5b75f3161919803cc8a1530a0db63ab;S73:bd3fb02e7fab42887593512599de64ecb4d7c7c242d91359d37158d2a8227113"
++    public let data: Data
++    struct Envelope: Codable { let payload: Data; let sha256: String }
++    init(document: ResumableGuidedDocument) throws {
++        guard document.model.count<=ResumableGuidedModelCheckpoint.maximumBytes,
++            try ResumableGuidedValues.encoder().encode(document.guided).count<=Self.maximumGuidanceBytes else { throw ResumableTokenError.oversized }
++        let payload=try ResumableGuidedValues.encoder().encode(document)
++        guard payload.count<=Self.maximumBytes else { throw ResumableTokenError.oversized }
++        let encoded=try ResumableGuidedValues.encoder().encode(Envelope(payload:payload,sha256:ResumableGuidedValues.digest(payload)))
++        guard encoded.count<=Self.maximumBytes else { throw ResumableTokenError.oversized }
++        data=encoded
++    }
++    public init(data: Data) throws {
++        guard data.count<=Self.maximumBytes else { throw ResumableTokenError.oversized }
++        self.data=data; _=try document()
++    }
++    func document() throws -> ResumableGuidedDocument {
++        do {
++            let envelope=try JSONDecoder().decode(Envelope.self,from:data)
++            guard ResumableGuidedValues.digest(envelope.payload)==envelope.sha256 else { throw ResumableTokenError.invalid("guided checksum") }
++            struct Header: Decodable { let version: Int; let prerequisiteIdentity: String }
++            let header=try JSONDecoder().decode(Header.self,from:envelope.payload)
++            guard header.version==1, header.prerequisiteIdentity==Self.prerequisiteIdentity else { throw ResumableTokenError.incompatible }
++            let d=try JSONDecoder().decode(ResumableGuidedDocument.self,from:envelope.payload)
++            guard d.model.count<=ResumableGuidedModelCheckpoint.maximumBytes,
++                try ResumableGuidedValues.encoder().encode(d.guided).count<=Self.maximumGuidanceBytes else { throw ResumableTokenError.oversized }
++            return d
++        } catch let error as ResumableTokenError { throw error }
++        catch { throw ResumableTokenError.invalid("guided encoding") }
++    }
++}
+diff --git a/Libraries/MLXGuidedGeneration/ResumableGrammarState.swift b/Libraries/MLXGuidedGeneration/ResumableGrammarState.swift
+new file mode 100644
+--- /dev/null
++++ b/Libraries/MLXGuidedGeneration/ResumableGrammarState.swift
+@@ -0,0 +1,132 @@
++import Foundation
++import MLXLMCommon
++
++public enum ResumableGrammarVocabulary: String, Codable, Sendable {
++    case raw, byteFallback, byteLevel
++    var type: VocabType { switch self { case .raw: .raw; case .byteFallback: .byteFallback; case .byteLevel: .byteLevel } }
++}
++
++/// Exact immutable tokenizer/vocabulary and compiler inputs. The tokenizer owner
++/// attests bounded deterministic encode/decode, and encode IDs within this vocabulary.
++public struct ResumableGrammarSpecification: Codable, Sendable {
++    var kind: String = "json-schema"
++    public var source: String
++    public var vocabulary: [String]
++    public var vocabularyType: ResumableGrammarVocabulary
++    public var tokenizerIdentity: String
++    public var eosTokenID: Int
++    public var unknownTokenID: Int?
++    public var fastForward: Bool
++    var compiler: String = "xgrammar-v0.1.30-d476a48dcd8fa3b5afeddbe850e73bb3b1dcf505;single-accept-replay-v1"
++    public init(jsonSchema: String, vocabulary: [String], vocabularyType: ResumableGrammarVocabulary,
++                tokenizerIdentity: String, eosTokenID: Int, unknownTokenID: Int? = nil, fastForward: Bool = true) {
++        source=jsonSchema; self.vocabulary=vocabulary; self.vocabularyType=vocabularyType
++        self.tokenizerIdentity=tokenizerIdentity; self.eosTokenID=eosTokenID
++        self.unknownTokenID=unknownTokenID; self.fastForward=fastForward
++    }
++    @_spi(ResumableGuidedFixtures)
++    public static func literalFixture(_ grammar: String, vocabulary: [String], vocabularyType: ResumableGrammarVocabulary,
++                                      tokenizerIdentity: String, eosTokenID: Int, unknownTokenID: Int? = nil) -> Self {
++        var result=Self(jsonSchema:grammar,vocabulary:vocabulary,vocabularyType:vocabularyType,
++            tokenizerIdentity:tokenizerIdentity,eosTokenID:eosTokenID,unknownTokenID:unknownTokenID)
++        result.kind="literal-fixture"; return result
++    }
++    func validate() throws {
++        guard ["json-schema","literal-fixture"].contains(kind), !source.isEmpty, source.utf8.count<=65_536,
++            !source.utf8.contains(0), (1...4096).contains(vocabulary.count),
++            vocabulary.allSatisfy({ $0.utf8.count<=4096 && !$0.utf8.contains(0) }),
++            vocabulary.indices.contains(eosTokenID),
++            unknownTokenID.map({ vocabulary.indices.contains($0) && $0 != eosTokenID }) ?? true,
++            !tokenizerIdentity.isEmpty, tokenizerIdentity.utf8.count<=1024,
++            compiler=="xgrammar-v0.1.30-d476a48dcd8fa3b5afeddbe850e73bb3b1dcf505;single-accept-replay-v1" else {
++            throw ResumableTokenError.unsupported("guided grammar/tokenizer declaration")
++        }
++        guard try ResumableGuidedValues.encoder().encode(vocabulary).count<=256*1024 else { throw ResumableTokenError.oversized }
++    }
++    func makeConstraint(tokenizer: any Tokenizer) throws -> GrammarConstraint {
++        try validate()
++        let grammarTokenizer=try GrammarTokenizer(vocab:vocabulary,vocabType:vocabularyType.type,eosTokenId:Int32(eosTokenID))
++        if kind=="json-schema" {
++            return try .init(tokenizer:grammarTokenizer,jsonSchema:source,fastForward:fastForward,hostTokenizer:tokenizer)
++        }
++        return try .init(tokenizer:grammarTokenizer,grammar:source,fastForward:fastForward,hostTokenizer:tokenizer)
++    }
++}
++
++public enum ResumableGuidedOrigin: String, Codable, Sendable { case sampled, forced, ending }
++struct GuidedAcceptance: Codable, Equatable {
++    var token: Int
++    var origin: ResumableGuidedOrigin
++}
++struct GuidedMask: Codable, Equatable {
++    var words: [Int32]
++    var needsApply: Bool
++    var terminated: Bool
++    init(_ mask: MaskResult) { words=mask.mask; needsApply=mask.needsApply; terminated=mask.isTerminated }
++    var result: MaskResult { .init(mask:words,isTerminated:terminated,needsApply:needsApply) }
++    func allows(_ token: Int) -> Bool {
++        token>=0 && token/32<words.count && ((UInt32(bitPattern:words[token/32]) >> UInt32(token%32)) & 1)==1
++    }
++}
++struct ResumableGrammarRecord: Codable {
++    var accepts: [GuidedAcceptance] = []
++    var mask: GuidedMask
++}
++
++final class ResumableGrammarState {
++    let specification: ResumableGrammarSpecification
++    let constraint: GrammarConstraint
++    var record: ResumableGrammarRecord
++    init(specification: ResumableGrammarSpecification, tokenizer: any Tokenizer) throws {
++        self.specification=specification
++        constraint=try specification.makeConstraint(tokenizer:tokenizer)
++        record=try .init(mask:GuidedMask(constraint.computeMask()))
++    }
++    static func restore(_ record: ResumableGrammarRecord, specification: ResumableGrammarSpecification,
++                        tokenizer: any Tokenizer) throws -> ResumableGrammarState {
++        guard record.accepts.count<=65_536, record.mask.words.count==(specification.vocabulary.count+31)/32 else {
++            throw ResumableTokenError.oversized
++        }
++        let owner=try ResumableGrammarState(specification:specification,tokenizer:tokenizer)
++        var terminated=false
++        for (index,accept) in record.accepts.enumerated() {
++            guard !terminated, specification.vocabulary.indices.contains(accept.token),
++                accept.token != specification.unknownTokenID,
++                (accept.origin == .ending) == (accept.token == specification.eosTokenID),
++                accept.origin != .forced || (index>0 && specification.fastForward) else {
++                throw ResumableTokenError.invalid("guided acceptance history")
++            }
++            terminated=try owner.constraint.replayAcceptedToken(Int32(accept.token))
++        }
++        let mask=try owner.currentMask(terminated:terminated)
++        guard mask==record.mask else { throw ResumableTokenError.invalid("replayed grammar mask/termination") }
++        owner.record=record
++        return owner
++    }
++    // A terminated matcher has no next accept. Avoid asking xgrammar for a next mask.
++    private func currentMask(terminated: Bool) throws -> GuidedMask {
++        if terminated { return GuidedMask(.init(mask:[Int32](repeating:0,count:(specification.vocabulary.count+31)/32),isTerminated:true,needsApply:true)) }
++        return try GuidedMask(constraint.computeMask())
++    }
++    func accept(_ token: Int) throws {
++        guard specification.vocabulary.indices.contains(token), token != specification.unknownTokenID,
++            record.accepts.count<65_536, !record.mask.terminated, record.mask.allows(token) || !record.mask.needsApply else {
++            throw ResumableTokenError.invalid("guided selected token")
++        }
++        if token==specification.eosTokenID {
++            guard record.mask.allows(token) else { throw ResumableTokenError.invalid("premature guided stop") }
++            let terminated=try constraint.replayAcceptedToken(Int32(token))
++            guard terminated else { throw ResumableTokenError.invalid("stop did not terminate grammar") }
++            record.accepts.append(.init(token:token,origin:.ending))
++            record.mask=try currentMask(terminated:true)
++            return
++        }
++        let committed=try constraint.commitToken(Int32(token))
++        guard committed.tokens.count<=4096, record.accepts.count+1+committed.tokens.count<=65_536,
++            committed.tokens.allSatisfy({ specification.vocabulary.indices.contains(Int($0)) && Int($0) != specification.eosTokenID && Int($0) != specification.unknownTokenID }),
++            !committed.isTerminated else { throw ResumableTokenError.unsupported("forced suffix length/ending") }
++        record.accepts.append(.init(token:token,origin:.sampled))
++        record.accepts += committed.tokens.map { .init(token:Int($0),origin:.forced) }
++        record.mask=try currentMask(terminated:false)
++    }
++}
+diff --git a/Libraries/MLXGuidedGeneration/ResumableGuidedTextState.swift b/Libraries/MLXGuidedGeneration/ResumableGuidedTextState.swift
+new file mode 100644
+--- /dev/null
++++ b/Libraries/MLXGuidedGeneration/ResumableGuidedTextState.swift
+@@ -0,0 +1,26 @@
++import Foundation
++import MLXLMCommon
++
++public enum ResumableGuidedEnd: String, Codable, Sendable { case complete, incomplete, cancelled }
++public struct ResumableGuidedCompletion: Codable, Equatable, Sendable {
++    public let reason: ResumableGuidedEnd
++    public let promptTokens: Int
++    public let sampledTokens: Int
++    public let forcedTokens: Int
++    public let interceptedEndings: Int
++    public let acceptedTokens: Int
++    public let pendingTokens: Int
++    public let grammarTerminated: Bool
++}
++public enum ResumableGuidedRecord: Codable, Equatable, Sendable {
++    case text(Data)
++    case terminal(ResumableGuidedCompletion)
++}
++
++struct ResumableGuidedTextState: Codable {
++    var value=ResumableGuidedTextValue()
++    mutating func append(_ token: Int, tokenizer: any Tokenizer) throws -> [ResumableGuidedRecord] {
++        if let bytes=try value.append(token,tokenizer:tokenizer), !bytes.isEmpty { return [.text(bytes)] }
++        return []
++    }
++}
+diff --git a/Libraries/MLXGuidedGeneration/XGrammarBridge.swift b/Libraries/MLXGuidedGeneration/XGrammarBridge.swift
+--- a/Libraries/MLXGuidedGeneration/XGrammarBridge.swift
++++ b/Libraries/MLXGuidedGeneration/XGrammarBridge.swift
+@@ -580,6 +580,18 @@
+         return CommitResult(tokens: ffTokens, isTerminated: terminated)
+     }
+
++    /// Candidate-only replay: one successful accept, with no fast-forward query or
++    /// extra accepts. Normal commitToken behavior is unchanged after replay.
++    func replayAcceptedToken(_ tokenId: Int32) throws -> Bool {
++        lock.lock()
++        defer { lock.unlock() }
++        let status = xg_matcher_accept_token(matcher, tokenId)
++        guard status == XG_OK else {
++            throw GrammarError.commitFailed(Self.captureShimError(status: status, fallback: "checkpoint accept replay"))
++        }
++        return isMatcherTerminatedLocked()
++    }
++
+     /// Query xgrammar's current jump-forward string and feed it back
+     /// through the matcher token-by-token. Caller must already hold
+     /// `lock`. Returns the accepted token ids in the order they were
+diff --git a/Libraries/MLXGuidedGeneration/WhitespaceRunTracker.swift b/Libraries/MLXGuidedGeneration/WhitespaceRunTracker.swift
+--- a/Libraries/MLXGuidedGeneration/WhitespaceRunTracker.swift
++++ b/Libraries/MLXGuidedGeneration/WhitespaceRunTracker.swift
+@@ -33,6 +33,9 @@
+     /// for the remainder of the generation run (latch behavior).
+     public var isActive: Bool { activated || consecutiveCount >= threshold }
+
++    // Candidate value access; replay validation belongs to the new guided checkpoint.
++    var resumableState: (count: Int, latched: Bool) { (consecutiveCount, activated) }
++
+     /// Records a sampled token and returns whether suppression should be active
+     /// for the next sampling step.
+     public mutating func record(tokenID: Int) -> Bool {
+diff --git a/Tests/MLXLMTests/ResumableGuidedModelStateTests.swift b/Tests/MLXLMTests/ResumableGuidedModelStateTests.swift
+new file mode 100644
+--- /dev/null
++++ b/Tests/MLXLMTests/ResumableGuidedModelStateTests.swift
+@@ -0,0 +1,35 @@
++import Foundation
++import XCTest
++@testable import MLXLMCommon
++
++final class ResumableGuidedModelStateTests: XCTestCase {
++    func testSettledLogitsTypedStateAndNewHelperRestore() throws {
++        let setup=try GuidedSetup(rotating:true)
++        let owner=try ResumableGuidedModelState.prepare(model:setup.model,tokens:setup.prompt,identity:setup.identity,
++            options:setup.options.model,cacheSpecs:setup.specs,codecs:guidedCodecs())
++        try owner.consume(35); try owner.consume(229)
++        let saved=try owner.capture(); let document=try saved.document()
++        XCTAssertEqual(document.generatedInputs,2); XCTAssertEqual(document.logits?.shape,[1,1,258])
++        let fresh=GuidedFixtureModel(program:setup.model.program)
++        let restored=try ResumableGuidedModelState.restore(.init(data:saved.data),model:fresh,identity:setup.identity,
++            options:setup.options.model,cacheSpecs:setup.specs,codecs:guidedCodecs())
++        XCTAssertTrue(fresh.inputs.isEmpty)
++        XCTAssertEqual(try restored.capture(),saved)
++        try owner.consume(185); try restored.consume(185)
++        XCTAssertEqual(try restored.capture(),try owner.capture())
++        XCTAssertEqual(saved.data,try ResumableGuidedModelCheckpoint(document:document).data)
++        restored.close(); owner.close()
++    }
++    func testModelCounterRefusalZeroAndComponentBound() throws {
++        let setup=try GuidedSetup()
++        let owner=try ResumableGuidedModelState.prepare(model:setup.model,tokens:setup.prompt,identity:setup.identity,
++            options:setup.options.model,cacheSpecs:setup.specs,codecs:guidedCodecs())
++        var d=try owner.capture().document(); d.generatedInputs+=1
++        let fresh=GuidedFixtureModel(program:setup.model.program)
++        XCTAssertThrowsError(try ResumableGuidedModelState.restore(.init(document:d),model:fresh,identity:setup.identity,
++            options:setup.options.model,cacheSpecs:setup.specs,codecs:guidedCodecs()))
++        XCTAssertTrue(fresh.inputs.isEmpty)
++        XCTAssertThrowsError(try ResumableGuidedModelCheckpoint(data:Data(count:8*1024*1024+1)))
++        owner.close(); XCTAssertThrowsError(try owner.consume(1))
++    }
++}
+diff --git a/Tests/MLXGuidedGenerationTests/ResumableGuidedGenerationTests.swift b/Tests/MLXGuidedGenerationTests/ResumableGuidedGenerationTests.swift
+new file mode 100644
+--- /dev/null
++++ b/Tests/MLXGuidedGenerationTests/ResumableGuidedGenerationTests.swift
+@@ -0,0 +1,228 @@
++import Foundation
++import XCTest
++import MLX
++import MLXNN
++@testable import MLXLMCommon
++@_spi(ResumableGuidedFixtures) @testable import MLXGuidedGeneration
++
++struct S74ByteTokenizer: Tokenizer {
++    static let vocab = ["<eos>"] + (0...255).map { String(format: "<0x%02X>", $0) } + ["<unk>"]
++    func encode(text: String, addSpecialTokens: Bool) -> [Int] { text.utf8.map { Int($0) + 1 } }
++    func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String {
++        String(decoding: tokenIds.filter { (1...256).contains($0) }.map { UInt8($0 - 1) }, as: UTF8.self)
++    }
++    func convertTokenToId(_ token: String) -> Int? { Self.vocab.firstIndex(of: token) }
++    func convertIdToToken(_ id: Int) -> String? { Self.vocab.indices.contains(id) ? Self.vocab[id] : nil }
++    var bosToken: String? { nil }
++    var eosToken: String? { "<eos>" }
++    var unknownToken: String? { "<unk>" }
++    func applyChatTemplate(messages: [[String: any Sendable]], tools: [[String: any Sendable]]?,
++                           additionalContext: [String: any Sendable]?) throws -> [Int] { [] }
++}
++
++struct GuidedFixtureState { var position: Int; var running: MLXArray }
++let guidedFixtureKey=LMOutput.Key<GuidedFixtureState>("s74.position-running")
++func guidedCodecs() throws -> ResumableStateCodecs {
++    var codecs=ResumableStateCodecs()
++    try codecs.register(guidedFixtureKey,type:"native-recurrence-v1",schema:1,encode:{
++        .init(metadata:try JSONEncoder().encode($0.position),tensors:[try .init(capturing:$0.running)])
++    },decode:{
++        let position=try JSONDecoder().decode(Int.self,from:$0.metadata)
++        guard (0...131_072).contains(position), $0.tensors.count==1,
++            $0.tensors[0].shape==[2], $0.tensors[0].dtype=="float32" else { throw ResumableTokenError.invalid("fixture state") }
++        return try .init(position:position,running:$0.tensors[0].restored())
++    })
++    return codecs
++}
++final class GuidedFixtureModel: Module, LanguageModel {
++    let program: [Int]
++    let width: Int
++    let preferPadding: Bool
++    var inputs: [[Int]]=[]
++    var priorOffsets: [Int]=[]
++    var positions: [Int]=[]
++    init(program: [Int], width: Int = 258, preferPadding: Bool = false) {
++        self.program=program; self.width=width; self.preferPadding=preferPadding; super.init()
++    }
++    func newCache(parameters: GenerateParameters?) -> [KVCache] { [KVCacheSimple()] }
++    func prepare(_ input: LMInput, cache: [KVCache], state: LMOutput.State?, windowSize: Int?) throws -> PrepareResult {
++        throw ResumableTokenError.unsupported("generic prepare must not be called")
++    }
++    func callAsFunction(_ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?) -> LMOutput {
++        let tokens=input.tokens.asArray(Int.self)
++        inputs.append(tokens); priorOffsets.append(cache![0].offset)
++        let previous=state?[guidedFixtureKey]
++        var running=previous?.running ?? MLXArray([Float(0),1])
++        for token in tokens { running=running*0.5+Float(token) }
++        let position=(previous?.position ?? 0)+tokens.count; positions.append(position)
++        let values=broadcast(input.tokens.asType(.float32).reshaped(1,1,-1,1),to:[1,1,tokens.count,2])
++        let pair=cache![0].update(keys:values,values:values*0.25)
++        let shift=pair.0.sum()*0.00001+running.sum()*0.0001
++        let target=program[min(max(0,position-5),program.count-1)]
++        let ids=MLXArray.arange(width)
++        var row=MLX.where(ids .== target, MLXArray(Float(100))+shift, MLXArray(Float(-100))+sin(ids.asType(.float32)))
++        if preferPadding && width>258 { row=MLX.where(ids .>= 258, MLXArray(Float(1000)), row) }
++        var next=LMOutput.State(); next[guidedFixtureKey] = .init(position:position,running:running)
++        return .init(logits:broadcast(row.reshaped(1,1,width),to:[1,tokens.count,width]),state:next)
++    }
++}
++struct GuidedSetup {
++    let model: GuidedFixtureModel
++    let identity: ResumableTokenIdentity
++    var specification: ResumableGrammarSpecification
++    var options: ResumableGuidedOptions
++    var specs: [ResumableCacheSpec]
++    let prompt=[1,2,3,4,5]
++    init(literal: Bool = false, maximum: Int = 12, rotating: Bool = false, width: Int = 258,
++         program: [Int]? = nil, preferPadding: Bool = false) throws {
++        let program=program ?? (S74ByteTokenizer().encode(text:"\"中abc\"")+[0])
++        model=GuidedFixtureModel(program:program,width:width,preferPadding:preferPadding)
++        identity=try .init(model:"s74-native-fixture",configuration:"v1",weights:"fixed-analytic",
++            input:ResumableTokenIdentity.inputDigest([1,2,3,4,5]),backend:"s74-native",dependency:"S72+S73")
++        specification = literal ? .literalFixture("root ::= \"\\\"中abc\\\"\"",vocabulary:S74ByteTokenizer.vocab,vocabularyType:.byteFallback,
++            tokenizerIdentity:"byte-fixture-v1",eosTokenID:0,unknownTokenID:257)
++            : .init(jsonSchema:#"{"type":"string","enum":["中abc"]}"#,vocabulary:S74ByteTokenizer.vocab,vocabularyType:.byteFallback,
++                tokenizerIdentity:"byte-fixture-v1",eosTokenID:0,unknownTokenID:257)
++        options = .init(model:.init(logitWidth:width,maximumTokens:maximum,prefillStepSize:2),completionReserve:0)
++        specs=[.init(kind:rotating ? .rotating : .simple,heads:1,keyDimension:2,valueDimension:2,maxSize:rotating ? 4 : 0,keep:rotating ? 1 : 0)]
++    }
++    func prepare() throws -> ResumableGuidedGeneration {
++        try .prepare(model:model,tokens:prompt,identity:identity,cacheSpecs:specs,codecs:guidedCodecs(),tokenizer:S74ByteTokenizer(),specification:specification,options:options)
++    }
++    func restore(_ checkpoint: ResumableGuidedCheckpoint, model: GuidedFixtureModel? = nil) throws -> ResumableGuidedGeneration {
++        try .restore(checkpoint,model:model ?? self.model,identity:identity,cacheSpecs:specs,codecs:guidedCodecs(),tokenizer:S74ByteTokenizer(),specification:specification,options:options)
++    }
++}
++struct GuidedObserved: Equatable {
++    let token: Int?
++    let origin: ResumableGuidedOrigin?
++    let records: [ResumableGuidedRecord]
++}
++func guidedDrain(_ driver: ResumableGuidedGeneration) throws -> [GuidedObserved] {
++    var result:[GuidedObserved]=[]
++    while let batch=try driver.advance() { result.append(.init(token:batch.token,origin:batch.origin,records:batch.records)) }
++    return result
++}
++func guidedBytes(_ batches: [GuidedObserved]) -> [Data] {
++    batches.flatMap(\.records).compactMap { if case .text(let bytes)=$0 { return bytes }; return nil }
++}
++func assertRecurrence(_ model: GuidedFixtureModel, generated: [Int], file: StaticString = #filePath, line: UInt = #line) {
++    let expected=[[1,2],[3,4],[5]]+generated.map { [$0] }
++    XCTAssertEqual(model.inputs,expected,file:file,line:line)
++    var count=0
++    for (tokens,offset) in zip(expected,model.priorOffsets) {
++        XCTAssertEqual(offset,count,file:file,line:line); count+=tokens.count
++    }
++    XCTAssertEqual(model.positions.last,count,file:file,line:line)
++}
++
++final class ResumableGuidedGenerationTests: XCTestCase {
++    func testAllBoundariesAndIndependentSingleTokenRecurrence() throws {
++        for literal in [false,true] {
++            let setup=try GuidedSetup(literal:literal,rotating:literal)
++            let driver=try setup.prepare(); let c0=try driver.capture()
++            let full=try guidedDrain(driver)
++            XCTAssertEqual(guidedBytes(full),["\"","中","a","b","c","\""].map { Data($0.utf8) })
++            let generated=full.filter { $0.origin != .ending }.compactMap(\.token)
++            XCTAssertEqual(generated,S74ByteTokenizer().encode(text:"\"中abc\""))
++            assertRecurrence(setup.model,generated:generated)
++            let child=try ResumableGuidedModelCheckpoint(data:driver.capture().document().model).document()
++            let actual=try child.state!.first!.payload.tensors[0].restored().asArray(Float.self)
++            var expected:[Float]=[0,1]
++            for token in setup.prompt+generated { expected=expected.map { $0*0.5+Float(token) } }
++            XCTAssertEqual(actual,expected)
++            for cut in 0...9 {
++                let model=GuidedFixtureModel(program:setup.model.program)
++                let producer=try setup.restore(c0,model:model)
++                var prefix:[GuidedObserved]=[]
++                for _ in 0..<cut { if let b=try producer.advance() { prefix.append(.init(token:b.token,origin:b.origin,records:b.records)) } }
++                let saved=try producer.capture(); let bytes=saved.data
++                if literal && cut==2 { XCTAssertGreaterThan(producer.pendingForcedTokens.count,0) }
++                let suffix=try guidedDrain(producer)
++                let fresh=GuidedFixtureModel(program:setup.model.program)
++                let resumed=try setup.restore(.init(data:saved.data),model:fresh)
++                XCTAssertEqual(fresh.inputs,[])
++                XCTAssertEqual(try guidedDrain(resumed),suffix)
++                XCTAssertEqual(prefix+suffix,full); XCTAssertEqual(saved.data,bytes)
++                XCTAssertEqual(try resumed.capture(),try producer.capture())
++                XCTAssertNil(try resumed.advance()); XCTAssertNil(try resumed.cancel())
++                resumed.close(); producer.close()
++            }
++            driver.close()
++        }
++    }
++    func testBudgetPendingSuffixFinalStopZeroCancelAndClose() throws {
++        for maximum in [0,3,8,9] {
++            let setup=try GuidedSetup(literal:true,maximum:maximum)
++            let driver=try setup.prepare()
++            if maximum==0 { XCTAssertTrue(setup.model.inputs.isEmpty) }
++            _=try guidedDrain(driver)
++            XCTAssertEqual(driver.terminalReason,maximum==9 ? .complete : .incomplete)
++            if maximum==3 { XCTAssertGreaterThan(driver.pendingForcedTokens.count,0) }
++            if maximum==8 {
++                let state=try driver.capture().document().guided
++                XCTAssertTrue(state.grammar.mask.allows(0)); XCTAssertFalse(state.grammar.mask.terminated)
++            }
++            let fresh=GuidedFixtureModel(program:setup.model.program)
++            let restored=try setup.restore(driver.capture(),model:fresh)
++            XCTAssertNil(try restored.advance()); XCTAssertNil(try restored.cancel()); XCTAssertTrue(fresh.inputs.isEmpty)
++            restored.close(); driver.close()
++        }
++        let setup=try GuidedSetup(literal:true); let driver=try setup.prepare()
++        _=try driver.advance(); let calls=setup.model.inputs.count
++        XCTAssertFalse(try XCTUnwrap(driver.cancel()).records.isEmpty)
++        XCTAssertEqual(setup.model.inputs.count,calls); XCTAssertNil(try driver.cancel())
++        driver.close(); driver.close(); XCTAssertThrowsError(try driver.capture()); XCTAssertThrowsError(try driver.advance())
++    }
++    func testVocabularyWidthAndPrematureUnknownRefusal() throws {
++        for width in [256,260] {
++            let setup=try GuidedSetup(width:width,preferPadding:true)
++            let driver=try setup.prepare(); _=try guidedDrain(driver)
++            XCTAssertEqual(driver.terminalReason,.complete); driver.close()
++        }
++        var setup=try GuidedSetup(); setup.specification.unknownTokenID=35
++        let driver=try setup.prepare(); let count=setup.model.inputs.count
++        XCTAssertThrowsError(try driver.advance()); XCTAssertTrue(driver.isClosed)
++        XCTAssertEqual(setup.model.inputs.count,count)
++    }
++    func testWhitespaceLatchAndZonePolicy() throws {
++        var setup=try GuidedSetup(program:[92,33,33,33]+S74ByteTokenizer().encode(text:"\"中abc\"")+[94,0])
++        setup.specification.source = #"{"type":"array","items":{"type":"string","enum":["中abc"]},"minItems":1,"maxItems":1}"#
++        setup.specification.fastForward=false
++        var ws=[Float](repeating:0,count:258); ws[33] = -200
++        setup.options.whitespaceBias=ws; setup.options.whitespaceTokenIDs=[33]
++        let driver=try setup.prepare()
++        _=try driver.advance() // opening bracket; the schema permits whitespace inside the array
++        for index in 1...3 {
++            _=try driver.advance()
++            let state=try driver.capture().document().guided
++            XCTAssertEqual(state.whitespaceCount,index); XCTAssertEqual(state.whitespaceLatched,index==3)
++        }
++        _=try driver.advance()
++        let state=try driver.capture().document().guided
++        XCTAssertTrue(state.whitespaceLatched); XCTAssertEqual(state.whitespaceCount,0)
++        let fresh=GuidedFixtureModel(program:setup.model.program)
++        let restored=try setup.restore(driver.capture(),model:fresh)
++        XCTAssertTrue(try restored.capture().document().guided.whitespaceLatched); XCTAssertTrue(fresh.inputs.isEmpty)
++        restored.close(); driver.close()
++        var options=setup.options
++        options.model.maximumTokens=10; options.completionReserve=4; options.hardReserve=2
++        var closing=[Float](repeating:0,count:258); closing[0]=200; closing[35]=100
++        options.closingBias=closing
++        let mask=GuidedMask(.init(mask:[Int32](repeating:-1,count:9),isTerminated:false,needsApply:true))
++        XCTAssertEqual(options.zone(at:5),.normal); XCTAssertEqual(options.zone(at:6),.soft); XCTAssertEqual(options.zone(at:8),.hard)
++        XCTAssertNil(options.bias(at:5,mask:mask,whitespaceActive:false,eos:0))
++        XCTAssertEqual(options.bias(at:6,mask:mask,whitespaceActive:false,eos:0)!.asArray(Float.self)[0],200)
++        let hard=options.bias(at:8,mask:mask,whitespaceActive:true,eos:0)!.asArray(Float.self)
++        XCTAssertEqual(hard[0],-10_000); XCTAssertEqual(hard[35],0); XCTAssertEqual(hard[33],-10_200)
++        var literal=try GuidedSetup(literal:true)
++        literal.specification.source="root ::= \"\\\"   abc\\\"\""
++        literal.options.whitespaceBias=ws; literal.options.whitespaceTokenIDs=[33]
++        let forced=try literal.prepare()
++        _=try forced.advance()
++        XCTAssertEqual(try forced.advance()?.origin,.forced)
++        XCTAssertEqual(try forced.capture().document().guided.whitespaceCount,0)
++        XCTAssertFalse(try forced.capture().document().guided.whitespaceLatched)
++        forced.close()
++    }
++}
+diff --git a/Tests/MLXGuidedGenerationTests/ResumableGuidedCheckpointTests.swift b/Tests/MLXGuidedGenerationTests/ResumableGuidedCheckpointTests.swift
+new file mode 100644
+--- /dev/null
++++ b/Tests/MLXGuidedGenerationTests/ResumableGuidedCheckpointTests.swift
+@@ -0,0 +1,95 @@
++import Foundation
++import XCTest
++import MLXLMCommon
++@testable import MLXGuidedGeneration
++
++final class ResumableGuidedCheckpointTests: XCTestCase {
++    func testConsumedHistoryRejectsUnreachableOutputWithoutModelWork() throws {
++        for literal in [false,true] {
++            let setup=try GuidedSetup(literal:literal)
++            let live=try setup.prepare()
++            for _ in 0..<3 { _=try live.advance() }
++            let saved=try live.capture(); let document=try saved.document()
++            XCTAssertEqual(document.guided.grammar.accepts.prefix(3).map(\.token),[35,229,185])
++            XCTAssertEqual(document.guided.text.value.tokens,[35,229,185])
++            XCTAssertEqual(document.guided.text.value.emitted,Data("\"".utf8))
++            XCTAssertEqual(document.guided.text.value.emittedTokenCount,1)
++            let calls=setup.model.inputs.count
++            // Exact reported cut-3 value, a longer suffix, and the complete
++            // segment with an impossible emitted position all pass the old
++            // internal text check and last-token check. None is reachable.
++            for tokens in [[185],[229,185],[35,229,185]] {
++                var altered=document
++                altered.guided.text.value.tokens=tokens
++                altered.guided.text.value.emitted=Data()
++                altered.guided.text.value.emittedTokenCount=0
++                try altered.guided.text.value.validate(tokenizer:S74ByteTokenizer(),generated:3,vocabulary:258)
++                let malformed=try ResumableGuidedCheckpoint(document:altered)
++                let fresh=GuidedFixtureModel(program:setup.model.program)
++                XCTAssertThrowsError(try setup.restore(malformed,model:fresh))
++                XCTAssertTrue(fresh.inputs.isEmpty)
++                XCTAssertEqual(try live.capture(),saved)
++                XCTAssertEqual(setup.model.inputs.count,calls)
++            }
++            let independent=try setup.restore(saved,model:GuidedFixtureModel(program:setup.model.program))
++            XCTAssertEqual(try guidedDrain(independent),try guidedDrain(live))
++            XCTAssertEqual(live.terminalReason,.complete)
++            independent.close(); live.close()
++        }
++    }
++    func testRefusalAndIndependentLiveOperation() throws {
++        let setup=try GuidedSetup(literal:true)
++        let live=try setup.prepare(); _=try live.advance(); _=try live.advance()
++        let saved=try live.capture(); let d=try saved.document(); let calls=setup.model.inputs.count
++        let changes: [(inout ResumableGuidedDocument)->Void]=[
++            { $0.guided.consumed+=1 }, { $0.guided.sampled+=1 }, { $0.guided.forced+=1 },
++            { $0.guided.promptCount+=1 }, { $0.guided.whitespaceLatched=true },
++            { $0.guided.terminal = .complete }, { $0.guided.terminal = .incomplete },
++            { $0.guided.grammar.accepts[$0.guided.consumed].origin = .sampled },
++            { $0.guided.grammar.accepts[0].token=0 }, { $0.guided.text.value.emitted=Data("wrong".utf8) },
++            { $0.guided.specification.tokenizerIdentity="changed" }, { $0.guided.options.sampling="stochastic" },
++            { $0.guided.options.hardReserve+=1 }, { $0.guided.modelDigest="wrong" },
++        ]
++        for change in changes {
++            var altered=d; change(&altered)
++            let fresh=GuidedFixtureModel(program:setup.model.program)
++            XCTAssertThrowsError(try setup.restore(.init(document:altered),model:fresh))
++            XCTAssertTrue(fresh.inputs.isEmpty); XCTAssertEqual(try live.capture(),saved)
++        }
++        XCTAssertEqual(setup.model.inputs.count,calls)
++        let independent=try setup.restore(saved,model:GuidedFixtureModel(program:setup.model.program))
++        XCTAssertEqual(try guidedDrain(independent),try guidedDrain(live))
++        independent.close(); live.close()
++    }
++    func testEncodingSchemaCorruptionAndSizeBounds() throws {
++        let setup=try GuidedSetup(); let live=try setup.prepare(); let saved=try live.capture()
++        var document=try saved.document(); document.version=2
++        XCTAssertThrowsError(try ResumableGuidedCheckpoint(data:ResumableGuidedCheckpoint(document:document).data))
++        document=try saved.document(); document.prerequisiteIdentity="old"
++        XCTAssertThrowsError(try ResumableGuidedCheckpoint(data:ResumableGuidedCheckpoint(document:document).data))
++        XCTAssertThrowsError(try ResumableGuidedCheckpoint(data:saved.data.dropLast()))
++        var corrupt=saved.data; corrupt[corrupt.count/2]^=1
++        XCTAssertThrowsError(try ResumableGuidedCheckpoint(data:corrupt))
++        XCTAssertThrowsError(try ResumableGuidedCheckpoint(data:Data(count:ResumableGuidedCheckpoint.maximumBytes+1)))
++        document=try saved.document(); document.model=Data(count:8*1024*1024+1)
++        XCTAssertThrowsError(try ResumableGuidedCheckpoint(document:document))
++        document=try saved.document(); document.guided.text.value.emitted=Data(count:1024*1024)
++        XCTAssertThrowsError(try ResumableGuidedCheckpoint(document:document))
++        live.close()
++    }
++    func testModelJoinMismatchAndBoundedDeclarations() throws {
++        let setup=try GuidedSetup(); let live=try setup.prepare(); let c0=try live.capture()
++        _=try live.advance(); var later=try live.capture().document()
++        later.model=try c0.document().model; later.guided.modelDigest=ResumableGuidedValues.digest(later.model)
++        let fresh=GuidedFixtureModel(program:setup.model.program)
++        XCTAssertThrowsError(try setup.restore(.init(document:later),model:fresh)); XCTAssertTrue(fresh.inputs.isEmpty)
++        var invalid=setup
++        invalid.specification.source=String(repeating:"x",count:65_537)
++        XCTAssertThrowsError(try invalid.prepare())
++        invalid=setup; invalid.specification.vocabulary=Array(repeating:"x",count:4097)
++        XCTAssertThrowsError(try invalid.prepare())
++        invalid=setup; invalid.options.closingBias=[Float.infinity]
++        XCTAssertThrowsError(try invalid.prepare())
++        live.close()
++    }
++}
+diff --git a/Tests/MLXGuidedGenerationTests/ResumableGrammarStateTests.swift b/Tests/MLXGuidedGenerationTests/ResumableGrammarStateTests.swift
+new file mode 100644
+--- /dev/null
++++ b/Tests/MLXGuidedGenerationTests/ResumableGrammarStateTests.swift
+@@ -0,0 +1,56 @@
++import Foundation
++import XCTest
++import MLXLMCommon
++@testable import MLXGuidedGeneration
++
++final class ResumableGrammarStateTests: XCTestCase {
++    func testNativeJSONAndLiteralForcedReplayAtAllFrontiers() throws {
++        for literal in [false,true] {
++            let setup=try GuidedSetup(literal:literal)
++            let owner=try ResumableGrammarState(specification:setup.specification,tokenizer:S74ByteTokenizer())
++            let c0=owner.record
++            XCTAssertFalse(c0.mask.allows(0))
++            XCTAssertThrowsError(try owner.accept(0))
++            let restoredZero=try ResumableGrammarState.restore(c0,specification:setup.specification,tokenizer:S74ByteTokenizer())
++            XCTAssertEqual(restoredZero.record.mask,c0.mask)
++            try owner.accept(35)
++            if literal {
++                XCTAssertEqual(owner.record.accepts.dropFirst().map(\.token),S74ByteTokenizer().encode(text:"中abc"))
++                XCTAssertEqual(owner.record.accepts.count,7)
++            }
++            let restored=try ResumableGrammarState.restore(owner.record,specification:setup.specification,tokenizer:S74ByteTokenizer())
++            XCTAssertEqual(restored.record.accepts,owner.record.accepts)
++            let expected=S74ByteTokenizer().encode(text:"\"中abc\"")
++            while owner.record.accepts.count<expected.count {
++                let token=expected[owner.record.accepts.count]
++                try owner.accept(token); try restored.accept(token)
++                XCTAssertEqual(restored.record.mask,owner.record.mask)
++                XCTAssertEqual(restored.record.accepts,owner.record.accepts)
++            }
++            XCTAssertTrue(owner.record.mask.allows(0)); XCTAssertFalse(owner.record.mask.terminated)
++            try owner.accept(0); try restored.accept(0)
++            XCTAssertTrue(owner.record.mask.terminated)
++            XCTAssertEqual(restored.record.accepts,owner.record.accepts)
++            let terminal=try ResumableGrammarState.restore(owner.record,specification:setup.specification,tokenizer:S74ByteTokenizer())
++            XCTAssertTrue(terminal.record.mask.terminated); XCTAssertThrowsError(try terminal.accept(0))
++        }
++    }
++    func testInvalidReorderedAndIncompatibleMatcherStateRefuses() throws {
++        let setup=try GuidedSetup(literal:true)
++        let owner=try ResumableGrammarState(specification:setup.specification,tokenizer:S74ByteTokenizer())
++        try owner.accept(35)
++        for change in [
++            { (r: inout ResumableGrammarRecord) in r.accepts.swapAt(0,1) },
++            { (r: inout ResumableGrammarRecord) in r.accepts[0].token=Int.max },
++            { (r: inout ResumableGrammarRecord) in r.accepts[0].origin = .forced },
++            { (r: inout ResumableGrammarRecord) in r.mask.terminated=true },
++            { (r: inout ResumableGrammarRecord) in r.mask.needsApply.toggle() },
++        ] {
++            var record=owner.record; change(&record)
++            XCTAssertThrowsError(try ResumableGrammarState.restore(record,specification:setup.specification,tokenizer:S74ByteTokenizer()))
++        }
++        var different=setup.specification; different.source="root ::= \"x\""
++        XCTAssertThrowsError(try ResumableGrammarState.restore(owner.record,specification:different,tokenizer:S74ByteTokenizer()))
++        XCTAssertEqual(owner.record.accepts.count,7)
++    }
++}
+diff --git a/Tests/MLXGuidedGenerationTests/ResumableGuidedTextStateTests.swift b/Tests/MLXGuidedGenerationTests/ResumableGuidedTextStateTests.swift
+new file mode 100644
+--- /dev/null
++++ b/Tests/MLXGuidedGenerationTests/ResumableGuidedTextStateTests.swift
+@@ -0,0 +1,76 @@
++import Foundation
++import XCTest
++import MLXLMCommon
++@testable import MLXGuidedGeneration
++
++struct NonlinearGuidedTokenizer: Tokenizer {
++    let huge: Bool
++    func encode(text:String,addSpecialTokens:Bool)->[Int] { S74ByteTokenizer().encode(text:text) }
++    func decode(tokenIds:[Int],skipSpecialTokens:Bool)->String {
++        if huge { return String(repeating:"x",count:256*1024+1) }
++        return S74ByteTokenizer().decode(tokenIds:tokenIds).replacingOccurrences(of:"  ,",with:" ,")
++    }
++    func convertTokenToId(_ token:String)->Int? { S74ByteTokenizer().convertTokenToId(token) }
++    func convertIdToToken(_ id:Int)->String? { S74ByteTokenizer().convertIdToToken(id) }
++    var bosToken:String? { nil }; var eosToken:String? { "<eos>" }; var unknownToken:String? { "<unk>" }
++    func applyChatTemplate(messages:[[String:any Sendable]],tools:[[String:any Sendable]]?,additionalContext:[String:any Sendable]?) throws->[Int] { [] }
++}
++final class ResumableGuidedTextStateTests: XCTestCase {
++    func testGuidedRestoreAfterNewlineResetAndNonlinearDecode() throws {
++        let tokenizer=NonlinearGuidedTokenizer(huge:false)
++        let program=tokenizer.encode(text:"[\n0  ,1]")+[0]
++        for cut in [2,6] {
++            var setup=try GuidedSetup(program:program)
++            setup.specification.source = #"{"type":"array","items":{"type":"integer"},"minItems":2,"maxItems":2}"#
++            setup.specification.tokenizerIdentity="nonlinear-byte-v1"
++            setup.specification.fastForward=false
++            let live=try ResumableGuidedGeneration.prepare(model:setup.model,tokens:setup.prompt,identity:setup.identity,
++                cacheSpecs:setup.specs,codecs:guidedCodecs(),tokenizer:tokenizer,specification:setup.specification,options:setup.options)
++            var prefix:[GuidedObserved]=[]
++            for _ in 0..<cut {
++                let batch=try XCTUnwrap(live.advance())
++                prefix.append(.init(token:batch.token,origin:batch.origin,records:batch.records))
++            }
++            let saved=try live.capture(); let text=try saved.document().guided.text.value
++            // The opening bracket was dropped at the newline reset. After
++            // the comma, nonlinear decode has collapsed an earlier space.
++            XCTAssertEqual(text.tokens,Array(program[1..<cut]))
++            XCTAssertEqual(text.emittedTokenCount,cut-1)
++            XCTAssertEqual(text.emitted,Data((cut==2 ? "\n" : "\n0 ,").utf8))
++            let fresh=GuidedFixtureModel(program:program)
++            let resumed=try ResumableGuidedGeneration.restore(saved,model:fresh,identity:setup.identity,
++                cacheSpecs:setup.specs,codecs:guidedCodecs(),tokenizer:tokenizer,specification:setup.specification,options:setup.options)
++            XCTAssertTrue(fresh.inputs.isEmpty); XCTAssertEqual(try resumed.capture(),saved)
++            let expected=try guidedDrain(live)
++            XCTAssertEqual(try guidedDrain(resumed),expected)
++            XCTAssertEqual(try resumed.capture(),try live.capture())
++            XCTAssertEqual(guidedBytes(prefix+expected),["[","\n","0"," "," ",",","1","]"].map { Data($0.utf8) })
++            XCTAssertEqual(resumed.terminalReason,.complete)
++            resumed.close(); live.close()
++        }
++    }
++    func testSplitUnicodeAndNewlineCurrentSegmentRestore() throws {
++        let tokenizer=NonlinearGuidedTokenizer(huge:false)
++        let tokens=tokenizer.encode(text:"中\n  ,")
++        var state=ResumableGuidedTextState(); var records:[ResumableGuidedRecord]=[]
++        for (index,token) in tokens.enumerated() {
++            let bytes=try state.append(token,tokenizer:tokenizer); records+=bytes
++            if index<2 { XCTAssertTrue(bytes.isEmpty) }
++            let encoded=try ResumableGuidedValues.encoder().encode(state)
++            let restored=try JSONDecoder().decode(ResumableGuidedTextState.self,from:encoded)
++            try restored.value.validate(tokenizer:tokenizer,generated:index+1,vocabulary:258)
++            XCTAssertEqual(restored.value,state.value)
++        }
++        let bytes=records.compactMap { if case .text(let b)=$0 { return b }; return nil }
++        XCTAssertEqual(bytes,["中","\n"," "," ",","].map { Data($0.utf8) })
++    }
++    func testInvalidUTF8UnsettledAndOversizedDecodeRefuse() throws {
++        var value=ResumableGuidedTextValue(); _=try value.append(35,tokenizer:S74ByteTokenizer())
++        value.emitted=Data([0xff])
++        XCTAssertThrowsError(try value.validate(tokenizer:S74ByteTokenizer(),generated:1,vocabulary:258))
++        value=ResumableGuidedTextValue(); value.tokens=[98]; value.emittedTokenCount=0
++        XCTAssertThrowsError(try value.validate(tokenizer:S74ByteTokenizer(),generated:1,vocabulary:258))
++        value=ResumableGuidedTextValue()
++        XCTAssertThrowsError(try value.append(98,tokenizer:NonlinearGuidedTokenizer(huge:true)))
++    }
++}
