@@ -1,0 +1,550 @@
+diff --git a/Libraries/MLXGuidedGeneration/ResumableGrammarState.swift b/Libraries/MLXGuidedGeneration/ResumableGrammarState.swift
+--- a/Libraries/MLXGuidedGeneration/ResumableGrammarState.swift
++++ b/Libraries/MLXGuidedGeneration/ResumableGrammarState.swift
+@@ -24,6 +24,14 @@
+         self.tokenizerIdentity=tokenizerIdentity; self.eosTokenID=eosTokenID
+         self.unknownTokenID=unknownTokenID; self.fastForward=fastForward
+     }
++    /// Exact native structural-tag source, including each tag's root-local schema.
++    /// This adds a specification kind; matcher replay and generation remain unchanged.
++    public init(structuralTag: String, vocabulary: [String], vocabularyType: ResumableGrammarVocabulary,
++                tokenizerIdentity: String, eosTokenID: Int, unknownTokenID: Int? = nil, fastForward: Bool = true) {
++        self.init(jsonSchema:structuralTag,vocabulary:vocabulary,vocabularyType:vocabularyType,
++            tokenizerIdentity:tokenizerIdentity,eosTokenID:eosTokenID,unknownTokenID:unknownTokenID,fastForward:fastForward)
++        kind="structural-tag"
++    }
+     @_spi(ResumableGuidedFixtures)
+     public static func literalFixture(_ grammar: String, vocabulary: [String], vocabularyType: ResumableGrammarVocabulary,
+                                       tokenizerIdentity: String, eosTokenID: Int, unknownTokenID: Int? = nil) -> Self {
+@@ -32,7 +40,7 @@
+         result.kind="literal-fixture"; return result
+     }
+     func validate() throws {
+-        guard ["json-schema","literal-fixture"].contains(kind), !source.isEmpty, source.utf8.count<=65_536,
++        guard ["json-schema","literal-fixture","structural-tag"].contains(kind), !source.isEmpty, source.utf8.count<=65_536,
+             !source.utf8.contains(0), (1...4096).contains(vocabulary.count),
+             vocabulary.allSatisfy({ $0.utf8.count<=4096 && !$0.utf8.contains(0) }),
+             vocabulary.indices.contains(eosTokenID),
+@@ -48,6 +56,9 @@
+         let grammarTokenizer=try GrammarTokenizer(vocab:vocabulary,vocabType:vocabularyType.type,eosTokenId:Int32(eosTokenID))
+         if kind=="json-schema" {
+             return try .init(tokenizer:grammarTokenizer,jsonSchema:source,fastForward:fastForward,hostTokenizer:tokenizer)
++        }
++        if kind=="structural-tag" {
++            return try .init(tokenizer:grammarTokenizer,structuralTag:source,fastForward:fastForward,hostTokenizer:tokenizer)
+         }
+         return try .init(tokenizer:grammarTokenizer,grammar:source,fastForward:fastForward,hostTokenizer:tokenizer)
+     }
+diff --git a/Tests/MLXGuidedGenerationTests/ResumableStructuralGuidanceTests.swift b/Tests/MLXGuidedGenerationTests/ResumableStructuralGuidanceTests.swift
+new file mode 100644
+--- /dev/null
++++ b/Tests/MLXGuidedGenerationTests/ResumableStructuralGuidanceTests.swift
+@@ -0,0 +1,434 @@
++import CryptoKit
++import Foundation
++import Metal
++import MLX
++import MLXLLM
++@testable import MLXLMCommon
++@_spi(ResumableGuidedFixtures) @testable import MLXGuidedGeneration
++import MLXNN
++
++struct CheckFailure: Error, CustomStringConvertible {
++    let description: String
++    init(_ description: String) { self.description = description }
++}
++func check(_ value: Bool, _ label: String) throws {
++    if !value { throw CheckFailure(label) }
++}
++func sgHash(_ data: Data) -> String {
++    SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
++}
++func encoder() -> JSONEncoder {
++    let e = JSONEncoder(); e.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]; return e
++}
++struct FixtureState { let position: Int; let running: MLXArray }
++let stateKey = LMOutput.Key<FixtureState>("s77.fixture.state")
++func codecs() throws -> ResumableStateCodecs {
++    var result = ResumableStateCodecs()
++    try result.register(stateKey, type: "position-running-v1", schema: 1, encode: {
++        .init(metadata: try encoder().encode($0.position), tensors: [try .init(capturing: $0.running)])
++    }, decode: {
++        let position = try JSONDecoder().decode(Int.self, from: $0.metadata)
++        try check((0...1_048_576).contains(position) && $0.tensors.count == 1, "typed state metadata")
++        try check($0.tensors[0].shape == [2] && $0.tensors[0].dtype == "float32", "typed state tensor")
++        return try .init(position: position, running: $0.tensors[0].restored())
++    })
++    return result
++}
++
++/// Calls/outputs are observation-only; they do not influence the forward calculation.
++final class FixtureModel: Module, LanguageModel {
++    let llama: LlamaModel?
++    let weightsIdentity: String
++    let weightBytes: Int
++    let script: [Int]
++    var calls = 0
++    var prepares = 0
++    var outputs: [[Float]] = []
++    var inputs: [[Int]] = []
++    var priorOffsets: [Int] = []
++
++    init(kind: String, script: [Int]) throws {
++        self.script = script
++        if kind == "llama" {
++            let model = LlamaModel(.init(hiddenSize: 16, hiddenLayers: 2, intermediateSize: 32,
++                attentionHeads: 2, rmsNormEps: 0.00001, vocabularySize: 258, kvHeads: 1))
++            var values: [(String, MLXArray)] = []
++            var material = Data()
++            var count = 0
++            for (name, array) in model.parameters().flattened().sorted(by: { $0.0 < $1.0 }) {
++                let salt = name.utf8.reduce(0) { ($0 + Int($1)) % 997 }
++                let floats = (0..<array.size).map { index -> Float in
++                    let value = Float((index * 73 + salt * 19) % 251 - 125) / 4096
++                    return name.contains("norm") ? 1 + value : value
++                }
++                let fixed = MLXArray(floats, array.shape)
++                values.append((name, fixed)); count += fixed.nbytes
++                material.append(try encoder().encode([name, String(describing: array.shape)]))
++                material.append(fixed.asData(access: .copy).data)
++            }
++            try model.update(parameters: ModuleParameters.unflattened(values), verify: .all)
++            eval(model)
++            self.llama = model; weightsIdentity = sgHash(material); weightBytes = count
++        } else {
++            try check(kind == "state", "fixture kind")
++            llama = nil; weightsIdentity = sgHash(Data("native-structural-order-cache-state-v1".utf8)); weightBytes = 0
++        }
++        try check(weightBytes <= 128 * 1024 * 1024, "model tensor ceiling")
++        super.init()
++    }
++    func newCache(parameters: GenerateParameters?) -> [KVCache] {
++        llama?.newCache(parameters: parameters) ?? [KVCacheSimple()]
++    }
++    func prepare(_ input: LMInput, cache: [KVCache], state: LMOutput.State?, windowSize: Int?) throws -> PrepareResult {
++        prepares += 1
++        throw CheckFailure("resumable worker must not enter model.prepare")
++    }
++    func callAsFunction(_ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?) -> LMOutput {
++        calls += 1
++        let inputIDs = input.tokens.asArray(Int.self)
++        inputs.append(inputIDs); priorOffsets.append(cache?.first?.offset ?? 0)
++        if let llama {
++            let logits = llama(input.tokens, cache: cache)
++            outputs.append(logits.asArray(Float.self))
++            return .init(logits: logits)
++        }
++        let tokens = input.tokens.asType(.float32)
++        let previous = state?[stateKey]
++        var running = previous?.running ?? MLXArray([Float(0), 1])
++        for token in inputIDs { running = running * 0.5 + Float(token) }
++        let keys = broadcast(tokens.reshaped(1, 1, -1, 1), to: [1, 1, tokens.dim(1), 4])
++        let pair = cache![0].update(keys: keys, values: keys * 0.5)
++        let shift = pair.0.sum() * 0.03 + running.sum() * 0.07
++        let consumed = (previous?.position ?? 0) + tokens.dim(1)
++        let index = min(max(0, consumed - 5), script.count - 1)
++        let mask = MLXArray.arange(258) .== script[index]
++        let row = MLX.where(mask, MLXArray(Float(100)) + shift, MLXArray(Float(-100)) + sin(MLXArray.arange(258).asType(.float32)))
++        let logits = broadcast(row.reshaped(1, 1, 258), to: [1, tokens.dim(1), 258])
++        outputs.append(logits.asArray(Float.self))
++        var next = LMOutput.State()
++        next[stateKey] = .init(position: (previous?.position ?? 0) + tokens.dim(1), running: running)
++        return .init(logits: logits, state: next)
++    }
++}
++
++struct S74ByteTokenizer: Tokenizer {
++    static let vocab = ["<eos>"] + (0...255).map { String(format: "<0x%02X>", $0) } + ["<unk>"]
++    func encode(text: String, addSpecialTokens: Bool) -> [Int] { text.utf8.map { Int($0) + 1 } }
++    func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String {
++        String(decoding: tokenIds.filter { (1...256).contains($0) }.map { UInt8($0 - 1) }, as: UTF8.self)
++    }
++    func convertTokenToId(_ token: String) -> Int? { Self.vocab.firstIndex(of: token) }
++    func convertIdToToken(_ id: Int) -> String? { Self.vocab.indices.contains(id) ? Self.vocab[id] : nil }
++    var bosToken: String? { nil }
++    var eosToken: String? { "<eos>" }
++    var unknownToken: String? { "<unk>" }
++    func applyChatTemplate(messages: [[String: any Sendable]], tools: [[String: any Sendable]]?,
++                           additionalContext: [String: any Sendable]?) throws -> [Int] { [] }
++}
++
++func payload(_ checkpoint: Data) throws -> Any {
++    let envelope = try JSONSerialization.jsonObject(with: checkpoint) as! [String: Any]
++    let bytes=Data(base64Encoded:envelope["payload"] as! String)!
++    try check(sgHash(bytes)==envelope["sha256"] as? String,"actual nested checksum")
++    return try JSONSerialization.jsonObject(with:bytes)
++}
++func equivalent(_ lhs: Any, _ rhs: Any, path: String = "checkpoint") throws {
++    if let a = lhs as? [String: Any], let b = rhs as? [String: Any] {
++        try check(Set(a.keys) == Set(b.keys), "keys at \(path)")
++        if a["shape"] != nil && a["dtype"] != nil && a["bytes"] != nil {
++            let x = try JSONDecoder().decode(ResumableTensor.self, from: JSONSerialization.data(withJSONObject: a))
++            let y = try JSONDecoder().decode(ResumableTensor.self, from: JSONSerialization.data(withJSONObject: b))
++            try check(x.shape == y.shape && x.dtype == y.dtype, "tensor layout at \(path)")
++            if x.dtype.contains("float") {
++                try check(allClose(x.restored(), y.restored(), rtol: 1e-5, atol: 1e-6).item(Bool.self), "tensor values at \(path)")
++            } else { try check(x.bytes == y.bytes, "exact integer tensor at \(path)") }
++        } else {
++            for key in a.keys.sorted() { try equivalent(a[key]!, b[key]!, path: path + "." + key) }
++        }
++    } else if let a = lhs as? [Any], let b = rhs as? [Any] {
++        try check(a.count == b.count, "array count at \(path)")
++        for i in a.indices { try equivalent(a[i], b[i], path: path + "[\(i)]") }
++    } else {
++        try check((lhs as? NSObject)?.isEqual(rhs) == true, "exact metadata at \(path)")
++    }
++}
++func boundedRead(_ path: String, maximum: Int) throws -> Data {
++    let url = URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath()
++    try check(url.path.hasPrefix(URL(fileURLWithPath: "/private/tmp").standardizedFileURL.resolvingSymlinksInPath().path + "/"), "private fixture path")
++    let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? Int.max
++    try check(size <= maximum, "fixture size")
++    let result = try Data(contentsOf: url)
++    try check(result.count <= maximum, "fixture size after read")
++    return result
++}
++
++
++func sgSource(_ alternatives: [(String,[String:Any])]) throws -> String {
++    let elements = try alternatives.map { name,schema -> [String:Any] in
++        let escaped=String(decoding:try encoder().encode(name),as:UTF8.self)
++        return ["type":"tag","begin":"{\"name\":\(escaped),\"arguments\":",
++            "content":["type":"json_schema","json_schema":schema],"end":["}"]]
++    }
++    return String(decoding:try JSONSerialization.data(withJSONObject:["type":"structural_tag","format":["type":"or","elements":elements]],options:[.sortedKeys,.withoutEscapingSlashes]),as:UTF8.self)
++}
++func sgJSON(_ value: Any) throws -> String {
++    String(decoding:try JSONSerialization.data(withJSONObject:value,options:[.sortedKeys,.withoutEscapingSlashes,.fragmentsAllowed]),as:UTF8.self)
++}
++struct SGFixture {
++    var name: String
++    var kind = "state"
++    var source: String
++    var expected: String
++    var expectedName: String
++    var expectedArguments: [String:Any]
++    var fastForward = true
++    var rotating = true
++    var maximum: Int
++    var cancelAfter: Int?
++    var grammarKind = "structural-tag"
++}
++func sgFixture(_ name: String) throws -> SGFixture {
++    let singleName = "quoted\"\\name"
++    let message = "中\"\\\n"
++    let single: [String:Any] = ["$defs":["message":["type":"string","enum":[message]]],"type":"object",
++        "properties":["message":["$ref":"#/$defs/message"],"values":["type":"array","items":["type":"integer","enum":[7]],"minItems":2,"maxItems":2]],
++        "required":["message","values"],"additionalProperties":false]
++    let numeric: [String:Any] = ["$defs":["payload":["type":"integer","enum":[7]]],"type":"object",
++        "properties":["value":["$ref":"#/$defs/payload"]],"required":["value"],"additionalProperties":false]
++    let text: [String:Any] = ["$defs":["payload":["type":"array","items":["type":"string","enum":["ok","中"]],"minItems":2,"maxItems":2]],
++        "type":"object","properties":["kind":["type":"string","enum":["text"]],"value":["$ref":"#/$defs/payload"]],
++        "required":["kind","value"],"additionalProperties":false]
++    let alternatives: [(String,[String:Any])]
++    let selected: String, args: [String:Any]
++    switch name {
++    case "single", "ff-off", "incomplete", "cancel", "zero", "llama":
++        alternatives=[(singleName,single)]; selected=singleName; args=["message":message,"values":[7,7]]
++    case "multi-text":
++        alternatives=[("branch-int",numeric),("branch-text",text)]; selected="branch-text"; args=["kind":"text","value":["ok","中"]]
++    case "multi-int":
++        alternatives=[("branch-int",numeric),("branch-text",text)]; selected="branch-int"; args=["value":7]
++    case "old-json", "old-literal":
++        let source = name == "old-json" ? #"{"type":"string","enum":["中abc"]}"# : "root ::= \"\\\"中abc\\\"\""
++        return .init(name:name,source:source,expected:"\"中abc\"",expectedName:"",expectedArguments:[:],
++            rotating:false,maximum:9,grammarKind:name == "old-json" ? "json-schema" : "literal-fixture")
++    default: throw CheckFailure("structural fixture name")
++    }
++    let expected="{\"name\":\(try sgJSON(selected)),\"arguments\":\(try sgJSON(args))}"
++    return try .init(name:name,kind:name == "llama" ? "llama" : "state",source:sgSource(alternatives),expected:expected,
++        expectedName:selected,expectedArguments:args,fastForward:name != "ff-off",rotating:name != "ff-off" && name != "multi-int" && name != "llama",
++        maximum:name == "zero" ? 0 : name == "incomplete" ? expected.utf8.count : name == "llama" ? 160 : expected.utf8.count+1,
++        cancelAfter:name == "cancel" ? 4 : nil)
++}
++struct SGSetup {
++    var item: SGFixture
++    let model: FixtureModel
++    let identity: ResumableTokenIdentity
++    var specification: ResumableGrammarSpecification
++    var options: ResumableGuidedOptions
++    let specs: [ResumableCacheSpec]
++    let registry: ResumableStateCodecs
++    let prompt = [1,2,3,4,5]
++    init(_ item: SGFixture) throws {
++        self.item=item
++        let tokenizer=S74ByteTokenizer(), script=tokenizer.encode(text:item.expected)+[0]
++        model=try FixtureModel(kind:item.kind,script:script)
++        let backend="arm64-little-endian;swift6.4;"+ProcessInfo.processInfo.operatingSystemVersionString+";"+(MTLCreateSystemDefaultDevice()?.name ?? "unavailable")
++        identity=try .init(model:item.kind,configuration:item.name+";s77-v1;"+sgHash(try encoder().encode(script)),
++            weights:model.weightsIdentity,input:ResumableTokenIdentity.inputDigest(prompt),backend:backend,
++            dependency:"lm:83f3ef6dc5bc24daeea33cfd9e18ab1383bb0bc8;mlx:0bb916c67f4b9e5c682cbe02a42c701c93ab5021;xgrammar:v0.1.30")
++        switch item.grammarKind {
++        case "structural-tag": specification = .init(structuralTag:item.source,vocabulary:S74ByteTokenizer.vocab,vocabularyType:.byteFallback,
++            tokenizerIdentity:"s77-byte-v1",eosTokenID:0,unknownTokenID:257,fastForward:item.fastForward)
++        case "json-schema": specification = .init(jsonSchema:item.source,vocabulary:S74ByteTokenizer.vocab,vocabularyType:.byteFallback,
++            tokenizerIdentity:"s77-byte-v1",eosTokenID:0,unknownTokenID:257,fastForward:item.fastForward)
++        case "literal-fixture": specification = .literalFixture(item.source,vocabulary:S74ByteTokenizer.vocab,vocabularyType:.byteFallback,
++            tokenizerIdentity:"s77-byte-v1",eosTokenID:0,unknownTokenID:257)
++        default: throw CheckFailure("fixture grammar kind")
++        }
++        var closing=[Float](repeating:0,count:258);closing[0]=200;closing[35]=100;closing[126]=50
++        let whitespace=WhitespaceTokenBias.compute(tokenizer:tokenizer)
++        options = .init(model:.init(logitWidth:258,maximumTokens:item.maximum,prefillStepSize:2),completionReserve:item.kind == "llama" ? 32 : 0,
++            closingBias:item.kind == "llama" ? closing : nil,whitespaceBias:whitespace.bias.asArray(Float.self),whitespaceTokenIDs:whitespace.tokenIDs)
++        let spec=ResumableCacheSpec(kind:item.rotating ? .rotating : .simple,heads:1,keyDimension:item.kind == "llama" ? 8 : 4,
++            valueDimension:item.kind == "llama" ? 8 : 4,maxSize:item.rotating ? 4 : 0,keep:item.rotating ? 1 : 0)
++        specs=Array(repeating:spec,count:item.kind == "llama" ? 2 : 1)
++        registry=item.kind == "state" ? try codecs() : .init()
++    }
++    func prepare() throws -> ResumableGuidedGeneration {
++        try .prepare(model:model,tokens:prompt,identity:identity,cacheSpecs:specs,codecs:registry,tokenizer:S74ByteTokenizer(),specification:specification,options:options)
++    }
++    func restore(_ saved:ResumableGuidedCheckpoint) throws -> ResumableGuidedGeneration {
++        try .restore(saved,model:model,identity:identity,cacheSpecs:specs,codecs:registry,tokenizer:S74ByteTokenizer(),specification:specification,options:options)
++    }
++}
++struct SGObserved: Codable, Equatable {
++    let token:Int?
++    let origin:ResumableGuidedOrigin?
++    let records:[ResumableGuidedRecord]
++}
++func sgStep(_ live:ResumableGuidedGeneration,item:SGFixture) throws -> ResumableGuidedGeneration.Batch? {
++    live.consumedTokens == item.cancelAfter ? try live.cancel() : try live.advance()
++}
++func sgDrain(_ live:ResumableGuidedGeneration,item:SGFixture) throws -> [SGObserved] {
++    var rows:[SGObserved]=[]
++    while let b=try sgStep(live,item:item) { rows.append(.init(token:b.token,origin:b.origin,records:b.records)) }
++    return rows
++}
++func sgCompare(_ a:Data,_ b:Data) throws {
++    let left=try payload(a) as! [String:Any],right=try payload(b) as! [String:Any]
++    for key in ["version","prerequisiteIdentity"] { try equivalent(left[key]!,right[key]!,path:key) }
++    let lm=Data(base64Encoded:left["model"] as! String)!,rm=Data(base64Encoded:right["model"] as! String)!
++    try equivalent(payload(lm),payload(rm),path:"model")
++    var ls=left["guided"] as! [String:Any],rs=right["guided"] as! [String:Any]
++    try check(ls.removeValue(forKey:"modelDigest") as? String==sgHash(lm),"actual model checksum binding")
++    try check(rs.removeValue(forKey:"modelDigest") as? String==sgHash(rm),"expected model checksum binding")
++    try equivalent(ls,rs,path:"guided")
++}
++
++// Separate actual native matcher: accept each recorded token once with FF disabled.
++// It verifies prefix admissibility/termination without duplicating the guided loop.
++func sgMatcher(_ d:ResumableGuidedDocument) throws {
++    let gt=try GrammarTokenizer(vocab:d.guided.specification.vocabulary,vocabType:.byteFallback,eosTokenId:0)
++    let matcher=try GrammarConstraint(tokenizer:gt,structuralTag:d.guided.specification.source,fastForward:false,hostTokenizer:S74ByteTokenizer())
++    var ended=false
++    for entry in d.guided.grammar.accepts {
++        let mask=try matcher.computeMask()
++        let allowed=(UInt32(bitPattern:mask.mask[entry.token/32]) >> UInt32(entry.token%32)) & 1 == 1
++        try check(!ended && (!mask.needsApply || allowed),"independent structural prefix mask")
++        let result=try matcher.commitToken(Int32(entry.token))
++        try check(result.tokens.isEmpty,"independent matcher FF disabled");ended=result.isTerminated
++    }
++    try check(ended==d.guided.grammar.mask.terminated,"independent structural termination")
++    if !ended {
++        let mask=try matcher.computeMask()
++        try check(mask.mask==d.guided.grammar.mask.words && mask.needsApply==d.guided.grammar.mask.needsApply,"independent frontier mask")
++    }
++}
++
++func sgAssertResult(_ rows:[SGObserved],setup:SGSetup,final:ResumableGuidedCheckpoint) throws {
++    let item=setup.item,d=try final.document(),generated=rows.filter { $0.origin != .ending }.compactMap(\.token)
++    let endings=rows.flatMap(\.records).compactMap { r -> ResumableGuidedCompletion? in if case .terminal(let e)=r { return e };return nil }
++    try check(endings.count==1 && endings[0].promptTokens==5,"one semantic terminal")
++    let expectedInputs=item.maximum == 0 ? [] : [[1,2],[3,4],[5]]+generated.map { [$0] }
++    try check(setup.model.inputs==expectedInputs,"independent sampled/forced single-token recurrence")
++    var offset=0
++    for (input,prior) in zip(expectedInputs,setup.model.priorOffsets) { try check(prior==offset,"independent cache offset");offset+=input.count }
++    if item.kind == "state" && item.maximum>0 {
++        let model=try ResumableGuidedModelCheckpoint(data:d.model).document()
++        let running=try model.state!.first!.payload.tensors[0].restored().asArray(Float.self)
++        var expected:[Float]=[0,1]
++        for token in setup.prompt+generated { expected=expected.map { $0*0.5+Float(token) } }
++        try check(running==expected,"independent typed-state recurrence")
++    }
++    let chunks=rows.flatMap(\.records).compactMap { r -> Data? in if case .text(let b)=r { return b };return nil }
++    if item.kind == "state" {
++        let count=item.cancelAfter ?? min(item.maximum,item.expected.utf8.count)
++        let expectedTokens=Array(S74ByteTokenizer().encode(text:item.expected).prefix(count))
++        try check(generated==expectedTokens,"explicit structural token bytes")
++        // A byte tokenizer emits one complete Unicode scalar at a time. Incomplete
++        // trailing UTF-8 remains withheld; no parse-equivalent replacement is used.
++        var bytes=Data(),expectedChunks:[Data]=[]
++        for id in expectedTokens {
++            bytes.append(UInt8(id-1))
++            if String(data:bytes,encoding:.utf8) != nil { expectedChunks.append(bytes);bytes=Data() }
++        }
++        try check(chunks==expectedChunks,"exact UTF-8 chunks")
++        let expectedEnd:ResumableGuidedEnd=item.cancelAfter != nil ? .cancelled : item.maximum>item.expected.utf8.count ? .complete : .incomplete
++        try check(endings[0].reason==expectedEnd,"accepted EOS vs budget/cancel")
++        if expectedEnd == .complete && item.grammarKind == "structural-tag" {
++            let all=chunks.reduce(into:Data()) { $0.append($1) }
++            let parsed=try JSONSerialization.jsonObject(with:all) as! [String:Any]
++            try check(parsed["name"] as? String==item.expectedName,"explicit offered name")
++            try check(try sgJSON(parsed["arguments"]!)==sgJSON(item.expectedArguments),"root-local typed arguments")
++        }
++    }
++    if item.grammarKind == "structural-tag" { try sgMatcher(d) }
++    try check(setup.model.prepares==0 && Memory.peakMemory<=128*1024*1024,"native work/resource contract")
++}
++
++import XCTest
++
++func sgCuts(_ snapshots:[ResumableGuidedCheckpoint],item:SGFixture) throws -> [Int] {
++    var cuts:Set<Int>=[0,1,min(10,snapshots.count-1),snapshots.count-1]
++    if let r=item.expected.range(of:"\"arguments\":") {
++        let offset=item.expected[..<r.upperBound].utf8.count
++        cuts.insert(min(offset,snapshots.count-1));cuts.insert(min(offset+3,snapshots.count-1))
++    }
++    if let pending=try snapshots.firstIndex(where:{ d in let s=try d.document().guided;return s.grammar.accepts.count>s.consumed }) { cuts.insert(pending) }
++    if let unicode=try snapshots.firstIndex(where:{ d in let v=try d.document().guided.text.value;return v.emittedTokenCount<v.tokens.count }) { cuts.insert(unicode) }
++    if let accepting=try snapshots.firstIndex(where:{ d in let s=try d.document().guided;return !s.grammar.mask.terminated && s.grammar.mask.allows(0) && s.consumed==s.grammar.accepts.count }) { cuts.insert(accepting) }
++    return cuts.filter { snapshots.indices.contains($0) }.sorted()
++}
++final class ResumableStructuralGuidanceTests: XCTestCase {
++    func verifyCuts(_ item:SGFixture) throws {
++        let setup=try SGSetup(item),live=try setup.prepare()
++        defer { live.close() }
++        var rows:[SGObserved]=[],snapshots=[try live.capture()]
++        while let b=try sgStep(live,item:item) {
++            rows.append(.init(token:b.token,origin:b.origin,records:b.records));snapshots.append(b.checkpoint)
++        }
++        let final=try live.capture()
++        try sgAssertResult(rows,setup:setup,final:final)
++        if item.fastForward && item.grammarKind == "structural-tag" && item.maximum>0 {
++            XCTAssertTrue(try snapshots.contains { let s=try $0.document().guided;return s.grammar.accepts.count>s.consumed })
++        }
++        let cuts=try sgCuts(snapshots,item:item)
++        for cut in cuts {
++            let fresh=try SGSetup(item),restored=try fresh.restore(snapshots[cut])
++            defer { restored.close() }
++            XCTAssertEqual(fresh.model.calls,0);XCTAssertEqual(fresh.model.prepares,0)
++            XCTAssertEqual(try restored.capture(),snapshots[cut])
++            let suffix=try sgDrain(restored,item:item)
++            XCTAssertEqual(suffix,Array(rows.dropFirst(cut)),"\(item.name) cut \(cut)")
++            try sgCompare(restored.capture().data,final.data)
++            let calls=fresh.model.calls,terminal=try restored.capture()
++            XCTAssertNil(try restored.advance());XCTAssertNil(try restored.cancel())
++            XCTAssertEqual(fresh.model.calls,calls);XCTAssertEqual(try restored.capture(),terminal)
++        }
++        print("S77_CUTS \(item.name) \(cuts)")
++    }
++
++    func testSingleAndAlternativeSchemasAtSettledCuts() throws {
++        for name in ["single","multi-text","multi-int"] { try verifyCuts(sgFixture(name)) }
++    }
++    func testFastForwardOffAndExistingKinds() throws {
++        for name in ["ff-off","old-json","old-literal"] { try verifyCuts(sgFixture(name)) }
++    }
++    func testIncompleteZeroCancelledAndTerminalNoWork() throws {
++        for name in ["incomplete","zero","cancel"] { try verifyCuts(sgFixture(name)) }
++        let zero=try SGSetup(sgFixture("zero")),z=try zero.prepare()
++        XCTAssertEqual(zero.model.calls,0);_ = try z.advance();XCTAssertEqual(zero.model.calls,0);z.close()
++        let setup=try SGSetup(sgFixture("single")),live=try setup.prepare()
++        _ = try live.advance()
++        let before=try live.capture(),calls=setup.model.calls
++        XCTAssertGreaterThan(live.pendingForcedTokens.count,0)
++        let cancelled=try XCTUnwrap(live.cancel()),a=try before.document(),b=try cancelled.checkpoint.document()
++        XCTAssertEqual(cancelled.records.count,1);XCTAssertNil(cancelled.token)
++        XCTAssertEqual(setup.model.calls,calls);XCTAssertEqual(a.model,b.model)
++        XCTAssertEqual(a.guided.grammar.accepts,b.guided.grammar.accepts);XCTAssertEqual(a.guided.text.value,b.guided.text.value)
++        live.close();XCTAssertThrowsError(try live.advance());XCTAssertThrowsError(try live.capture())
++        let old=try SGSetup(setup.item),restored=try old.restore(before)
++        XCTAssertEqual(old.model.calls,0);XCTAssertNotNil(try restored.advance());restored.close()
++    }
++    func testTinyLibraryLlamaComposition() throws { try verifyCuts(sgFixture("llama")) }
++
++    func testNativeStructuralMaskRefusesCrossBranchArguments() throws {
++        let item=try sgFixture("multi-int"),setup=try SGSetup(item)
++        func rejects(_ value:String) throws -> Bool {
++            let gt=try GrammarTokenizer(vocab:S74ByteTokenizer.vocab,vocabType:.byteFallback,eosTokenId:0)
++            let m=try GrammarConstraint(tokenizer:gt,structuralTag:item.source,fastForward:false,hostTokenizer:S74ByteTokenizer())
++            for token in S74ByteTokenizer().encode(text:value)+[0] {
++                let mask=try m.computeMask()
++                let allowed=(UInt32(bitPattern:mask.mask[token/32]) >> UInt32(token%32)) & 1 == 1
++                if mask.needsApply && !allowed { return true }
++                _ = try m.commitToken(Int32(token))
++            }
++            return false
++        }
++        XCTAssertTrue(try rejects(#"{"name":"branch-int","arguments":{"value":["ok","中"]}}"#))
++        XCTAssertTrue(try rejects(#"{"name":"branch-text","arguments":{"kind":"text","value":7}}"#))
++        XCTAssertTrue(try rejects(#"{"name":"unoffered","arguments":{"value":7}}"#))
++        let grammar=try ResumableGrammarState(specification:setup.specification,tokenizer:S74ByteTokenizer())
++        XCTAssertFalse(grammar.record.mask.allows(0));XCTAssertThrowsError(try grammar.accept(0))
++    }
++}
+diff --git a/Tests/MLXGuidedGenerationTests/ResumableStructuralGuidanceCheckpointTests.swift b/Tests/MLXGuidedGenerationTests/ResumableStructuralGuidanceCheckpointTests.swift
+new file mode 100644
+--- /dev/null
++++ b/Tests/MLXGuidedGenerationTests/ResumableStructuralGuidanceCheckpointTests.swift
+@@ -0,0 +1,69 @@
++import Foundation
++import XCTest
++import MLXLMCommon
++@_spi(ResumableGuidedFixtures) @testable import MLXGuidedGeneration
++
++final class ResumableStructuralGuidanceCheckpointTests: XCTestCase {
++    func testKindEncodingAndChangedExpectedBindings() throws {
++        let setup=try SGSetup(sgFixture("single")),live=try setup.prepare()
++        defer { live.close() }
++        _ = try live.advance()
++        let saved=try live.capture(),source=setup.specification
++        XCTAssertEqual(source.kind,"structural-tag")
++        let encoded=try encoder().encode(source),decoded=try JSONDecoder().decode(ResumableGrammarSpecification.self,from:encoded)
++        XCTAssertEqual(try encoder().encode(decoded),encoded)
++        for change: (inout ResumableGrammarSpecification)->Void in [
++            { $0.kind="json-schema" },{ $0.kind="literal-fixture" },{ $0.kind="unknown" },
++            { $0.source += " " },{ $0.source=$0.source.replacingOccurrences(of:"message",with:"changed") },
++            { $0.fastForward.toggle() },{ $0.tokenizerIdentity="other" },{ $0.vocabulary.swapAt(1,2) },
++            { $0.vocabularyType = .raw },{ $0.compiler="other" },{ $0.eosTokenID=1 },{ $0.unknownTokenID=nil }
++        ] {
++            var fresh=try SGSetup(setup.item);change(&fresh.specification)
++            XCTAssertThrowsError(try fresh.restore(saved));XCTAssertEqual(fresh.model.calls,0)
++        }
++        let multi=try SGSetup(sgFixture("multi-text")),other=try multi.prepare()
++        defer { other.close() }
++        let mc=try other.capture()
++        var reordered=try SGSetup(multi.item)
++        var object=try JSONSerialization.jsonObject(with:Data(reordered.specification.source.utf8)) as! [String:Any]
++        var format=object["format"] as! [String:Any];format["elements"]=Array((format["elements"] as! [Any]).reversed());object["format"]=format
++        reordered.specification.source=try sgJSON(object)
++        XCTAssertThrowsError(try reordered.restore(mc));XCTAssertEqual(reordered.model.calls,0)
++        XCTAssertEqual(try live.capture(),saved)
++    }
++    func testMalformedStructuralSourcesRefuseBeforeModelWork() throws {
++        for bad in ["{",#"{"type":"structural_tag","format":{"type":"not_a_format"}}"#] {
++            var setup=try SGSetup(sgFixture("single"));setup.specification.source=bad
++            XCTAssertThrowsError(try setup.prepare());XCTAssertEqual(setup.model.calls,0)
++        }
++        var oversized=try SGSetup(sgFixture("single"));oversized.specification.source=String(repeating:" ",count:65_537)
++        XCTAssertThrowsError(try oversized.prepare());XCTAssertEqual(oversized.model.calls,0)
++    }
++    func testCheckpointEnvelopeBoundsAndImpossibleJoins() throws {
++        let setup=try SGSetup(sgFixture("single")),live=try setup.prepare()
++        defer { live.close() }
++        _ = try live.advance();let saved=try live.capture(),d=try saved.document()
++        XCTAssertGreaterThan(d.guided.grammar.accepts.count-d.guided.consumed,0)
++        XCTAssertThrowsError(try ResumableGuidedCheckpoint(data:saved.data.dropLast()))
++        var corrupt=saved.data;corrupt[corrupt.count/2] ^= 1
++        XCTAssertThrowsError(try ResumableGuidedCheckpoint(data:corrupt))
++        XCTAssertThrowsError(try ResumableGuidedCheckpoint(data:Data(count:ResumableGuidedCheckpoint.maximumBytes+1)))
++        for change: (inout ResumableGuidedDocument)->Void in [
++            { $0.version += 1 },{ $0.guided.consumed += 1 },{ $0.guided.sampled += 1 },
++            { $0.guided.grammar.accepts[1].origin = .sampled },{ $0.guided.grammar.accepts.swapAt(0,1) },
++            { $0.guided.grammar.accepts[1].token=0 },{ $0.guided.grammar.mask.terminated=true },
++            { $0.guided.grammar.mask.needsApply.toggle() },{ $0.guided.text.value.emitted=Data("wrong".utf8) },
++            { $0.guided.text.value.emittedTokenCount=Int.max },{ $0.guided.modelDigest="wrong" },
++            { $0.guided.terminal = .complete },{ $0.guided.terminal = .incomplete }
++        ] {
++            var bad=d;change(&bad)
++            let fresh=try SGSetup(setup.item)
++            XCTAssertThrowsError(try fresh.restore(.init(document:bad)))
++            XCTAssertEqual(fresh.model.calls,0);XCTAssertEqual(try live.capture(),saved)
++        }
++        var huge=d;huge.model=Data(count:8*1024*1024+1)
++        XCTAssertThrowsError(try ResumableGuidedCheckpoint(document:huge))
++        huge=d;huge.guided.text.value.emitted=Data(count:1024*1024)
++        XCTAssertThrowsError(try ResumableGuidedCheckpoint(document:huge))
++    }
++}
