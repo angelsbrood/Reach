@@ -1,0 +1,750 @@
+diff --git a/Libraries/MLXLMCommon/ResumableTextOutput.swift b/Libraries/MLXLMCommon/ResumableTextOutput.swift
+new file mode 100644
+--- /dev/null
++++ b/Libraries/MLXLMCommon/ResumableTextOutput.swift
+@@ -0,0 +1,222 @@
++// Local candidate: paused, explicitly parser-disabled plain-text output.
++
++import Foundation
++
++/// The owner attests that the tokenizer/configuration is immutable, deterministic,
++/// side-effect-free and has bounded decode cost. IDs are explicit; no template,
++/// tokenizer construction, implicit EOS lookup or tool parser is used here.
++public struct ResumableTextOptions: Codable, Sendable {
++    public let tokenizerIdentity: String
++    public let stopTokenIDs: [Int]
++    public let unknownTokenID: Int?
++    public let stopStrings: [String]
++
++    public init(tokenizerIdentity: String, stopTokenIDs: Set<Int> = [],
++                unknownTokenID: Int? = nil, stopStrings: Set<String> = []) throws {
++        guard stopTokenIDs.count <= 256, stopStrings.count <= 32,
++            stopStrings.allSatisfy({ $0.utf8.count <= 4096 }) else {
++            throw ResumableTokenError.oversized
++        }
++        self.tokenizerIdentity = tokenizerIdentity
++        self.stopTokenIDs = stopTokenIDs.sorted()
++        self.unknownTokenID = unknownTokenID
++        self.stopStrings = StopStringFilter(stopStrings: stopStrings).stopStrings
++    }
++
++    func validate(vocabulary: Int) throws {
++        guard (1...65_536).contains(vocabulary),
++            !tokenizerIdentity.isEmpty, tokenizerIdentity.utf8.count <= 1024,
++            stopTokenIDs.count <= 256, stopTokenIDs == Set(stopTokenIDs).sorted(),
++            stopTokenIDs.allSatisfy({ (0..<vocabulary).contains($0) }),
++            unknownTokenID.map({ (0..<vocabulary).contains($0) }) ?? true,
++            stopStrings.count <= 32,
++            stopStrings.allSatisfy({ !$0.isEmpty && $0.utf8.count <= 4096 }) else {
++            throw ResumableTokenError.invalid("text options")
++        }
++        let normalized = StopStringFilter(stopStrings: Set(stopStrings)).stopStrings
++        guard try ResumableTokenCheckpoint.encoder().encode(normalized)
++            == ResumableTokenCheckpoint.encoder().encode(stopStrings) else {
++            throw ResumableTokenError.invalid("normalized stops")
++        }
++    }
++
++    func intercepts(_ token: Int) -> Bool {
++        stopTokenIDs.contains(token) || unknownTokenID == token
++    }
++}
++
++public enum ResumableTextEnd: String, Codable, Sendable { case stop, length, cancelled }
++
++/// Semantic counts only. Timing and throughput are caller-owned telemetry.
++public struct ResumableTextCompletion: Codable, Equatable, Sendable {
++    public let reason: ResumableTextEnd
++    public let promptTokens: Int
++    public let generationTokens: Int
++    public let rawTokens: Int
++}
++
++/// Text is stored as UTF-8 bytes so equality does not use Unicode canonical equivalence.
++public enum ResumableTextRecord: Codable, Equatable, Sendable {
++    case text(Data)
++    case terminal(ResumableTextCompletion)
++}
++
++/// Serially confined pull wrapper; no work runs between calls, and no records are queued.
++/// Each batch and its post-batch snapshot are returned atomically. The caller owns the
++/// returned records and any later publication. This is not a host acknowledgment journal.
++public final class ResumableTextOutput {
++    public struct Batch {
++        /// The consumed raw token, including intercepted EOS/unknown, or nil for a
++        /// zero-limit/cancel transition. Text generation usage excludes intercepted IDs.
++        public let token: Int?
++        public let records: [ResumableTextRecord]
++        public let checkpoint: ResumableTextCheckpoint
++    }
++
++    private var raw: ResumableTokenDriver?
++    private var rawCheckpoint: ResumableTokenCheckpoint
++    private let options: ResumableTextOptions
++    private var detokenizer: NaiveStreamingDetokenizer
++    private var filter: StopStringFilter
++    private var emittedTokenCount: Int
++    private let promptCount: Int
++    private var generationCount: Int
++    private var rawCount: Int
++    private var lastToken: Int?
++    public private(set) var terminalReason: ResumableTextEnd?
++    public private(set) var isClosed = false
++
++    private init(raw: ResumableTokenDriver, checkpoint: ResumableTokenCheckpoint,
++                 tokenizer: any Tokenizer, state: ResumableTextState) throws {
++        self.raw = raw; rawCheckpoint = checkpoint; options = state.options
++        detokenizer = NaiveStreamingDetokenizer(tokenizer: tokenizer)
++        detokenizer.segmentTokens = state.segmentTokens
++        detokenizer.segment = try ResumableTextState.string(state.segment)
++        filter = StopStringFilter(stopStrings: Set(state.options.stopStrings))
++        filter.buffer = try ResumableTextState.string(state.buffer)
++        filter.stopped = state.stopped
++        emittedTokenCount = state.emittedTokenCount; promptCount = state.promptCount
++        generationCount = state.generationCount; rawCount = state.rawCount
++        lastToken = state.lastToken; terminalReason = state.terminal
++        if terminalReason != nil { raw.close(); self.raw = nil }
++    }
++
++    public static func prepare(model: any LanguageModel, tokens: [Int],
++                               identity: ResumableTokenIdentity, rawOptions: ResumableTokenOptions,
++                               cacheSpecs: [ResumableCacheSpec], codecs: ResumableStateCodecs = .init(),
++                               tokenizer: any Tokenizer, options: ResumableTextOptions) throws -> ResumableTextOutput {
++        try options.validate(vocabulary: rawOptions.vocabularySize)
++        let raw = try ResumableTokenDriver.prepare(model: model, tokens: tokens, identity: identity,
++            options: rawOptions, cacheSpecs: cacheSpecs, codecs: codecs)
++        do {
++            let checkpoint = try raw.capture()
++            let state = ResumableTextState(options: options,
++                rawDigest: ResumableTokenCheckpoint.digest(checkpoint.data), promptCount: tokens.count)
++            let output = try ResumableTextOutput(raw: raw, checkpoint: checkpoint, tokenizer: tokenizer, state: state)
++            _ = try output.capture()
++            return output
++        } catch { raw.close(); throw error }
++    }
++
++    /// Validates bounded value state before restoring the raw child. No model, prefill,
++    /// sample, reseed or generation replay. The deterministic tokenizer may decode a
++    /// bounded current segment for validation; the captured emitted segment is retained.
++    public static func restore(_ checkpoint: ResumableTextCheckpoint, model: any LanguageModel,
++                               identity: ResumableTokenIdentity, rawOptions: ResumableTokenOptions,
++                               cacheSpecs: [ResumableCacheSpec], codecs: ResumableStateCodecs = .init(),
++                               tokenizer: any Tokenizer, options: ResumableTextOptions) throws -> ResumableTextOutput {
++        try ResumableTokenDriver.assess(identity: identity, options: rawOptions, cacheSpecs: cacheSpecs)
++        try options.validate(vocabulary: rawOptions.vocabularySize)
++        let document = try checkpoint.document()
++        let child = try ResumableTokenCheckpoint(data: document.raw)
++        let rawDocument = try child.document()
++        guard try ResumableTokenCheckpoint.encoder().encode(document.output.options)
++            == ResumableTokenCheckpoint.encoder().encode(options) else { throw ResumableTokenError.incompatible }
++        try document.output.validate(raw: rawDocument, rawData: document.raw, tokenizer: tokenizer)
++        let driver = try ResumableTokenDriver.restore(child, model: model, identity: identity,
++            options: rawOptions, cacheSpecs: cacheSpecs, codecs: codecs)
++        do {
++            return try ResumableTextOutput(raw: driver, checkpoint: child, tokenizer: tokenizer, state: document.output)
++        } catch { driver.close(); throw error }
++    }
++
++    public func capture() throws -> ResumableTextCheckpoint {
++        guard !isClosed else { throw ResumableTokenError.closed }
++        let state = ResumableTextState(options: options,
++            rawDigest: ResumableTokenCheckpoint.digest(rawCheckpoint.data),
++            segmentTokens: detokenizer.segmentTokens, segment: Data(detokenizer.segment.utf8),
++            emittedTokenCount: emittedTokenCount, buffer: Data(filter.buffer.utf8), stopped: filter.stopped,
++            promptCount: promptCount, generationCount: generationCount, rawCount: rawCount,
++            lastToken: lastToken, terminal: terminalReason)
++        return try ResumableTextCheckpoint(document: .init(raw: rawCheckpoint.data, output: state))
++    }
++
++    /// One raw step, up to two text chunks and one terminal record. S72's lookahead is
++    /// already settled before it returns a token. On output stop we discard that unused
++    /// pending work; no new model call occurs after the output terminal.
++    public func advance() throws -> Batch? {
++        guard !isClosed else { throw ResumableTokenError.closed }
++        guard terminalReason == nil else { return nil }
++        do {
++            guard let raw else { throw ResumableTokenError.invalid("missing raw driver") }
++            guard let step = try raw.advance() else { return try finish(.length, token: nil, records: []) }
++            rawCheckpoint = step.checkpoint; rawCount += 1; lastToken = step.token
++            if options.intercepts(step.token) { return try finish(.stop, token: step.token, records: []) }
++            generationCount += 1
++            guard detokenizer.segmentTokens.count < 65_536 else { throw ResumableTokenError.oversized }
++            detokenizer.append(token: step.token)
++            // Preflight both decode inputs next() may use (including newline reset).
++            // Determinism is the owner's contract; growth is checked before filtering.
++            try ResumableTextState.checkDecode(detokenizer.tokenizer, tokens: detokenizer.segmentTokens)
++            try ResumableTextState.checkDecode(detokenizer.tokenizer, tokens: [step.token])
++            var records: [ResumableTextRecord] = []
++            if let chunk = detokenizer.next() {
++                emittedTokenCount = detokenizer.segmentTokens.count
++                let result = filter.process(chunk)
++                if let text = result.text { records.append(.text(Data(text.utf8))) }
++            }
++            if filter.stopped { return try finish(.stop, token: step.token, records: records) }
++            if raw.exhausted { return try finish(.length, token: step.token, records: records) }
++            return try batch(token: step.token, records: records)
++        } catch { close(); throw error }
++    }
++
++    /// Cancellation is an explicit atomic terminal transition, flushing only an unmatched
++    /// stop prefix. Repeated cancel or advance on a terminal checkpoint returns nil.
++    public func cancel() throws -> Batch? {
++        guard !isClosed else { throw ResumableTokenError.closed }
++        guard terminalReason == nil else { return nil }
++        do { return try finish(.cancelled, token: nil, records: []) }
++        catch { close(); throw error }
++    }
++
++    private func finish(_ reason: ResumableTextEnd, token: Int?, records: [ResumableTextRecord]) throws -> Batch {
++        var records = records
++        if let text = filter.finish() { records.append(.text(Data(text.utf8))) }
++        terminalReason = reason
++        records.append(.terminal(.init(reason: reason, promptTokens: promptCount,
++            generationTokens: generationCount, rawTokens: rawCount)))
++        raw?.close(); raw = nil
++        return try batch(token: token, records: records)
++    }
++
++    private func batch(token: Int?, records: [ResumableTextRecord]) throws -> Batch {
++        let checkpoint = try capture()
++        // Account for returned records as well as retained output state, even though no
++        // queue exists. Actual JSON sizes include enum/base64 overhead.
++        let stateBytes = try ResumableTokenCheckpoint.encoder().encode(checkpoint.document().output).count
++        let recordBytes = try ResumableTokenCheckpoint.encoder().encode(records).count
++        guard records.count <= 3, stateBytes + recordBytes <= ResumableTextCheckpoint.maximumOutputBytes else {
++            throw ResumableTokenError.oversized
++        }
++        return .init(token: token, records: records, checkpoint: checkpoint)
++    }
++
++    /// Silent discard, distinct from cancel's terminal batch. Saved older checkpoints
++    /// remain usable; this closed object cannot advance or capture. No model call.
++    public func close() {
++        guard !isClosed else { return }
++        isClosed = true; raw?.close(); raw = nil
++        detokenizer.segmentTokens = []; detokenizer.segment = ""; filter.buffer = ""
++    }
++}
+diff --git a/Libraries/MLXLMCommon/ResumableTextCheckpoint.swift b/Libraries/MLXLMCommon/ResumableTextCheckpoint.swift
+new file mode 100644
+--- /dev/null
++++ b/Libraries/MLXLMCommon/ResumableTextCheckpoint.swift
+@@ -0,0 +1,166 @@
++// Local candidate: composed raw-token and plain-text output snapshot.
++
++import Foundation
++
++struct ResumableTextState: Codable {
++    var options: ResumableTextOptions
++    var rawDigest: String
++    var segmentTokens: [Int] = []
++    var segment: Data = Data()
++    // Position within the current segment whose decode produced the stored segment.
++    // Incomplete byte tokens can extend segmentTokens without advancing this position.
++    var emittedTokenCount: Int = 0
++    var buffer: Data = Data()
++    var stopped: Bool = false
++    var promptCount: Int
++    var generationCount: Int = 0
++    var rawCount: Int = 0
++    var lastToken: Int?
++    // Non-nil always means terminal already returned atomically. There is no queue.
++    var terminal: ResumableTextEnd?
++
++    static let maximumTextBytes = 256 * 1024
++
++    static func string(_ data: Data) throws -> String {
++        guard data.count <= maximumTextBytes else { throw ResumableTokenError.oversized }
++        guard let string = String(data: data, encoding: .utf8), Data(string.utf8) == data else {
++            throw ResumableTokenError.invalid("output UTF-8")
++        }
++        return string
++    }
++
++    @discardableResult
++    static func checkDecode(_ tokenizer: any Tokenizer, tokens: [Int]) throws -> String {
++        let value = tokenizer.decode(tokenIds: tokens)
++        guard value.utf8.count <= maximumTextBytes else { throw ResumableTokenError.oversized }
++        return value
++    }
++
++    func validate(raw: ResumableDocument, rawData: Data, tokenizer: any Tokenizer) throws {
++        try raw.options.validate()
++        try options.validate(vocabulary: raw.options.vocabularySize)
++        guard rawDigest == ResumableTokenCheckpoint.digest(rawData),
++            promptCount == raw.promptCount, (1...65_536).contains(promptCount),
++            rawCount == raw.tokenCount, (0...raw.options.maximumTokens).contains(rawCount),
++            generationCount >= 0, generationCount <= rawCount,
++            (rawCount == 0) == (lastToken == nil),
++            lastToken.map({ (0..<raw.options.vocabularySize).contains($0) }) ?? true,
++            segmentTokens.count <= generationCount, segmentTokens.count <= 65_536,
++            segmentTokens.allSatisfy({ (0..<raw.options.vocabularySize).contains($0) && !options.intercepts($0) }),
++            (0...segmentTokens.count).contains(emittedTokenCount) else {
++            throw ResumableTokenError.invalid("raw/output binding or counters")
++        }
++        let intercepted = lastToken.map(options.intercepts) ?? false
++        guard generationCount == rawCount - (intercepted ? 1 : 0),
++            (generationCount == 0) == segmentTokens.isEmpty,
++            intercepted || lastToken == segmentTokens.last else {
++            throw ResumableTokenError.invalid("output token accounting")
++        }
++        let segmentString = try Self.string(segment)
++        let bufferString = try Self.string(buffer)
++        guard buffer.count <= 4096 else { throw ResumableTokenError.oversized }
++        let expectedSegment = emittedTokenCount == 0 ? "" : try Self.checkDecode(tokenizer,
++            tokens: Array(segmentTokens.prefix(emittedTokenCount)))
++        guard Data(expectedSegment.utf8) == segment else {
++            throw ResumableTokenError.invalid("detokenizer emitted segment")
++        }
++        if emittedTokenCount < segmentTokens.count {
++            try Self.checkDecode(tokenizer, tokens: segmentTokens)
++            try Self.checkDecode(tokenizer, tokens: [segmentTokens.last!])
++            var detokenizer = NaiveStreamingDetokenizer(tokenizer: tokenizer)
++            detokenizer.segmentTokens = segmentTokens; detokenizer.segment = segmentString
++            guard detokenizer.next() == nil else {
++                throw ResumableTokenError.invalid("unsettled detokenizer output")
++            }
++        }
++        switch terminal {
++        case nil:
++            guard !stopped, !intercepted,
++                !raw.exhausted || (raw.options.maximumTokens == 0 && rawCount == 0) else {
++                throw ResumableTokenError.invalid("active output lifecycle")
++            }
++        case .stop:
++            guard rawCount > 0, intercepted != stopped else {
++                throw ResumableTokenError.invalid("stop reason")
++            }
++        case .length:
++            guard raw.exhausted, !stopped, !intercepted else {
++                throw ResumableTokenError.invalid("length reason")
++            }
++        case .cancelled:
++            guard !stopped, !intercepted else { throw ResumableTokenError.invalid("cancel reason") }
++        }
++        guard terminal == nil || buffer.isEmpty else {
++            throw ResumableTokenError.invalid("terminal buffer was not drained")
++        }
++        if terminal == nil {
++            var check = StopStringFilter(stopStrings: Set(options.stopStrings))
++            let result = check.process(bufferString)
++            guard result.text == nil, !result.stopped, Data(check.buffer.utf8) == buffer else {
++                throw ResumableTokenError.invalid("partial stop buffer")
++            }
++        }
++    }
++}
++
++struct ResumableTextDocument: Codable {
++    var version: Int = 1
++    var rawSchema: Int = 2
++    var rawCandidate: String = ResumableTextCheckpoint.rawCandidate
++    var raw: Data
++    var output: ResumableTextState
++}
++
++/// Bounded immutable value. Checksums detect accidental corruption, not attacker changes.
++/// No encryption, host durability, acknowledgment cursor, timing or external effects.
++public struct ResumableTextCheckpoint: Equatable, Sendable {
++    public static let maximumBytes = 16 * 1024 * 1024
++    public static let maximumOutputBytes = 1024 * 1024
++    public static let rawCandidate = "35a3be79e989c39ae568f97a70baf8bdb5b75f3161919803cc8a1530a0db63ab"
++    public let data: Data
++
++    init(document: ResumableTextDocument) throws {
++        guard document.raw.count <= ResumableTokenCheckpoint.maximumBytes,
++            document.output.segmentTokens.count <= 65_536,
++            document.output.segment.count <= ResumableTextState.maximumTextBytes,
++            document.output.buffer.count <= 4096 else { throw ResumableTokenError.oversized }
++        guard try ResumableTokenCheckpoint.encoder().encode(document.output).count <= Self.maximumOutputBytes else {
++            throw ResumableTokenError.oversized
++        }
++        let payload = try ResumableTokenCheckpoint.encoder().encode(document)
++        guard payload.count <= Self.maximumBytes else { throw ResumableTokenError.oversized }
++        let data = try ResumableTokenCheckpoint.encoder().encode(ResumableTokenCheckpoint.Envelope(
++            payload: payload, sha256: ResumableTokenCheckpoint.digest(payload)))
++        guard data.count <= Self.maximumBytes else { throw ResumableTokenError.oversized }
++        self.data = data
++    }
++
++    public init(data: Data) throws {
++        guard data.count <= Self.maximumBytes else { throw ResumableTokenError.oversized }
++        self.data = data
++        _ = try document()
++    }
++
++    func document() throws -> ResumableTextDocument {
++        guard data.count <= Self.maximumBytes else { throw ResumableTokenError.oversized }
++        do {
++            let envelope = try JSONDecoder().decode(ResumableTokenCheckpoint.Envelope.self, from: data)
++            guard ResumableTokenCheckpoint.digest(envelope.payload) == envelope.sha256 else {
++                throw ResumableTokenError.invalid("text checksum")
++            }
++            struct Header: Decodable { let version: Int; let rawSchema: Int; let rawCandidate: String }
++            let header = try JSONDecoder().decode(Header.self, from: envelope.payload)
++            guard header.version == 1, header.rawSchema == 2, header.rawCandidate == Self.rawCandidate else {
++                throw ResumableTokenError.incompatible
++            }
++            let document = try JSONDecoder().decode(ResumableTextDocument.self, from: envelope.payload)
++            guard document.raw.count <= ResumableTokenCheckpoint.maximumBytes,
++                document.output.segmentTokens.count <= 65_536,
++                try ResumableTokenCheckpoint.encoder().encode(document.output).count <= Self.maximumOutputBytes else {
++                throw ResumableTokenError.oversized
++            }
++            return document
++        } catch let error as ResumableTokenError { throw error }
++        catch { throw ResumableTokenError.invalid("text checkpoint encoding") }
++    }
++}
+diff --git a/Tests/MLXLMTests/ResumableTextOutputTests.swift b/Tests/MLXLMTests/ResumableTextOutputTests.swift
+new file mode 100644
+--- /dev/null
++++ b/Tests/MLXLMTests/ResumableTextOutputTests.swift
+@@ -0,0 +1,251 @@
++import Foundation
++import MLX
++import MLXNN
++import XCTest
++@testable import MLXLMCommon
++
++struct TextFixtureTokenizer: Tokenizer {
++    var pieces: [Int: String] = [1: "a", 2: "b", 3: "\n", 4: "  ", 5: ",",
++        6: "<", 7: "stop", 8: ">hidden", 9: "{\"tool\":", 10: "<tool_call>",
++        13: "e\u{301}", 14: "é", 15: "tail"]
++    func encode(text: String, addSpecialTokens: Bool) -> [Int] { [] }
++    func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String {
++        var result = "", index = 0
++        while index < tokenIds.count {
++            if tokenIds[index] == 11 {
++                if index + 1 < tokenIds.count && tokenIds[index + 1] == 12 {
++                    result += "中"; index += 2; continue
++                }
++                result += "\u{fffd}"
++            } else if tokenIds[index] == 12 { result += "\u{fffd}" }
++            else { result += pieces[tokenIds[index]] ?? "" }
++            index += 1
++        }
++        return result.replacingOccurrences(of: "  ,", with: " ,")
++    }
++    func convertTokenToId(_ token: String) -> Int? { nil }
++    func convertIdToToken(_ id: Int) -> String? { pieces[id] }
++    var bosToken: String? { nil }
++    var eosToken: String? { nil }
++    var unknownToken: String? { nil }
++    func applyChatTemplate(messages: [[String: any Sendable]], tools: [[String: any Sendable]]?,
++                           additionalContext: [String: any Sendable]?) throws -> [Int] { [] }
++}
++
++let textPositionKey = LMOutput.Key<Int>("s73.unit.position")
++func textCodecs() throws -> ResumableStateCodecs {
++    var codecs = ResumableStateCodecs()
++    try codecs.register(textPositionKey, type: "integer", schema: 1,
++        encode: { .init(metadata: try JSONEncoder().encode($0)) },
++        decode: { try JSONDecoder().decode(Int.self, from: $0.metadata) })
++    return codecs
++}
++final class TextScriptModel: Module, LanguageModel {
++    let script: [Int]
++    var calls = 0
++    init(_ script: [Int]) { self.script = script; super.init() }
++    func newCache(parameters: GenerateParameters?) -> [KVCache] { [] }
++    func prepare(_ input: LMInput, cache: [KVCache], state: LMOutput.State?, windowSize: Int?) throws -> PrepareResult {
++        throw ResumableTokenError.unsupported("generic prepare must not be called")
++    }
++    func callAsFunction(_ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?) -> LMOutput {
++        calls += 1
++        let position = state?[textPositionKey] ?? 0
++        var values = [Float](repeating: -Float.infinity, count: 32)
++        values[script[min(position, script.count - 1)]] = 0
++        var next = LMOutput.State(); next[textPositionKey] = position + 1
++        return .init(logits: MLXArray(values, [1, 1, 32]), state: next)
++    }
++}
++
++struct TextTestSetup {
++    let model: TextScriptModel
++    let tokenizer: TextFixtureTokenizer
++    let identity: ResumableTokenIdentity
++    let rawOptions: ResumableTokenOptions
++    let options: ResumableTextOptions
++    init(_ script: [Int], limit: Int? = nil, stops: Set<String> = [],
++         tokenizer: TextFixtureTokenizer = .init()) throws {
++        model = TextScriptModel(script); self.tokenizer = tokenizer
++        identity = try .init(model: "s73-script", configuration: "v1", weights: "constant",
++            input: ResumableTokenIdentity.inputDigest([1]), backend: "native-s73-test", dependency: "s72-schema2")
++        rawOptions = .init(vocabularySize: 32, maximumTokens: limit ?? script.count)
++        options = try .init(tokenizerIdentity: "s73-byte-fixture-v1", stopTokenIDs: [30], unknownTokenID: 31,
++            stopStrings: stops)
++    }
++    func prepare() throws -> ResumableTextOutput {
++        try .prepare(model: model, tokens: [1], identity: identity, rawOptions: rawOptions,
++            cacheSpecs: [], codecs: textCodecs(), tokenizer: tokenizer, options: options)
++    }
++    func restore(_ checkpoint: ResumableTextCheckpoint, model: TextScriptModel? = nil,
++                 options: ResumableTextOptions? = nil) throws -> ResumableTextOutput {
++        try .restore(checkpoint, model: model ?? self.model, identity: identity, rawOptions: rawOptions,
++            cacheSpecs: [], codecs: textCodecs(), tokenizer: tokenizer, options: options ?? self.options)
++    }
++}
++
++func textDrain(_ driver: ResumableTextOutput) throws -> [ResumableTextRecord] {
++    var records: [ResumableTextRecord] = []
++    while let batch = try driver.advance() { records += batch.records }
++    return records
++}
++func chunks(_ records: [ResumableTextRecord]) -> [Data] {
++    records.compactMap { if case .text(let bytes) = $0 { return bytes }; return nil }
++}
++func completion(_ records: [ResumableTextRecord]) -> ResumableTextCompletion? {
++    records.compactMap { if case .terminal(let info) = $0 { return info }; return nil }.last
++}
++func textOracle(_ script: [Int], tokenizer: any Tokenizer, stops: Set<String>) -> [Data] {
++    var detokenizer = NaiveStreamingDetokenizer(tokenizer: tokenizer)
++    var filter = StopStringFilter(stopStrings: stops)
++    var result: [Data] = []
++    for token in script {
++        if token == 30 || token == 31 { break }
++        detokenizer.append(token: token)
++        if let chunk = detokenizer.next() {
++            let step = filter.process(chunk)
++            if let text = step.text { result.append(Data(text.utf8)) }
++            if step.stopped { break }
++        }
++    }
++    if let text = filter.finish() { result.append(Data(text.utf8)) }
++    return result
++}
++
++final class ResumableTextOutputTests: XCTestCase {
++    func testEveryBoundaryMatchesOrderedPinnedChunks() throws {
++        let cases: [([Int], Set<String>)] = [
++            ([1,11,12,2], []), ([3,4,5,9,10], []), ([1,6,7,8,15], ["<stop>"]),
++            ([1,6], ["<stop>"]), ([1,11], []), ([13,14,9,10], [""]),
++            ([1,6,7,8], ["<", "<stop>"]),
++        ]
++        for (script, stops) in cases {
++            let setup = try TextTestSetup(script, stops: stops)
++            let uninterrupted = try setup.prepare()
++            let all = try textDrain(uninterrupted)
++            XCTAssertEqual(chunks(all), textOracle(script, tokenizer: setup.tokenizer, stops: stops))
++            for cut in 0...script.count {
++                let producer = try setup.prepare()
++                var prefix: [ResumableTextRecord] = []
++                for _ in 0..<cut { if let batch = try producer.advance() { prefix += batch.records } }
++                let saved = try producer.capture(); let immutable = saved.data
++                let suffix = try textDrain(producer)
++                let model = TextScriptModel(script)
++                let restored = try setup.restore(.init(data: saved.data), model: model)
++                XCTAssertEqual(model.calls, 0)
++                XCTAssertEqual(try textDrain(restored), suffix)
++                XCTAssertEqual(prefix + suffix, all)
++                XCTAssertEqual(saved.data, immutable)
++                XCTAssertEqual(try restored.capture().data, try producer.capture().data)
++                restored.close(); producer.close()
++            }
++            uninterrupted.close()
++        }
++    }
++
++    func testEOSUnknownAndLastTokenStopPriorityAndCounts() throws {
++        for stopToken in [30,31] {
++            let setup = try TextTestSetup([1,6,stopToken], stops: ["<stop>"])
++            let driver = try setup.prepare()
++            let result = try textDrain(driver)
++            XCTAssertEqual(chunks(result), [Data("a".utf8), Data("<".utf8)])
++            XCTAssertEqual(completion(result)?.reason, .stop)
++            XCTAssertEqual(completion(result)?.generationTokens, 2)
++            XCTAssertEqual(completion(result)?.rawTokens, 3)
++            XCTAssertEqual(completion(result)?.promptTokens, 1)
++            let restored = try setup.restore(driver.capture(), model: TextScriptModel([1,6,stopToken]))
++            XCTAssertNil(try restored.advance()); restored.close(); driver.close()
++        }
++        let setup = try TextTestSetup([1,6,7,8], stops: ["<stop>"])
++        let driver = try setup.prepare(); let result = try textDrain(driver)
++        XCTAssertEqual(completion(result)?.reason, .stop)
++        XCTAssertEqual(completion(result)?.generationTokens, 4)
++        XCTAssertEqual(chunks(result), [Data("a".utf8)])
++        driver.close()
++    }
++
++    func testZeroLimitAndTerminalRestoreNeverRedeliver() throws {
++        let setup = try TextTestSetup([1], limit: 0)
++        let driver = try setup.prepare(); XCTAssertEqual(setup.model.calls, 0)
++        let c0 = try driver.capture()
++        let first = try XCTUnwrap(driver.advance())
++        XCTAssertEqual(first.records.count, 1)
++        XCTAssertNil(first.token)
++        XCTAssertEqual(completion(first.records)?.reason, .length)
++        XCTAssertEqual(completion(first.records)?.generationTokens, 0)
++        let fresh = TextScriptModel([1])
++        let atZero = try setup.restore(c0, model: fresh)
++        XCTAssertEqual(try atZero.advance()?.records, first.records)
++        let terminal = try setup.restore(first.checkpoint, model: fresh)
++        XCTAssertNil(try terminal.advance()); XCTAssertNil(try terminal.cancel())
++        XCTAssertEqual(fresh.calls, 0)
++        terminal.close(); atZero.close(); driver.close()
++    }
++
++    func testCancelFlushesOnceAndCloseSilentlyDiscards() throws {
++        let setup = try TextTestSetup([1,6,7,8], stops: ["<stop>"])
++        let driver = try setup.prepare()
++        _ = try driver.advance(); _ = try driver.advance()
++        let before = try driver.capture(); let calls = setup.model.calls
++        let cancelled = try XCTUnwrap(driver.cancel())
++        XCTAssertEqual(chunks(cancelled.records), [Data("<".utf8)])
++        XCTAssertEqual(completion(cancelled.records)?.reason, .cancelled)
++        XCTAssertEqual(setup.model.calls, calls)
++        XCTAssertNil(try driver.cancel()); XCTAssertNil(try driver.advance())
++        let restored = try setup.restore(cancelled.checkpoint, model: TextScriptModel([1,6,7,8]))
++        XCTAssertNil(try restored.advance()); restored.close()
++        let earlier = try setup.restore(before)
++        earlier.close(); earlier.close()
++        XCTAssertThrowsError(try earlier.capture()); XCTAssertThrowsError(try earlier.advance())
++        driver.close()
++    }
++
++    func testLookaheadAlreadySettledButNoCallsAfterOutputStop() throws {
++        let setup = try TextTestSetup([30,1,2,3])
++        let driver = try setup.prepare(); XCTAssertEqual(setup.model.calls, 1)
++        let terminal = try XCTUnwrap(driver.advance())
++        XCTAssertEqual(setup.model.calls, 2) // accepted S72 lookahead, not a new post-stop call
++        XCTAssertEqual(completion(terminal.records)?.generationTokens, 0)
++        let fresh = TextScriptModel([30,1,2,3])
++        let restored = try setup.restore(terminal.checkpoint, model: fresh)
++        for _ in 0..<3 { XCTAssertNil(try restored.advance()); XCTAssertNil(try driver.advance()) }
++        XCTAssertEqual(fresh.calls, 0); XCTAssertEqual(setup.model.calls, 2)
++        restored.close(); driver.close()
++    }
++
++    func testUTF8EqualityAndLiteralParserDisabledOutput() throws {
++        let setup = try TextTestSetup([13,14,9,10])
++        let driver = try setup.prepare(); let result = chunks(try textDrain(driver))
++        XCTAssertEqual(result, [Data("e\u{301}".utf8),Data("é".utf8),Data("{\"tool\":".utf8),Data("<tool_call>".utf8)])
++        XCTAssertNotEqual(result[0], result[1])
++        driver.close()
++    }
++
++    func testOversizedDecodeRefusesAndClosesWithoutBatch() throws {
++        var tokenizer = TextFixtureTokenizer()
++        tokenizer.pieces[1] = String(repeating: "x", count: ResumableTextState.maximumTextBytes + 1)
++        let setup = try TextTestSetup([1,2], tokenizer: tokenizer)
++        let driver = try setup.prepare()
++        XCTAssertThrowsError(try driver.advance()) { XCTAssertEqual($0 as? ResumableTokenError, .oversized) }
++        XCTAssertTrue(driver.isClosed); XCTAssertThrowsError(try driver.capture())
++    }
++
++    func testPinnedStopFilterAssertions() {
++        var filter = StopStringFilter(stopStrings: ["<stop>"])
++        XCTAssertEqual(filter.process("hel").text, "hel")
++        XCTAssertEqual(filter.process("lo<").text, "lo")
++        XCTAssertNil(filter.process("stop").text)
++        XCTAssertTrue(filter.process(">hidden").stopped)
++        XCTAssertNil(filter.process("tail").text); XCTAssertNil(filter.finish())
++        var partial = StopStringFilter(stopStrings: ["<stop>"])
++        XCTAssertEqual(partial.process("hello<").text, "hello")
++        XCTAssertEqual(partial.process("world").text, "<world")
++        XCTAssertNil(partial.finish())
++        var empty = StopStringFilter(stopStrings: [""])
++        XCTAssertEqual(empty.process("visible").text, "visible")
++        var overlap = StopStringFilter(stopStrings: ["<", "<stop>"])
++        XCTAssertTrue(overlap.process("a<").stopped)
++        var earliest = StopStringFilter(stopStrings: ["END", "STOP"])
++        XCTAssertEqual(earliest.process("aSTOPbENDc").text, "a")
++    }
++}
+diff --git a/Tests/MLXLMTests/ResumableTextCheckpointTests.swift b/Tests/MLXLMTests/ResumableTextCheckpointTests.swift
+new file mode 100644
+--- /dev/null
++++ b/Tests/MLXLMTests/ResumableTextCheckpointTests.swift
+@@ -0,0 +1,91 @@
++import Foundation
++import XCTest
++@testable import MLXLMCommon
++
++final class ResumableTextCheckpointTests: XCTestCase {
++    func testIncompatibleOptionsAndRawBindingLeaveExistingDriverUntouched() throws {
++        let setup = try TextTestSetup([1,11,12,6,7,8], stops: ["<stop>"])
++        let driver = try setup.prepare(); _ = try driver.advance(); _ = try driver.advance()
++        let saved = try driver.capture(); let calls = setup.model.calls
++        for options in [
++            try ResumableTextOptions(tokenizerIdentity: "changed", stopTokenIDs: [30], unknownTokenID: 31, stopStrings: ["<stop>"]),
++            try ResumableTextOptions(tokenizerIdentity: "s73-byte-fixture-v1", stopTokenIDs: [30], unknownTokenID: 31, stopStrings: ["changed"]),
++            try ResumableTextOptions(tokenizerIdentity: "s73-byte-fixture-v1", stopTokenIDs: [29], unknownTokenID: 31, stopStrings: ["<stop>"]),
++        ] { XCTAssertThrowsError(try setup.restore(saved, options: options)) }
++        var document = try saved.document()
++        let different = try setup.prepare(); document.raw = try different.capture().document().raw
++        XCTAssertThrowsError(try setup.restore(.init(document: document)))
++        XCTAssertEqual(setup.model.calls, calls + 1) // only explicit different.prepare
++        XCTAssertEqual(try driver.capture(), saved)
++        let fresh = TextScriptModel([1,11,12,6,7,8])
++        let restored = try setup.restore(saved, model: fresh)
++        XCTAssertEqual(fresh.calls, 0)
++        XCTAssertEqual(try textDrain(restored), try textDrain(driver))
++        restored.close(); different.close(); driver.close()
++    }
++
++    func testMalformedCounterLifecycleAndSegmentRefusals() throws {
++        let setup = try TextTestSetup([1,11,12,6,7,8], stops: ["<stop>"])
++        let driver = try setup.prepare(); _ = try driver.advance(); _ = try driver.advance()
++        let checkpoint = try driver.capture(); let document = try checkpoint.document()
++        let changes: [(inout ResumableTextDocument) -> Void] = [
++            { $0.output.rawCount += 1 }, { $0.output.generationCount += 1 },
++            { $0.output.promptCount += 1 }, { $0.output.terminal = .stop },
++            { $0.output.terminal = .length }, { $0.output.stopped = true },
++            { $0.output.lastToken = 30 }, { $0.output.segmentTokens = [99] },
++            { $0.output.segment = Data("wrong".utf8) }, { $0.output.segment = Data([0xff]) },
++            { $0.output.emittedTokenCount = Int.max }, { $0.output.buffer = Data("leak".utf8) },
++            { $0.output.rawDigest = "wrong" },
++        ]
++        for change in changes {
++            var altered = document; change(&altered)
++            let fresh = TextScriptModel([1,11,12,6,7,8])
++            XCTAssertThrowsError(try setup.restore(.init(document: altered), model: fresh))
++            XCTAssertEqual(fresh.calls, 0)
++            XCTAssertEqual(try driver.capture(), checkpoint)
++        }
++        driver.close()
++    }
++
++    func testSchemaCorruptionTruncationRawOnlyAndEncodedBounds() throws {
++        let setup = try TextTestSetup([1,2]); let driver = try setup.prepare()
++        let checkpoint = try driver.capture()
++        for mutate in [
++            { (d: inout ResumableTextDocument) in d.version = 2 },
++            { (d: inout ResumableTextDocument) in d.rawSchema = 1 },
++            { (d: inout ResumableTextDocument) in d.rawCandidate = "other" },
++        ] {
++            var d = try checkpoint.document(); mutate(&d)
++            XCTAssertThrowsError(try ResumableTextCheckpoint(data: ResumableTextCheckpoint(document: d).data)) {
++                XCTAssertEqual($0 as? ResumableTokenError, .incompatible)
++            }
++        }
++        XCTAssertThrowsError(try ResumableTextCheckpoint(data: checkpoint.data.dropLast()))
++        var damaged = checkpoint.data; damaged[damaged.count / 2] ^= 1
++        XCTAssertThrowsError(try ResumableTextCheckpoint(data: damaged))
++        XCTAssertThrowsError(try ResumableTextCheckpoint(data: checkpoint.document().raw))
++        XCTAssertThrowsError(try ResumableTextCheckpoint(data: Data(count: ResumableTextCheckpoint.maximumBytes + 1)))
++        var huge = try checkpoint.document(); huge.output.segment = Data(count: ResumableTextState.maximumTextBytes + 1)
++        XCTAssertThrowsError(try ResumableTextCheckpoint(document: huge))
++        huge = try checkpoint.document(); huge.output.options = try .init(tokenizerIdentity: String(repeating: "x", count: 800_000))
++        huge.output.segment = Data(repeating: 97, count: 200_000)
++        XCTAssertThrowsError(try ResumableTextCheckpoint(document: huge))
++        huge = try checkpoint.document(); huge.raw = Data(count: ResumableTokenCheckpoint.maximumBytes + 1)
++        XCTAssertThrowsError(try ResumableTextCheckpoint(document: huge))
++        driver.close()
++    }
++
++    func testTerminalBufferAndIncompleteByteStateAreValidated() throws {
++        let setup = try TextTestSetup([1,11], stops: ["<stop>"])
++        let driver = try setup.prepare(); _ = try textDrain(driver)
++        let checkpoint = try driver.capture()
++        let restored = try setup.restore(checkpoint, model: TextScriptModel([1,11]))
++        XCTAssertNil(try restored.advance())
++        var d = try checkpoint.document(); d.output.buffer = Data("<".utf8)
++        XCTAssertThrowsError(try setup.restore(.init(document: d)))
++        d = try checkpoint.document(); d.output.segmentTokens = [1,2]
++        d.output.lastToken = 2
++        XCTAssertThrowsError(try setup.restore(.init(document: d)))
++        restored.close(); driver.close()
++    }
++}
