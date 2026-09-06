@@ -1,0 +1,697 @@
+diff --git a/Libraries/MLXLMCommon/Tool/ToolCallProcessor.swift b/Libraries/MLXLMCommon/Tool/ToolCallProcessor.swift
+--- a/Libraries/MLXLMCommon/Tool/ToolCallProcessor.swift
++++ b/Libraries/MLXLMCommon/Tool/ToolCallProcessor.swift
+@@ -43,13 +43,15 @@
+     private var emittedToolCallIDs: Set<String> = []
+     private var orderedOutputQueue: [Output] = []
+     private var orderedOutputEnabled = false
++    private var resumableIDs: ToolCallIDSequence?
++    private var resumableFailure: Error?
+
+     /// The tool calls extracted during processing.
+     public var toolCalls: [ToolCall] = []
+
+     // MARK: - State Enum
+
+-    private enum State {
++    private enum State: String {
+         case normal
+         case potentialToolCall
+         case collectingToolCall
+@@ -73,6 +75,39 @@
+         self.parser = format.createParser()
+         self.tools = tools
+         self.supportsBareJSONFallback = format == .json
++    }
++
++    // Internal opt-in hooks. Legacy initialization and UUID normalization are
++    // untouched unless an exclusively owned resumable facade enables this lane.
++    func enableResumable(_ allocation: ToolCallIDSequence) throws {
++        guard state == .normal, toolCallBuffer.isEmpty, emittedToolCallIDs.isEmpty,
++            toolCalls.isEmpty, orderedOutputQueue.isEmpty, !orderedOutputEnabled else {
++            throw ResumableToolCallError.invalid("exclusive parser ownership")
++        }
++        try allocation.validate(format:format,issued:[])
++        resumableIDs=allocation; orderedOutputEnabled=true
++    }
++
++    func captureResumable() throws -> ToolProcessorCheckpointState {
++        if let resumableFailure { throw resumableFailure }
++        guard let resumableIDs, orderedOutputEnabled, toolCalls.isEmpty, orderedOutputQueue.isEmpty else {
++            throw ResumableToolCallError.invalid("undrained parser")
++        }
++        let saved=ToolProcessorCheckpointState(state:state.rawValue,buffer:Data(toolCallBuffer.utf8),
++            issued:emittedToolCallIDs.map { Data($0.utf8) }.sorted { $0.lexicographicallyPrecedes($1) },allocation:resumableIDs)
++        try saved.validate(format:format); return saved
++    }
++
++    func restoreResumable(_ saved: ToolProcessorCheckpointState) throws {
++        guard state == .normal, toolCallBuffer.isEmpty, emittedToolCallIDs.isEmpty,
++            toolCalls.isEmpty, orderedOutputQueue.isEmpty, !orderedOutputEnabled else {
++            throw ResumableToolCallError.invalid("restore needs fresh parser")
++        }
++        try saved.validate(format:format)
++        guard let restoredState=State(rawValue:saved.state) else { throw ResumableToolCallError.invalid("parser state") }
++        state=restoredState; toolCallBuffer=try ToolCheckpointEncoding.string(saved.buffer)
++        emittedToolCallIDs=Set(try saved.issued.map { try ToolCheckpointEncoding.string($0,maximum:256) })
++        resumableIDs=saved.allocation; orderedOutputEnabled=true
+     }
+
+     // MARK: - Computed Properties
+@@ -709,6 +744,24 @@
+     }
+
+     private func normalizedToolCall(_ call: ToolCall) -> ToolCall {
++        if var allocation=resumableIDs {
++            if resumableFailure != nil { return call }
++            do {
++                guard emittedToolCallIDs.count<4096 else { throw ResumableToolCallError.oversized }
++                if let id=call.id, !id.isEmpty {
++                    try ToolCheckpointEncoding.id(id)
++                    if emittedToolCallIDs.insert(id).inserted { return call }
++                }
++                let id=try allocation.next(format:format,issued:&emittedToolCallIDs)
++                resumableIDs=allocation
++                return ToolCall(function:call.function,id:id)
++            } catch {
++                // The nonthrowing legacy parser finishes its private operation.
++                // The facade detects this before publishing any batch and closes.
++                resumableFailure=error
++                return call
++            }
++        }
+         if let id = call.id, !id.isEmpty, emittedToolCallIDs.insert(id).inserted {
+             return call
+         }
+diff --git a/Libraries/MLXLMCommon/Tool/ResumableToolCallProcessor.swift b/Libraries/MLXLMCommon/Tool/ResumableToolCallProcessor.swift
+new file mode 100644
+--- /dev/null
++++ b/Libraries/MLXLMCommon/Tool/ResumableToolCallProcessor.swift
+@@ -0,0 +1,113 @@
++import Foundation
++
++/// Response equality/serialization uses exact UTF-8 bytes. Tool arguments retain
++/// the pinned parser's JSONValue types through the tagged checkpoint codec.
++public enum ResumableToolCallRecord: Codable, Sendable {
++    case response(Data)
++    case toolCall(ToolCall)
++    private enum Payload: Codable {
++        case response(Data)
++        case call(id: Data, name: Data, arguments: ToolCheckpointJSON)
++    }
++    public func encode(to encoder: Encoder) throws {
++        switch self {
++        case .response(let bytes):
++            _=try ToolCheckpointEncoding.string(bytes,maximum:512*1024)
++            try Payload.response(bytes).encode(to:encoder)
++        case .toolCall(let call):
++            guard let id=call.id else { throw ResumableToolCallError.invalid("missing normalized ID") }
++            try ToolCheckpointEncoding.id(id)
++            guard call.function.name.utf8.count<=4096 else { throw ResumableToolCallError.oversized }
++            try Payload.call(id:Data(id.utf8),name:Data(call.function.name.utf8),arguments:ToolCheckpointJSON(.object(call.function.arguments))).encode(to:encoder)
++        }
++    }
++    public init(from decoder: Decoder) throws {
++        switch try Payload(from:decoder) {
++        case .response(let bytes):
++            _=try ToolCheckpointEncoding.string(bytes,maximum:512*1024); self = .response(bytes)
++        case .call(let bytes,let name,let arguments):
++            let id=try ToolCheckpointEncoding.string(bytes,maximum:256); try ToolCheckpointEncoding.id(id)
++            guard case .object(let arguments)=try arguments.value() else { throw ResumableToolCallError.invalid("arguments object") }
++            self = try .toolCall(.init(function:.init(name:ToolCheckpointEncoding.string(name,maximum:4096),arguments:arguments),id:id))
++        }
++    }
++}
++
++/// Exclusively owns the actual ordered parser at drained chunk/EOS boundaries.
++/// A failed consume/finish closes this facade and returns no usable partial batch.
++/// Earlier independent frozen checkpoints remain valid. No tool is executed.
++public final class ResumableToolCallProcessor {
++    public struct Batch {
++        public let records: [ResumableToolCallRecord]
++        public let checkpoint: ResumableToolCallCheckpoint
++    }
++    public let configuration: ResumableToolCallConfiguration
++    public let namespace: String
++    public private(set) var isClosed=false
++    public private(set) var isFinished: Bool
++    private var sequence: UInt64
++    private var processor: ToolCallProcessor?
++    private init(configuration: ResumableToolCallConfiguration, namespace: String, processor: ToolCallProcessor, sequence: UInt64, finished: Bool) {
++        self.configuration=configuration; self.namespace=namespace; self.processor=processor
++        self.sequence=sequence; self.isFinished=finished
++    }
++    public static func prepare(configuration: ResumableToolCallConfiguration,
++                               namespace: String = UUID().uuidString.replacingOccurrences(of:"-",with:"").lowercased()) throws -> ResumableToolCallProcessor {
++        let allocation=ToolCallIDSequence(namespace:namespace)
++        try allocation.validate(format:configuration.format,issued:[])
++        let parser=ToolCallProcessor(format:configuration.format,tools:try configuration.validatedTools())
++        try parser.enableResumable(allocation)
++        let result=ResumableToolCallProcessor(configuration:configuration,namespace:namespace,processor:parser,sequence:0,finished:false)
++        _=try result.capture(); return result
++    }
++    public static func restore(_ checkpoint: ResumableToolCallCheckpoint, configuration: ResumableToolCallConfiguration,
++                               namespace: String) throws -> ResumableToolCallProcessor {
++        _=try configuration.validatedTools()
++        let document=try checkpoint.document()
++        guard try ToolCheckpointEncoding.encode(configuration)==ToolCheckpointEncoding.encode(document.configuration),
++            namespace==document.parser.allocation.namespace else { throw ResumableToolCallError.incompatible }
++        let parser=ToolCallProcessor(format:configuration.format,tools:try configuration.validatedTools())
++        try parser.restoreResumable(document.parser)
++        return .init(configuration:configuration,namespace:namespace,processor:parser,sequence:document.sequence,finished:document.finished)
++    }
++    public func capture() throws -> ResumableToolCallCheckpoint {
++        guard !isClosed, let processor else { throw ResumableToolCallError.closed }
++        let document=ToolCallCheckpointDocument(configuration:configuration,parser:try processor.captureResumable(),sequence:sequence,finished:isFinished)
++        try document.validate()
++        return try .init(document:document)
++    }
++    public func consume(_ chunk: String) throws -> Batch {
++        guard !isClosed else { throw ResumableToolCallError.closed }
++        guard !isFinished else { throw ResumableToolCallError.finished }
++        do {
++            guard chunk.utf8.count<=64*1024 else { throw ResumableToolCallError.oversized }
++            guard sequence<1_000_000, let processor else { throw ResumableToolCallError.exhausted }
++            let output=processor.processChunkOutputs(chunk); sequence+=1
++            return try batch(output)
++        } catch { close(); throw error }
++    }
++    public func finish() throws -> Batch? {
++        guard !isClosed else { throw ResumableToolCallError.closed }
++        guard !isFinished else { return nil }
++        do {
++            guard sequence<1_000_000, let processor else { throw ResumableToolCallError.exhausted }
++            let output=processor.processEOSOutputs(); sequence+=1; isFinished=true
++            return try batch(output)
++        } catch { close(); throw error }
++    }
++    private func batch(_ output: [ToolCallProcessor.Output]) throws -> Batch {
++        guard output.count<=4096 else { throw ResumableToolCallError.oversized }
++        let records:[ResumableToolCallRecord]=output.map {
++            switch $0 { case .response(let text): return .response(Data(text.utf8)); case .toolCall(let call): return .toolCall(call) }
++        }
++        let checkpoint=try capture()
++        try Self.validateBatch(records,checkpoint:checkpoint)
++        return .init(records:records,checkpoint:checkpoint)
++    }
++    static func validateBatch(_ records:[ResumableToolCallRecord], checkpoint:ResumableToolCallCheckpoint) throws {
++        guard records.count<=4096 else { throw ResumableToolCallError.oversized }
++        struct EncodedBatch: Encodable { let records:[ResumableToolCallRecord]; let checkpoint:Data }
++        guard try ToolCheckpointEncoding.encode(EncodedBatch(records:records,checkpoint:checkpoint.data)).count<=2*1024*1024 else { throw ResumableToolCallError.oversized }
++    }
++    public func close() { isClosed=true; processor=nil }
++}
+diff --git a/Libraries/MLXLMCommon/Tool/ResumableToolCallCheckpoint.swift b/Libraries/MLXLMCommon/Tool/ResumableToolCallCheckpoint.swift
+new file mode 100644
+--- /dev/null
++++ b/Libraries/MLXLMCommon/Tool/ResumableToolCallCheckpoint.swift
+@@ -0,0 +1,211 @@
++import Foundation
++import CryptoKit
++
++public enum ResumableToolCallError: Error { case closed, finished, oversized, incompatible, invalid(String), exhausted }
++
++enum ToolCheckpointEncoding {
++    static func encode<T: Encodable>(_ value: T) throws -> Data {
++        let encoder=JSONEncoder(); encoder.outputFormatting=[.sortedKeys,.withoutEscapingSlashes]
++        return try encoder.encode(value)
++    }
++    static func digest(_ data: Data) -> String { SHA256.hash(data:data).map { String(format:"%02x",$0) }.joined() }
++    static func string(_ bytes: Data, maximum: Int = 256*1024) throws -> String {
++        guard bytes.count<=maximum else { throw ResumableToolCallError.oversized }
++        guard let text=String(data:bytes,encoding:.utf8) else { throw ResumableToolCallError.invalid("UTF-8") }
++        return text
++    }
++    static func id(_ id: String) throws {
++        guard !id.isEmpty, id.utf8.count<=256 else { throw ResumableToolCallError.invalid("call ID") }
++    }
++}
++
++// A tagged codec preserves Int vs Double (including negative zero) rather than
++// round-tripping JSONValue's untagged decoder, which prefers Int for 1.0.
++indirect enum ToolCheckpointJSON: Codable, Sendable {
++    case null, bool(Bool), integer(Int), number(UInt64), text(Data)
++    case array([ToolCheckpointJSON]), object([Entry])
++    struct Entry: Codable, Sendable { let key: Data; let value: ToolCheckpointJSON }
++    init(_ value: JSONValue, depth: Int = 0) throws {
++        guard depth<=16 else { throw ResumableToolCallError.oversized }
++        switch value {
++        case .null: self = .null
++        case .bool(let v): self = .bool(v)
++        case .int(let v): self = .integer(v)
++        case .double(let v):
++            guard v.isFinite else { throw ResumableToolCallError.invalid("nonfinite JSON") }
++            self = .number(v.bitPattern)
++        case .string(let v):
++            guard v.utf8.count<=256*1024 else { throw ResumableToolCallError.oversized }
++            self = .text(Data(v.utf8))
++        case .array(let v):
++            guard v.count<=4096 else { throw ResumableToolCallError.oversized }
++            self = .array(try v.map { try .init($0,depth:depth+1) })
++        case .object(let v):
++            guard v.count<=4096 else { throw ResumableToolCallError.oversized }
++            self = .object(try v.keys.sorted { $0.utf8.lexicographicallyPrecedes($1.utf8) }.map {
++                guard $0.utf8.count<=4096 else { throw ResumableToolCallError.oversized }
++                return try Entry(key:Data($0.utf8),value:.init(v[$0]!,depth:depth+1))
++            })
++        }
++    }
++    func value(depth: Int = 0) throws -> JSONValue {
++        guard depth<=16 else { throw ResumableToolCallError.oversized }
++        switch self {
++        case .null: return .null
++        case .bool(let v): return .bool(v)
++        case .integer(let v): return .int(v)
++        case .number(let v):
++            let number=Double(bitPattern:v)
++            guard number.isFinite else { throw ResumableToolCallError.invalid("nonfinite JSON") }
++            return .double(number)
++        case .text(let v): return try .string(ToolCheckpointEncoding.string(v))
++        case .array(let v):
++            guard v.count<=4096 else { throw ResumableToolCallError.oversized }
++            return try .array(v.map { try $0.value(depth:depth+1) })
++        case .object(let v):
++            guard v.count<=4096 else { throw ResumableToolCallError.oversized }
++            var object:[String:JSONValue]=[:]; var previous:Data?
++            for entry in v {
++                let key=try ToolCheckpointEncoding.string(entry.key,maximum:4096)
++                guard object[key]==nil, previous.map({ $0.lexicographicallyPrecedes(entry.key) }) ?? true else {
++                    throw ResumableToolCallError.invalid("JSON object keys")
++                }
++                object[key]=try entry.value.value(depth:depth+1); previous=entry.key
++            }
++            return .object(object)
++        }
++    }
++}
++
++/// Explicit JSON configuration only: no closures or arbitrary Sendable objects.
++public struct ResumableToolCallConfiguration: Codable, Sendable {
++    public let format: ToolCallFormat
++    let offered: ToolCheckpointJSON?
++    public init(format: ToolCallFormat, tools: [[String:JSONValue]]? = nil) throws {
++        self.format=format
++        offered=try tools.map { try ToolCheckpointJSON(.array($0.map { .object($0) })) }
++        _=try validatedTools()
++    }
++    func validatedTools() throws -> [[String:any Sendable]]? {
++        guard try ToolCheckpointEncoding.encode(self).count<=64*1024 else { throw ResumableToolCallError.oversized }
++        guard let offered else { return nil }
++        guard case .array(let values)=try offered.value() else { throw ResumableToolCallError.invalid("offered tools") }
++        return try values.map {
++            guard case .object(let object)=$0 else { throw ResumableToolCallError.invalid("offered tool object") }
++            return object.mapValues { $0.sendableValue }
++        }
++    }
++}
++
++struct ToolCallIDSequence: Codable, Sendable {
++    static let maximumAttempts: UInt64 = 8192
++    var version="sha256-counter-v1"
++    var namespace: String
++    var position: UInt64 = 0
++    func candidate(format: ToolCallFormat, at index: UInt64) -> String {
++        let hex=ToolCheckpointEncoding.digest(Data("S75-ID-v1:\(namespace):\(index)".utf8))
++        return format == .mistral ? String(hex.prefix(9)).uppercased() : "call_"+String(hex.prefix(32))
++    }
++    func validate(format: ToolCallFormat, issued: Set<String>) throws {
++        guard version=="sha256-counter-v1", namespace.utf8.count==32,
++            namespace.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }),
++            position<=Self.maximumAttempts else { throw ResumableToolCallError.invalid("ID allocation") }
++        for index in 0..<position {
++            guard issued.contains(candidate(format:format,at:index)) else { throw ResumableToolCallError.invalid("ID allocation/issued join") }
++        }
++    }
++    mutating func next(format: ToolCallFormat, issued: inout Set<String>) throws -> String {
++        while position<Self.maximumAttempts {
++            let id=candidate(format:format,at:position); position+=1
++            if issued.insert(id).inserted { return id }
++        }
++        throw ResumableToolCallError.exhausted
++    }
++}
++
++struct ToolProcessorCheckpointState: Codable, Sendable {
++    var boundary="ordered-drained-v1"
++    var state: String
++    var buffer: Data
++    var issued: [Data]
++    var allocation: ToolCallIDSequence
++    func validate(format: ToolCallFormat) throws {
++        guard boundary=="ordered-drained-v1", issued.count<=4096 else { throw ResumableToolCallError.invalid("ordered boundary/ID count") }
++        let text=try ToolCheckpointEncoding.string(buffer)
++        var ids=Set<String>(); var previous:Data?
++        for bytes in issued {
++            let id=try ToolCheckpointEncoding.string(bytes,maximum:256); try ToolCheckpointEncoding.id(id)
++            guard ids.insert(id).inserted, previous.map({ $0.lexicographicallyPrecedes(bytes) }) ?? true else {
++                throw ResumableToolCallError.invalid("issued ID set")
++            }
++            previous=bytes
++        }
++        try allocation.validate(format:format,issued:ids)
++        let parser=format.createParser(), scanner=JSONLeadingObjectScanner(startCharacter:"{")
++        switch state {
++        case "normal":
++            guard text.isEmpty else { throw ResumableToolCallError.invalid("normal buffer") }
++        case "potentialToolCall":
++            guard let tag=parser.startTag, !text.isEmpty, tag.hasPrefix(text), text != tag else {
++                throw ResumableToolCallError.invalid("partial tag")
++            }
++        case "collectingToolCall":
++            if let tag=parser.startTag {
++                guard text.hasPrefix(tag), parser.endTag.map({ !text.contains($0) }) ?? true else {
++                    throw ResumableToolCallError.invalid("tagged buffer")
++                }
++            } else {
++                guard format == .llama3, text.hasPrefix("{"), scanner.splitLeadingObject(from:text)==nil else {
++                    throw ResumableToolCallError.invalid("inline buffer")
++                }
++            }
++        case "collectingJSONToolCall":
++            guard format == .json, text.hasPrefix("{"), text.count<=32_768,
++                scanner.splitLeadingObject(from:text)==nil else { throw ResumableToolCallError.invalid("bare JSON buffer") }
++            if case .invalidObject=scanner.evaluatePrefix(in:text) { throw ResumableToolCallError.invalid("bare JSON prefix") }
++        default: throw ResumableToolCallError.invalid("parser state")
++        }
++    }
++}
++
++struct ToolCallCheckpointDocument: Codable, Sendable {
++    var version=1
++    var compatibility="mlx-swift-lm:83f3ef6dc5bc24daeea33cfd9e18ab1383bb0bc8;S75-ordered-v1"
++    var configuration: ResumableToolCallConfiguration
++    var parser: ToolProcessorCheckpointState
++    var sequence: UInt64 = 0
++    var finished=false
++    func validate() throws {
++        guard version==1, compatibility=="mlx-swift-lm:83f3ef6dc5bc24daeea33cfd9e18ab1383bb0bc8;S75-ordered-v1" else { throw ResumableToolCallError.incompatible }
++        _=try configuration.validatedTools(); try parser.validate(format:configuration.format)
++        guard sequence<=1_000_000,
++            !finished || (sequence>0 && parser.state=="normal" && parser.buffer.isEmpty),
++            sequence>0 || (!finished && parser.state=="normal" && parser.issued.isEmpty && parser.allocation.position==0) else {
++                throw ResumableToolCallError.invalid("finished/sequence")
++        }
++    }
++}
++
++public struct ResumableToolCallCheckpoint: Equatable, Sendable {
++    public static let maximumBytes=1024*1024
++    public let data: Data
++    struct Envelope: Codable { var payload: Data; var sha256: String }
++    init(document: ToolCallCheckpointDocument) throws {
++        let payload=try ToolCheckpointEncoding.encode(document)
++        guard payload.count<=Self.maximumBytes else { throw ResumableToolCallError.oversized }
++        let encoded=try ToolCheckpointEncoding.encode(Envelope(payload:payload,sha256:ToolCheckpointEncoding.digest(payload)))
++        guard encoded.count<=Self.maximumBytes else { throw ResumableToolCallError.oversized }
++        data=encoded
++    }
++    public init(data: Data) throws {
++        guard data.count<=Self.maximumBytes else { throw ResumableToolCallError.oversized }
++        self.data=data; _=try document()
++    }
++    func document() throws -> ToolCallCheckpointDocument {
++        guard data.count<=Self.maximumBytes else { throw ResumableToolCallError.oversized }
++        let envelope=try JSONDecoder().decode(Envelope.self,from:data)
++        guard ToolCheckpointEncoding.digest(envelope.payload)==envelope.sha256 else { throw ResumableToolCallError.invalid("checksum") }
++        let document=try JSONDecoder().decode(ToolCallCheckpointDocument.self,from:envelope.payload)
++        try document.validate(); return document
++    }
++}
+diff --git a/Tests/MLXLMTests/ResumableToolCallProcessorTests.swift b/Tests/MLXLMTests/ResumableToolCallProcessorTests.swift
+new file mode 100644
+--- /dev/null
++++ b/Tests/MLXLMTests/ResumableToolCallProcessorTests.swift
+@@ -0,0 +1,157 @@
++import Foundation
++import XCTest
++@testable import MLXLMCommon
++
++// BEGIN SHARED FIXTURES: also compiled verbatim into the process worker.
++let toolFixtureNamespace="0123456789abcdef0123456789abcdef"
++struct ToolParsingFixture {
++    let name:String
++    let format:ToolCallFormat
++    let chunks:[String]
++    var tools:[[String:JSONValue]]? = nil
++    var names:[String] = ["f"]
++    var supplied:Set<String> = []
++    func configuration() throws -> ResumableToolCallConfiguration { try .init(format:format,tools:tools) }
++}
++func toolChunks(_ text:String, width:Int) -> [String] {
++    let characters=Array(text)
++    return stride(from:0,to:characters.count,by:width).map { String(characters[$0..<min($0+width,characters.count)]) }
++}
++func toolSmokeFixtures() -> [ToolParsingFixture] {
++    let texts:[ToolCallFormat:String]=[
++        .json:#"<tool_call>{"name":"f","arguments":{"x":"中"}}</tool_call>"#,
++        .lfm2:"<|tool_call_start|>[f(x='中')]<|tool_call_end|>",
++        .xmlFunction:"<tool_call><function=f><parameter=x>中</parameter></function></tool_call>",
++        .glm4:"<tool_call>f<arg_key>x</arg_key><arg_value>中</arg_value></tool_call>",
++        .gemma:"<start_function_call>call:f{x:<escape>中<escape>}<end_function_call>",
++        .gemma4:#"<|tool_call>call:f{x:<|"|>中<|"|>}<tool_call|>"#,
++        .kimiK2:#"<|tool_calls_section_begin|>functions.f:0<|tool_call_argument_begin|>{"x":"中"}<|tool_calls_section_end|>"#,
++        .minimaxM2:#"<minimax:tool_call><invoke name="f"><parameter name="x">中</parameter></invoke></minimax:tool_call>"#,
++        .mistral:#"[TOOL_CALLS]f[ARGS]{"x":"中"}"#,
++        .llama3:#"{"name":"f","parameters":{"x":"中"}}"#,
++    ]
++    return ToolCallFormat.allCases.map {
++        let chars=Array(texts[$0]!)
++        return .init(name:$0.rawValue,format:$0,chunks:[String(chars.prefix(1)),String(chars.dropFirst().dropLast()),String(chars.suffix(1))])
++    }
++}
++func toolDeepFixtures() -> [ToolParsingFixture] {
++    let schema:[[String:JSONValue]]=[["type":.string("function"),"function":.object([
++        "name":.string("f"),"parameters":.object(["type":.string("object"),"properties":.object([
++            "x":.object(["type":.string("integer")]),"enabled":.object(["type":.string("boolean")])])])])]]
++    return [
++        .init(name:"tagged",format:.json,chunks:toolChunks(#"A<tool_call>{"id":"keep","name":"first","arguments":{"q":"中 { \"quoted\" }","n":{"a":[1,{"b":"}"}]}}}</tool_call>between<tool_call>{"name":"second","arguments":{}}</tool_call>Z"#,width:7),names:["first","second"],supplied:["keep"]),
++        .init(name:"bare",format:.json,chunks:toolChunks(#"prefix {"name":"f","arguments":{"q":"中 \" }","a":[1,2]}} tail"#,width:5)),
++        .init(name:"xml-schema",format:.xmlFunction,chunks:toolChunks("<tool_call><function=f><parameter=x>7</parameter><parameter=enabled>true</parameter></function></tool_call>",width:9),tools:schema),
++        .init(name:"inline",format:.llama3,chunks:["prefix <|python_tag|>{\"name\":\"f\",\"parameters\":{\"x\":",#""中 \" }"}}"#]),
++        .init(name:"mistral-eos",format:.mistral,chunks:["before[TOOL_","CALLS]f[CALL_ID]keep[ARGS]{\"x\":",#""中"}[TOOL_CALLS]second[ARGS]{}after"#],names:["f","second"],supplied:["keep"]),
++        .init(name:"lfm2-eos",format:.lfm2,chunks:["before<|tool_call_","start|>[f(x='中')]<|tool_call_start|>[second(x=", "'a]b')]after"],names:["f","second"]),
++        .init(name:"invalid-eos",format:.json,chunks:["ordinary é e\u{301}","{plain}",#"{"not":"tool"}"#,"<tool_ca"],names:[]),
++    ]
++}
++// END SHARED FIXTURES
++
++func toolRecordBytes(_ records:[ResumableToolCallRecord]) throws -> Data { try ToolCheckpointEncoding.encode(records) }
++func toolCalls(_ records:[ResumableToolCallRecord]) -> [ToolCall] {
++    records.compactMap { if case .toolCall(let call)=$0 { return call }; return nil }
++}
++func toolLegacy(_ output:[ToolCallProcessor.Output]) -> [ResumableToolCallRecord] {
++    output.map { switch $0 { case .response(let value): return .response(Data(value.utf8)); case .toolCall(let call): return .toolCall(call) } }
++}
++func toolComparable(_ records:[ResumableToolCallRecord], fixture:ToolParsingFixture) throws -> Data {
++    try toolRecordBytes(records.map {
++        guard case .toolCall(let call)=$0 else { return $0 }
++        let id=call.id!
++        if fixture.supplied.contains(id) { return $0 }
++        let pattern=fixture.format == .mistral ? "^[A-Za-z0-9]{9}$" : "^call_[a-f0-9]{32}$"
++        XCTAssertNotNil(id.range(of:pattern,options:.regularExpression))
++        return .toolCall(.init(function:call.function,id:"generated"))
++    })
++}
++func toolExercise(_ fixture:ToolParsingFixture) throws -> [ResumableToolCallRecord] {
++    let config=try fixture.configuration()
++    let live=try ResumableToolCallProcessor.prepare(configuration:config,namespace:toolFixtureNamespace)
++    var checkpoints=[try live.capture()], batches:[[ResumableToolCallRecord]]=[]
++    let legacy=ToolCallProcessor(format:fixture.format,tools:try config.validatedTools())
++    for chunk in fixture.chunks {
++        let batch=try live.consume(chunk); batches.append(batch.records); checkpoints.append(batch.checkpoint)
++        XCTAssertEqual(try toolComparable(batch.records,fixture:fixture),try toolComparable(toolLegacy(legacy.processChunkOutputs(chunk)),fixture:fixture),fixture.name)
++    }
++    let end=try XCTUnwrap(live.finish()); batches.append(end.records); checkpoints.append(end.checkpoint)
++    XCTAssertEqual(try toolComparable(end.records,fixture:fixture),try toolComparable(toolLegacy(legacy.processEOSOutputs()),fixture:fixture),fixture.name)
++    let all=batches.flatMap { $0 }
++    XCTAssertEqual(toolCalls(all).map(\.function.name),fixture.names,fixture.name)
++    XCTAssertEqual(Set(toolCalls(all).compactMap(\.id)).count,fixture.names.count)
++    for cut in 0..<checkpoints.count {
++        let saved=checkpoints[cut]; let bytes=saved.data
++        let resumed=try ResumableToolCallProcessor.restore(saved,configuration:config,namespace:toolFixtureNamespace)
++        XCTAssertEqual(try resumed.capture(),saved)
++        var suffix:[[ResumableToolCallRecord]]=[]
++        for chunk in fixture.chunks.dropFirst(min(cut,fixture.chunks.count)) { suffix.append(try resumed.consume(chunk).records) }
++        if let end=try resumed.finish() { suffix.append(end.records) }
++        XCTAssertEqual(try ToolCheckpointEncoding.encode(suffix),try ToolCheckpointEncoding.encode(Array(batches.dropFirst(cut))),"\(fixture.name) cut \(cut)")
++        XCTAssertEqual(try resumed.capture(),try live.capture()); XCTAssertEqual(saved.data,bytes)
++        XCTAssertNil(try resumed.finish()); XCTAssertThrowsError(try resumed.consume("late"))
++        resumed.close()
++    }
++    live.close(); return all
++}
++
++final class ResumableToolCallProcessorTests: XCTestCase {
++    func testAllTenFormatsAtEveryDeclaredCutWithLegacyParity() throws {
++        let fixtures=toolSmokeFixtures(); XCTAssertEqual(Set(fixtures.map(\.format)),Set(ToolCallFormat.allCases))
++        for fixture in fixtures {
++            let records=try toolExercise(fixture)
++            XCTAssertEqual(toolCalls(records).first?.function.arguments["x"],.string("中"))
++        }
++    }
++    func testDeepJSONSchemaInlineEOSAndInvalidCuts() throws {
++        for fixture in toolDeepFixtures() {
++            let records=try toolExercise(fixture)
++            if fixture.name=="xml-schema" {
++                let arguments=try XCTUnwrap(toolCalls(records).first).function.arguments
++                XCTAssertEqual(arguments["x"],.int(7)); XCTAssertEqual(arguments["enabled"],.bool(true))
++            }
++            if fixture.name=="tagged" {
++                let visible=records.compactMap { if case .response(let b)=$0 { return b }; return nil }.reduce(Data(),+)
++                XCTAssertEqual(visible,Data("AbetweenZ".utf8))
++            }
++        }
++    }
++    func testSuppliedDuplicateMissingEmptyAndCollisionIDsAcrossRestore() throws {
++        for format in [ToolCallFormat.json,.mistral] {
++            let config=try ResumableToolCallConfiguration(format:format)
++            let live=try ResumableToolCallProcessor.prepare(configuration:config,namespace:toolFixtureNamespace)
++            let allocation=ToolCallIDSequence(namespace:toolFixtureNamespace)
++            let collision=allocation.candidate(format:format,at:0)
++            func chunk(_ id:String?) -> String {
++                if format == .mistral { return "[TOOL_CALLS]f"+(id.map { "[CALL_ID]"+$0 } ?? "")+"[ARGS]{}" }
++                return "<tool_call>{"+(id.map { "\"id\":\""+$0+"\"," } ?? "")+"\"name\":\"f\",\"arguments\":{}}</tool_call>"
++            }
++            // Mistral allocates at EOS, so put all supplied/duplicate cases in
++            // one buffered stream; JSON additionally pauses after the collision.
++            let chunks=[chunk(collision),chunk(nil),chunk(""),chunk("keep"),chunk("keep")]
++            var output:[ResumableToolCallRecord]=[]
++            output+=try live.consume(chunks[0]).records
++            let saved=try live.capture()
++            let resumed=try ResumableToolCallProcessor.restore(saved,configuration:config,namespace:toolFixtureNamespace)
++            var suffix:[ResumableToolCallRecord]=[], restored:[ResumableToolCallRecord]=[]
++            for chunk in chunks.dropFirst() { suffix+=try live.consume(chunk).records; restored+=try resumed.consume(chunk).records }
++            suffix+=try XCTUnwrap(live.finish()).records; restored+=try XCTUnwrap(resumed.finish()).records
++            XCTAssertEqual(try toolRecordBytes(suffix),try toolRecordBytes(restored)); output+=suffix
++            XCTAssertEqual(toolCalls(output).compactMap(\.id),[collision,allocation.candidate(format:format,at:1),allocation.candidate(format:format,at:2),"keep",allocation.candidate(format:format,at:3)])
++            let final=try live.capture().document(); XCTAssertEqual(final.parser.allocation.position,4)
++            live.close(); resumed.close()
++        }
++    }
++    func testLegacyRandomIDsAndFreshNamespacesRemainOptIn() throws {
++        let config=try ResumableToolCallConfiguration(format:.json)
++        let a=try ResumableToolCallProcessor.prepare(configuration:config), b=try ResumableToolCallProcessor.prepare(configuration:config)
++        XCTAssertNotEqual(a.namespace,b.namespace); XCTAssertEqual(try a.capture().document().parser.allocation.namespace,a.namespace)
++        let text=#"<tool_call>{"name":"f","arguments":{}}</tool_call>"#
++        let legacy=ToolCallProcessor(format:.json)
++        let ids=(0..<2).map { _ in toolCalls(toolLegacy(legacy.processChunkOutputs(text))).first!.id! }
++        XCTAssertNotEqual(ids[0],ids[1]); XCTAssertTrue(ids.allSatisfy { $0.range(of:"^call_[a-f0-9]{32}$",options:.regularExpression) != nil })
++        a.close(); b.close()
++    }
++}
+diff --git a/Tests/MLXLMTests/ResumableToolCallCheckpointTests.swift b/Tests/MLXLMTests/ResumableToolCallCheckpointTests.swift
+new file mode 100644
+--- /dev/null
++++ b/Tests/MLXLMTests/ResumableToolCallCheckpointTests.swift
+@@ -0,0 +1,111 @@
++import Foundation
++import XCTest
++@testable import MLXLMCommon
++
++final class ResumableToolCallCheckpointTests: XCTestCase {
++    func testContradictoryValuesRefuseWithoutChangingIndependentLiveParser() throws {
++        let config=try ResumableToolCallConfiguration(format:.json)
++        let live=try ResumableToolCallProcessor.prepare(configuration:config,namespace:toolFixtureNamespace)
++        _=try live.consume(#"<tool_call>{"name":"done","arguments":{}}</tool_call><tool_ca"#)
++        let saved=try live.capture(); let d=try saved.document()
++        let changes:[(inout ToolCallCheckpointDocument)->Void]=[
++            {$0.version=2},{$0.compatibility="other"},{$0.parser.boundary="legacy"},{$0.parser.state="unknown"},
++            {$0.parser.state="normal"},{$0.parser.state="collectingJSONToolCall"},{$0.parser.state="collectingToolCall"},
++            {$0.parser.buffer=Data([255])},{$0.parser.buffer=Data("not a prefix".utf8)},{$0.finished=true},{$0.sequence=0},{$0.sequence=UInt64.max},
++            {$0.parser.issued.append($0.parser.issued[0])},{$0.parser.issued=[Data()]},{$0.parser.issued=[Data([255])]},
++            {$0.parser.issued=[]},{$0.parser.allocation.position=UInt64.max},{$0.parser.allocation.version="other"},{$0.parser.allocation.namespace="bad"},
++        ]
++        for change in changes {
++            var altered=d; change(&altered)
++            XCTAssertThrowsError(try ResumableToolCallProcessor.restore(.init(document:altered),configuration:config,namespace:toolFixtureNamespace))
++            XCTAssertEqual(try live.capture(),saved)
++        }
++        XCTAssertThrowsError(try ResumableToolCallProcessor.restore(saved,configuration:.init(format:.mistral),namespace:toolFixtureNamespace))
++        XCTAssertThrowsError(try ResumableToolCallProcessor.restore(saved,configuration:.init(format:.json,tools:[]),namespace:toolFixtureNamespace))
++        XCTAssertThrowsError(try ResumableToolCallProcessor.restore(saved,configuration:config,namespace:String(repeating:"f",count:32)))
++        let resumed=try ResumableToolCallProcessor.restore(saved,configuration:config,namespace:toolFixtureNamespace)
++        let rest=#"ll>{"name":"next","arguments":{}}</tool_call>tail"#
++        XCTAssertEqual(try toolRecordBytes(live.consume(rest).records),try toolRecordBytes(resumed.consume(rest).records))
++        XCTAssertEqual(try live.capture(),try resumed.capture()); live.close(); resumed.close()
++    }
++    func testTypedConfigurationAndRecordFidelity() throws {
++        let value:JSONValue = .object(["integer":.int(Int.max),"double":.double(1),"negativeZero":.double(-0.0),"boolean":.bool(true),"null":.null,"array":.array([.string("é"),.string("e\u{301}"),.double(0.25)])])
++        let config=try ResumableToolCallConfiguration(format:.xmlFunction,tools:[["function":value]])
++        let live=try ResumableToolCallProcessor.prepare(configuration:config,namespace:toolFixtureNamespace)
++        let decoded=try live.capture().document().configuration
++        XCTAssertEqual(try ToolCheckpointEncoding.encode(config),try ToolCheckpointEncoding.encode(decoded))
++        let tools=try XCTUnwrap(decoded.validatedTools()); let object=try XCTUnwrap(tools[0]["function"] as? [String:any Sendable])
++        XCTAssertTrue(type(of:object["integer"]!) == Int.self); XCTAssertTrue(type(of:object["double"]!) == Double.self)
++        XCTAssertEqual((object["negativeZero"] as? Double)?.bitPattern,(-0.0 as Double).bitPattern)
++        let records:[ResumableToolCallRecord]=[.response(Data("é".utf8)),.response(Data("e\u{301}".utf8)),.toolCall(.init(function:.init(name:"f",arguments:["v":value]),id:"id"))]
++        let bytes=try toolRecordBytes(records)
++        XCTAssertEqual(try toolRecordBytes(JSONDecoder().decode([ResumableToolCallRecord].self,from:bytes)),bytes)
++        XCTAssertNotEqual(try toolRecordBytes([records[0]]),try toolRecordBytes([records[1]]))
++        XCTAssertNotEqual(try ToolCheckpointEncoding.encode(ResumableToolCallConfiguration(format:.json)),try ToolCheckpointEncoding.encode(ResumableToolCallConfiguration(format:.json,tools:[])))
++        XCTAssertNotEqual(try ToolCheckpointEncoding.encode(ResumableToolCallConfiguration(format:.json,tools:[["x":.int(1)]])),try ToolCheckpointEncoding.encode(ResumableToolCallConfiguration(format:.json,tools:[["x":.double(1)]])))
++        for bad in [Double.infinity,-Double.infinity,Double.nan] { XCTAssertThrowsError(try ResumableToolCallConfiguration(format:.json,tools:[["x":.double(bad)]])) }
++        var nested=JSONValue.null; for _ in 0..<17 { nested = .array([nested]) }
++        XCTAssertThrowsError(try ResumableToolCallConfiguration(format:.json,tools:[["x":nested]]))
++        XCTAssertThrowsError(try ResumableToolCallConfiguration(format:.json,tools:[["x":.string(String(repeating:"x",count:64*1024))]]))
++        var invalid=ToolCheckpointJSON.number(Double.infinity.bitPattern); XCTAssertThrowsError(try invalid.value())
++        invalid = .object([.init(key:Data([255]),value:.null)]); XCTAssertThrowsError(try invalid.value())
++        live.close()
++    }
++    func testChunkBufferAndBareJSONSafetyValveLimits() throws {
++        let config=try ResumableToolCallConfiguration(format:.json)
++        let live=try ResumableToolCallProcessor.prepare(configuration:config,namespace:toolFixtureNamespace)
++        let text="{\""+String(repeating:"x",count:32_767)
++        let batch=try live.consume(text)
++        XCTAssertEqual(try toolRecordBytes(batch.records),try toolRecordBytes([.response(Data(text.utf8))]))
++        XCTAssertEqual(try batch.checkpoint.document().parser.state,"normal")
++        XCTAssertThrowsError(try live.consume(String(repeating:"中",count:21_846))); XCTAssertTrue(live.isClosed)
++        XCTAssertThrowsError(try live.capture())
++        let tagged=try ResumableToolCallProcessor.prepare(configuration:.init(format:.mistral),namespace:toolFixtureNamespace)
++        _=try tagged.consume("[TOOL_CALLS]")
++        for _ in 0..<3 { _=try tagged.consume(String(repeating:"x",count:64*1024)) }
++        XCTAssertThrowsError(try tagged.consume(String(repeating:"x",count:64*1024))); XCTAssertTrue(tagged.isClosed)
++        let valid=try ResumableToolCallProcessor.prepare(configuration:config,namespace:toolFixtureNamespace)
++        XCTAssertEqual(try valid.consume(String(repeating:"x",count:64*1024)).records.count,1); valid.close()
++    }
++    func testEnvelopeBatchIDAndCounterBounds() throws {
++        let config=try ResumableToolCallConfiguration(format:.json)
++        let live=try ResumableToolCallProcessor.prepare(configuration:config,namespace:toolFixtureNamespace)
++        let saved=try live.capture(); let d=try saved.document()
++        XCTAssertThrowsError(try ResumableToolCallCheckpoint(data:saved.data.dropLast()))
++        var corrupted=saved.data; corrupted[corrupted.count/2]^=1; XCTAssertThrowsError(try ResumableToolCallCheckpoint(data:corrupted))
++        XCTAssertThrowsError(try ResumableToolCallCheckpoint(data:Data(count:1024*1024+1)))
++        var huge=d; huge.parser.buffer=Data(count:1024*1024); XCTAssertThrowsError(try ResumableToolCallCheckpoint(document:huge))
++        XCTAssertThrowsError(try ResumableToolCallProcessor.validateBatch(Array(repeating:.response(Data()),count:4097),checkpoint:saved))
++        XCTAssertThrowsError(try ResumableToolCallProcessor.validateBatch(Array(repeating:.response(Data(repeating:120,count:1024)),count:2048),checkpoint:saved))
++        try ResumableToolCallProcessor.validateBatch(Array(repeating:.response(Data()),count:4096),checkpoint:saved)
++        var full=d; full.sequence=1
++        full.parser.issued=(0..<4096).map { Data("supplied-\($0)".utf8) }.sorted { $0.lexicographicallyPrecedes($1) }
++        let bounded=try ResumableToolCallProcessor.restore(.init(document:full),configuration:config,namespace:toolFixtureNamespace)
++        XCTAssertThrowsError(try bounded.consume(#"<tool_call>{"name":"f","arguments":{}}</tool_call>"#)); XCTAssertTrue(bounded.isClosed)
++        full.parser.issued.append(Data("overflow".utf8))
++        XCTAssertThrowsError(try ResumableToolCallProcessor.restore(.init(document:full),configuration:config,namespace:toolFixtureNamespace))
++        var sequence=d; sequence.sequence=1_000_000
++        let exhausted=try ResumableToolCallProcessor.restore(.init(document:sequence),configuration:config,namespace:toolFixtureNamespace)
++        XCTAssertThrowsError(try exhausted.consume("")); XCTAssertTrue(exhausted.isClosed)
++        var allocation=ToolCallIDSequence(namespace:toolFixtureNamespace,position:8192); var issued=Set<String>()
++        XCTAssertThrowsError(try allocation.next(format:.json,issued:&issued))
++        live.close()
++    }
++    func testUndrainedOwnershipFinishedAndFailedBatchPolicy() throws {
++        let raw=ToolCallProcessor(format:.json)
++        try raw.enableResumable(.init(namespace:toolFixtureNamespace))
++        _=raw.processChunk(#"<tool_call>{"name":"f","arguments":{}}</tool_call>"#)
++        XCTAssertThrowsError(try raw.captureResumable()); XCTAssertThrowsError(try raw.enableResumable(.init(namespace:toolFixtureNamespace)))
++        let config=try ResumableToolCallConfiguration(format:.json)
++        let live=try ResumableToolCallProcessor.prepare(configuration:config,namespace:toolFixtureNamespace)
++        let c0=try live.capture()
++        let badID=String(repeating:"x",count:257)
++        let text="before<tool_call>{\"id\":\""+badID+"\",\"name\":\"f\",\"arguments\":{}}</tool_call>after"
++        XCTAssertThrowsError(try live.consume(text)); XCTAssertTrue(live.isClosed); XCTAssertThrowsError(try live.capture())
++        let restored=try ResumableToolCallProcessor.restore(c0,configuration:config,namespace:toolFixtureNamespace)
++        _=try restored.consume("é e\u{301}"); let end=try XCTUnwrap(restored.finish()); XCTAssertTrue(restored.isFinished)
++        let terminal=try ResumableToolCallProcessor.restore(end.checkpoint,configuration:config,namespace:toolFixtureNamespace)
++        XCTAssertNil(try terminal.finish()); XCTAssertThrowsError(try terminal.consume("late")); XCTAssertEqual(try terminal.capture(),end.checkpoint)
++        restored.close(); terminal.close()
++    }
++}
