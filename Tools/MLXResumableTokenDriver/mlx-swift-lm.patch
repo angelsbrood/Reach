@@ -1,0 +1,1311 @@
+diff --git a/Libraries/MLXLMCommon/Evaluate.swift b/Libraries/MLXLMCommon/Evaluate.swift
+--- a/Libraries/MLXLMCommon/Evaluate.swift
++++ b/Libraries/MLXLMCommon/Evaluate.swift
+@@ -401,7 +401,7 @@
+ 
+ /// Processor that implements a `repetitionPenalty`.
+ public struct RepetitionContext: LogitProcessor {
+-    private var ring: TokenRing
++    fileprivate var ring: TokenRing
+     let repetitionPenalty: Float
+ 
+     public init(repetitionPenalty: Float, repetitionContextSize: Int) {
+@@ -435,7 +435,7 @@
+ /// The penalty is applied once per unique token via scatter-write (writing the
+ /// same value to the same index multiple times is idempotent).
+ public struct PresencePenaltyContext: LogitProcessor {
+-    private var ring: TokenRing
++    fileprivate var ring: TokenRing
+     let presencePenalty: Float
+ 
+     public init(presencePenalty: Float, presenceContextSize: Int) {
+@@ -464,7 +464,7 @@
+ /// Frequency counting is performed on GPU via `scatter_add` to build a histogram
+ /// of token occurrences, avoiding CPU←GPU synchronization.
+ public struct FrequencyPenaltyContext: LogitProcessor {
+-    private var ring: TokenRing
++    fileprivate var ring: TokenRing
+     let frequencyPenalty: Float
+ 
+     public init(frequencyPenalty: Float, frequencyContextSize: Int) {
+@@ -2507,3 +2507,64 @@
+         .info(info)
+     }
+ }
++
++// Additive snapshot access for the opt-in paused driver. Legacy ring updates and the
++// pipelined TokenIterator do not invoke these synchronous value-copy methods.
++extension TokenRing {
++    func captureResumable() -> ResumableRingRecord {
++        .init(buffer: buffer.asArray(Int32.self), count: count, writeIndex: writeIndex)
++    }
++
++    init(resumable record: ResumableRingRecord) {
++        self.init(capacity: record.buffer.count)
++        buffer = MLXArray(record.buffer)
++        count = record.count
++        writeIndex = record.writeIndex
++    }
++}
++
++extension PenaltyProcessor {
++    static func resumable(_ options: ResumableTokenOptions) -> PenaltyProcessor {
++        // Construct exactly the standard ordered composition, including disabled zeros.
++        .init(
++            repetitionContext: options.repetitionPenalty.flatMap {
++                $0 == 0 ? nil : RepetitionContext(repetitionPenalty: $0,
++                    repetitionContextSize: options.repetitionContextSize)
++            },
++            presenceContext: options.presencePenalty.flatMap {
++                $0 == 0 ? nil : PresencePenaltyContext(presencePenalty: $0,
++                    presenceContextSize: options.presenceContextSize)
++            },
++            frequencyContext: options.frequencyPenalty.flatMap {
++                $0 == 0 ? nil : FrequencyPenaltyContext(frequencyPenalty: $0,
++                    frequencyContextSize: options.frequencyContextSize)
++            })
++    }
++
++    func captureResumable() -> [ResumableRingRecord?] {
++        [repetitionContext?.ring.captureResumable(), presenceContext?.ring.captureResumable(),
++         frequencyContext?.ring.captureResumable()]
++    }
++
++    static func validateResumable(_ records: [ResumableRingRecord?],
++                                  options: ResumableTokenOptions) throws {
++        guard records.count == 3 else { throw ResumableTokenError.invalid("processor composition") }
++        let strengths = [options.repetitionPenalty, options.presencePenalty, options.frequencyPenalty]
++        let capacities = [options.repetitionContextSize, options.presenceContextSize, options.frequencyContextSize]
++        for i in 0..<3 {
++            let enabled = strengths[i].map { $0 != 0 } ?? false
++            guard enabled == (records[i] != nil) else { throw ResumableTokenError.incompatible }
++            try records[i]?.validate(capacity: capacities[i], vocabulary: options.vocabularySize)
++        }
++    }
++
++    static func restoredResumable(_ records: [ResumableRingRecord?],
++                                  options: ResumableTokenOptions) throws -> PenaltyProcessor {
++        try validateResumable(records, options: options)
++        var processor = resumable(options)
++        if let record = records[0] { processor.repetitionContext?.ring = TokenRing(resumable: record) }
++        if let record = records[1] { processor.presenceContext?.ring = TokenRing(resumable: record) }
++        if let record = records[2] { processor.frequencyContext?.ring = TokenRing(resumable: record) }
++        return processor
++    }
++}
+diff --git a/Libraries/MLXLMCommon/LanguageModel.swift b/Libraries/MLXLMCommon/LanguageModel.swift
+--- a/Libraries/MLXLMCommon/LanguageModel.swift
++++ b/Libraries/MLXLMCommon/LanguageModel.swift
+@@ -197,6 +197,14 @@
+     /// Dictionary of typed ``Key`` to carry state between steps.
+     public struct State {
+         private var contents: [String: Any]
++
++        // Module-internal access for the opt-in typed checkpoint codec registry.
++        // Legacy typed-key reads and writes retain their existing behavior.
++        var checkpointContents: [String: Any] { contents }
++
++        init(checkpointContents: [String: Any]) {
++            self.contents = checkpointContents
++        }
+ 
+         public init() {
+             self.contents = [:]
+diff --git a/Libraries/MLXLMCommon/ResumableTokenDriver.swift b/Libraries/MLXLMCommon/ResumableTokenDriver.swift
+new file mode 100644
+--- /dev/null
++++ b/Libraries/MLXLMCommon/ResumableTokenDriver.swift
+@@ -0,0 +1,335 @@
++// Local candidate: opt-in paused raw-token execution.
++
++import Foundation
++import MLX
++import MLXNN
++
++/// Model owners attest that all mutable forward state is in the declared caches and
++/// LMOutput.State, with no hidden RNG, background producer, mutable weights or side effects.
++/// The backend identity must name the compatible device/OS/MLX build and native byte order.
++public struct ResumableTokenIdentity: Codable, Equatable, Sendable {
++    public let model: String
++    public let configuration: String
++    public let weights: String
++    public let input: String
++    public let backend: String
++    public let dependency: String
++
++    public init(model: String, configuration: String, weights: String, input: String,
++                backend: String, dependency: String) {
++        self.model = model; self.configuration = configuration; self.weights = weights
++        self.input = input; self.backend = backend; self.dependency = dependency
++    }
++
++    public static func inputDigest(_ tokens: [Int]) throws -> String {
++        ResumableTokenCheckpoint.digest(try ResumableTokenCheckpoint.encoder().encode(tokens))
++    }
++
++    func validate() throws {
++        guard [model, configuration, weights, input, backend, dependency].allSatisfy({
++            !$0.isEmpty && $0.utf8.count <= 1024
++        }) else { throw ResumableTokenError.invalid("compatibility identity") }
++    }
++}
++
++/// Deliberately excludes arbitrary samplers/processors, quantization, masks, batching,
++/// speculative/MTP and multimodal preparation. It does not change GenerateParameters.
++public struct ResumableTokenOptions: Codable, Equatable, Sendable {
++    public var vocabularySize: Int
++    public var maximumTokens: Int
++    public var prefillStepSize: Int
++    public var temperature: Float
++    public var topP: Float
++    public var topK: Int
++    public var minP: Float
++    public var seed: UInt64
++    public var sampler: String
++    public var repetitionPenalty: Float?
++    public var repetitionContextSize: Int
++    public var presencePenalty: Float?
++    public var presenceContextSize: Int
++    public var frequencyPenalty: Float?
++    public var frequencyContextSize: Int
++
++    public init(vocabularySize: Int, maximumTokens: Int, prefillStepSize: Int = 512,
++                temperature: Float = 0, topP: Float = 1, topK: Int = 0, minP: Float = 0,
++                seed: UInt64 = 0, repetitionPenalty: Float? = nil,
++                repetitionContextSize: Int = 20, presencePenalty: Float? = nil,
++                presenceContextSize: Int = 20, frequencyPenalty: Float? = nil,
++                frequencyContextSize: Int = 20) {
++        self.vocabularySize = vocabularySize; self.maximumTokens = maximumTokens
++        self.prefillStepSize = prefillStepSize; self.temperature = temperature
++        self.topP = topP; self.topK = topK; self.minP = minP; self.seed = seed
++        self.sampler = temperature == 0 ? "argmax-v1" : "explicit-key-v1"
++        self.repetitionPenalty = repetitionPenalty; self.repetitionContextSize = repetitionContextSize
++        self.presencePenalty = presencePenalty; self.presenceContextSize = presenceContextSize
++        self.frequencyPenalty = frequencyPenalty; self.frequencyContextSize = frequencyContextSize
++    }
++
++    func validate() throws {
++        guard (1...65_536).contains(vocabularySize), (0...65_536).contains(maximumTokens),
++            (1...4096).contains(prefillStepSize), temperature.isFinite, temperature >= 0,
++            temperature == 0 || (1 / temperature).isFinite,
++            topP.isFinite, (0...1).contains(topP), topK >= 0, topK <= vocabularySize,
++            minP.isFinite, (0...1).contains(minP),
++            sampler == (temperature == 0 ? "argmax-v1" : "explicit-key-v1")
++        else { throw ResumableTokenError.unsupported("sampling/options") }
++        for size in [repetitionContextSize, presenceContextSize, frequencyContextSize] {
++            guard (1...4096).contains(size) else { throw ResumableTokenError.unsupported("history size") }
++        }
++        for penalty in [repetitionPenalty, presencePenalty, frequencyPenalty].compactMap({ $0 }) {
++            guard penalty.isFinite else { throw ResumableTokenError.invalid("penalty") }
++        }
++        if let repetitionPenalty, repetitionPenalty < 0 {
++            throw ResumableTokenError.unsupported("negative repetition penalty")
++        }
++    }
++
++    var parameters: GenerateParameters {
++        GenerateParameters(maxTokens: maximumTokens, temperature: temperature, topP: topP,
++            topK: topK, minP: minP, repetitionPenalty: repetitionPenalty,
++            repetitionContextSize: repetitionContextSize, presencePenalty: presencePenalty,
++            presenceContextSize: presenceContextSize, frequencyPenalty: frequencyPenalty,
++            frequencyContextSize: frequencyContextSize, prefillStepSize: prefillStepSize, seed: seed)
++    }
++}
++
++/// Serially confined, opt-in raw-token driver. No work runs between calls. Each call
++/// returns a settled checkpoint; consumers decide when/how to commit or publish it.
++/// This driver owns fresh caches; callers must not retain or mutate them through the model.
++/// Existing TokenIterator and its pipelined sampling remain untouched.
++public final class ResumableTokenDriver {
++    public struct Step {
++        public let token: Int
++        public let checkpoint: ResumableTokenCheckpoint
++    }
++
++    private let model: any LanguageModel
++    private let identity: ResumableTokenIdentity
++    private let options: ResumableTokenOptions
++    private let specs: [ResumableCacheSpec]
++    private let codecs: ResumableStateCodecs
++    private let promptCount: Int
++    private var caches: [KVCache]
++    private var state: LMOutput.State?
++    private var processor: PenaltyProcessor
++    private var randomKey: MLXArray?
++    private var randomDraws: Int
++    private var pending: Int?
++    public private(set) var tokenCount: Int
++    public private(set) var exhausted: Bool
++    public private(set) var isClosed = false
++
++    /// Checks declarations without any model call, cache creation or sampling.
++    public static func assess(identity: ResumableTokenIdentity, options: ResumableTokenOptions,
++                              cacheSpecs: [ResumableCacheSpec]) throws {
++        try identity.validate(); try options.validate()
++        guard cacheSpecs.count <= 128 else { throw ResumableTokenError.oversized }
++        for spec in cacheSpecs { try spec.validate() }
++    }
++
++    private init(model: any LanguageModel, identity: ResumableTokenIdentity,
++                 options: ResumableTokenOptions, specs: [ResumableCacheSpec],
++                 codecs: ResumableStateCodecs, promptCount: Int, caches: [KVCache],
++                 state: LMOutput.State?, processor: PenaltyProcessor, randomKey: MLXArray?,
++                 randomDraws: Int, pending: Int?, tokenCount: Int, exhausted: Bool) {
++        self.model = model; self.identity = identity; self.options = options; self.specs = specs
++        self.codecs = codecs; self.promptCount = promptCount; self.caches = caches
++        self.state = state; self.processor = processor; self.randomKey = randomKey
++        self.randomDraws = randomDraws; self.pending = pending; self.tokenCount = tokenCount
++        self.exhausted = exhausted
++    }
++
++    /// Prepare batch-one text directly through forward calls, carrying typed state across
++    /// every prefill chunk. Generic model.prepare may preprocess media or lose intermediate
++    /// state; it is intentionally outside this explicitly declared text-only contract.
++    /// C0 contains the first sampled but not returned token (unless maximumTokens is zero).
++    public static func prepare(model: any LanguageModel, tokens: [Int],
++                               identity: ResumableTokenIdentity, options: ResumableTokenOptions,
++                               cacheSpecs: [ResumableCacheSpec],
++                               codecs: ResumableStateCodecs = .init()) throws -> ResumableTokenDriver {
++        try assess(identity: identity, options: options, cacheSpecs: cacheSpecs)
++        guard !tokens.isEmpty, tokens.count <= 65_536,
++            tokens.allSatisfy({ $0 >= 0 && $0 < options.vocabularySize }),
++            try ResumableTokenIdentity.inputDigest(tokens) == identity.input
++        else { throw ResumableTokenError.invalid("input tokens/binding") }
++        var processor = PenaltyProcessor.resumable(options)
++        processor.prompt(MLXArray(tokens.map(Int32.init)))
++        let driver = ResumableTokenDriver(model: model, identity: identity, options: options,
++            specs: cacheSpecs, codecs: codecs, promptCount: tokens.count,
++            caches: cacheSpecs.map { $0.makeCache() }, state: nil, processor: processor,
++            randomKey: options.temperature == 0 ? nil : MLXRandom.key(options.seed),
++            randomDraws: 0, pending: nil, tokenCount: 0, exhausted: options.maximumTokens == 0)
++        do {
++            if !driver.exhausted {
++                var start = 0
++                while start < tokens.count {
++                    let end = min(start + options.prefillStepSize, tokens.count)
++                    let input = MLXArray(tokens[start..<end].map(Int32.init)).reshaped(1, -1)
++                    let logits = try driver.forward(input)
++                    if end == tokens.count { driver.pending = try driver.sample(logits) }
++                    start = end
++                }
++            }
++            _ = try driver.capture()
++            return driver
++        } catch { driver.close(); throw error }
++    }
++
++    /// All metadata is checked before creating tensors/caches. No model entry point,
++    /// prompt prefill, RNG initialization, sampling or existing-driver mutation occurs.
++    public static func restore(_ checkpoint: ResumableTokenCheckpoint, model: any LanguageModel,
++                               identity: ResumableTokenIdentity, options: ResumableTokenOptions,
++                               cacheSpecs: [ResumableCacheSpec],
++                               codecs: ResumableStateCodecs = .init()) throws -> ResumableTokenDriver {
++        try assess(identity: identity, options: options, cacheSpecs: cacheSpecs)
++        let d = try checkpoint.document()
++        guard d.identity == identity, d.options == options, d.cacheSpecs == cacheSpecs,
++            d.codecs == codecs.descriptors else { throw ResumableTokenError.incompatible }
++        guard (1...65_536).contains(d.promptCount), d.tokenCount >= 0,
++            d.tokenCount <= options.maximumTokens,
++            d.exhausted == (d.tokenCount == options.maximumTokens),
++            (d.exhausted ? d.pending == nil : d.pending.map({ $0 >= 0 && $0 < options.vocabularySize }) == true),
++            d.caches.count == cacheSpecs.count
++        else { throw ResumableTokenError.invalid("pending token/count/exhaustion") }
++        let sampled = options.maximumTokens == 0 ? 0 : min(d.tokenCount + 1, options.maximumTokens)
++        guard d.randomDraws == (options.temperature == 0 ? 0 : sampled),
++            (options.temperature == 0) == (d.randomKey == nil)
++        else { throw ResumableTokenError.invalid("RNG accounting") }
++        if let key = d.randomKey {
++            try key.validate()
++            guard key.shape == [2], key.dtype == "uint32" else {
++                throw ResumableTokenError.invalid("RNG key")
++            }
++        }
++        let consumed = options.maximumTokens == 0 ? 0 : d.promptCount + sampled - 1
++        for (record, spec) in zip(d.caches, cacheSpecs) {
++            try record.validate(spec: spec, consumed: consumed, window: options.prefillStepSize)
++        }
++        try PenaltyProcessor.validateResumable(d.rings, options: options)
++        for ring in d.rings.compactMap({ $0 }) {
++            let capacity = ring.buffer.count
++            let expectedCount = min(d.promptCount + sampled, capacity)
++            let initialIndex = d.promptCount > capacity ? 0 : d.promptCount % capacity
++            guard ring.count == expectedCount,
++                ring.writeIndex == (initialIndex + sampled) % capacity
++            else { throw ResumableTokenError.invalid("processor history accounting") }
++        }
++        for entry in d.state ?? [] { try entry.payload.validate() }
++        let state = try codecs.restore(d.state)
++        let caches = try zip(d.caches, cacheSpecs).map { try $0.restore(spec: $1) }
++        let driver = ResumableTokenDriver(model: model, identity: identity, options: options,
++            specs: cacheSpecs, codecs: codecs, promptCount: d.promptCount, caches: caches,
++            state: state, processor: try PenaltyProcessor.restoredResumable(d.rings, options: options),
++            randomKey: try d.randomKey?.restored(), randomDraws: d.randomDraws,
++            pending: d.pending, tokenCount: d.tokenCount, exhausted: d.exhausted)
++        // Force restored supported arrays before returning a paused driver.
++        _ = try driver.capture()
++        return driver
++    }
++
++    public func advance() throws -> Step? {
++        guard !isClosed else { throw ResumableTokenError.closed }
++        guard !exhausted else { return nil }
++        do {
++            guard let token = pending else { throw ResumableTokenError.invalid("missing pending token") }
++            tokenCount += 1
++            exhausted = tokenCount == options.maximumTokens
++            if exhausted { pending = nil }
++            else { pending = try sample(forward(MLXArray([Int32(token)]).reshaped(1, 1))) }
++            // No usable token/checkpoint pair escapes when a new unsupported state appears.
++            return try Step(token: token, checkpoint: capture())
++        } catch { close(); throw error }
++    }
++
++    private func forward(_ tokens: MLXArray) throws -> MLXArray {
++        let output = withPreparedCache(caches, lengths: [tokens.dim(1)]) {
++            model(.init(tokens: tokens), cache: caches.isEmpty ? nil : caches, state: state)
++        }
++        guard output.logits.shape == [1, tokens.dim(1), options.vocabularySize],
++            [DType.float16, .bfloat16, .float32].contains(output.logits.dtype)
++        else { throw ResumableTokenError.unsupported("model logits shape/dtype") }
++        for (cache, spec) in zip(caches, specs) { try spec.validateLive(cache) }
++        state = output.state
++        eval([output.logits] + caches.flatMap { $0.innerState() })
++        _ = try codecs.capture(state)
++        return output.logits[0..., -1, 0...]
++    }
++
++    private func sample(_ logits: MLXArray) throws -> Int {
++        var logits = processor.process(logits: logits)
++        let values = logits.asArray(Float.self)
++        guard values.contains(where: { $0.isFinite }),
++            values.allSatisfy({ !$0.isNaN && $0 != .infinity })
++        else { throw ResumableTokenError.invalid("non-finite logits") }
++        let token: MLXArray
++        if options.temperature == 0 { token = argMax(logits, axis: -1) }
++        else {
++            if logits.dtype == .bfloat16 { logits = logits.asType(.float32) }
++            // Same full-vocabulary filter order and thresholds as the pinned TopPSampler.
++            if (options.topP > 0 && options.topP < 1) || options.minP > 0 || options.topK > 0 {
++                logits = logSoftmax(logits)
++                if options.topP > 0 && options.topP < 1 {
++                    let indices = argSort(logits, axis: -1)
++                    let sorted = takeAlong(logits, indices, axis: -1)
++                    let keep = cumsum(exp(sorted), axis: -1) .> (1 - options.topP)
++                    logits = putAlong(logits, indices,
++                        values: MLX.where(keep, sorted, MLXArray(-Float.infinity)), axis: -1)
++                }
++                if options.minP > 0 {
++                    let threshold = logits.max(axis: -1, keepDims: true) + log(MLXArray(options.minP))
++                    logits = MLX.where(logits .>= threshold, logits, MLXArray(-Float.infinity))
++                }
++                if options.topK > 0 && options.topK < options.vocabularySize {
++                    let indices = argPartition(-logits, kth: options.topK - 1, axis: -1)[0..., options.topK...]
++                    logits = putAlong(logits, indices, values: MLXArray(-Float.infinity), axis: -1)
++                }
++            }
++            guard let key = randomKey else { throw ResumableTokenError.invalid("missing random key") }
++            let (next, draw) = MLXRandom.split(key: key)
++            token = MLXRandom.categorical(logits * (1 / options.temperature), key: draw)
++            randomKey = next
++            randomDraws += 1
++        }
++        eval([token] + [randomKey].compactMap { $0 })
++        let value = token.item(Int.self)
++        guard value >= 0 && value < options.vocabularySize else {
++            throw ResumableTokenError.invalid("sampled token")
++        }
++        processor.didSample(token: token)
++        return value
++    }
++
++    public func capture() throws -> ResumableTokenCheckpoint {
++        guard !isClosed else { throw ResumableTokenError.closed }
++        let consumed = options.maximumTokens == 0 ? 0 : promptCount + min(tokenCount, options.maximumTokens - 1)
++        let records = try zip(caches, specs).map {
++            try ResumableCacheRecord(capturing: $0, spec: $1, consumed: consumed,
++                window: options.prefillStepSize)
++        }
++        let frozenState = try codecs.capture(state)
++        let frozenKey = try randomKey.map { try ResumableTensor(capturing: $0) }
++        let bytes = records.flatMap(\.tensors).reduce(0) { $0 + $1.bytes.count }
++            + (frozenState ?? []).reduce(0) { $0 + $1.payload.metadata.count
++                + $1.payload.tensors.reduce(0) { $0 + $1.bytes.count } }
++            + (frozenKey?.bytes.count ?? 0)
++        guard bytes <= ResumableTokenCheckpoint.maximumBytes else { throw ResumableTokenError.oversized }
++        return try ResumableTokenCheckpoint(document: .init(identity: identity, options: options,
++            cacheSpecs: specs, codecs: codecs.descriptors, promptCount: promptCount,
++            tokenCount: tokenCount, pending: pending, exhausted: exhausted,
++            randomKey: frozenKey, randomDraws: randomDraws,
++            rings: processor.captureResumable(), caches: records, state: frozenState))
++    }
++
++    /// Every submitted evaluation is synchronous and settled before returning. Discard
++    /// unused lazy values on refusal/close without submitting unsupported graphs. The
++    /// declared model contract prohibits independent background work. No model/sampler call.
++    public func close() {
++        guard !isClosed else { return }
++        isClosed = true
++        pending = nil
++        caches = []
++        state = nil
++        randomKey = nil
++    }
++}
+diff --git a/Libraries/MLXLMCommon/ResumableTokenCheckpoint.swift b/Libraries/MLXLMCommon/ResumableTokenCheckpoint.swift
+new file mode 100644
+--- /dev/null
++++ b/Libraries/MLXLMCommon/ResumableTokenCheckpoint.swift
+@@ -0,0 +1,421 @@
++// Local candidate: versioned supported-state checkpoint values.
++
++import CryptoKit
++import Foundation
++import MLX
++
++public enum ResumableTokenError: Error, Equatable {
++    case unsupported(String)
++    case invalid(String)
++    case incompatible
++    case closed
++    case oversized
++}
++
++/// A bounded, independent tensor value. The byte order is bound by the backend identity.
++/// This format is for compatible local execution, not portable tensor interchange.
++public struct ResumableTensor: Codable, Equatable, Sendable {
++    public let shape: [Int]
++    public let dtype: String
++    public let bytes: Data
++
++    public init(capturing array: MLXArray) throws {
++        shape = array.shape
++        dtype = String(describing: array.dtype)
++        // Check dimensions and size before synchronizing/copying the supported array.
++        let size = try Self.byteCount(shape: shape, dtype: dtype)
++        guard size <= ResumableTokenCheckpoint.maximumBytes else {
++            throw ResumableTokenError.oversized
++        }
++        bytes = array.asData(access: .copy).data
++        try validate()
++    }
++
++    static func type(_ name: String) throws -> DType {
++        switch name {
++        case "float16": .float16
++        case "bfloat16": .bfloat16
++        case "float32": .float32
++        case "int32": .int32
++        case "uint32": .uint32
++        case "int64": .int64
++        case "uint8": .uint8
++        default: throw ResumableTokenError.unsupported("tensor dtype")
++        }
++    }
++
++    static func byteCount(shape: [Int], dtype: String) throws -> Int {
++        guard shape.count <= 8 else { throw ResumableTokenError.invalid("tensor rank") }
++        var size = try type(dtype).size
++        for dim in shape {
++            guard dim > 0, dim <= 1_048_576,
++                size <= ResumableTokenCheckpoint.maximumBytes / dim
++            else { throw ResumableTokenError.invalid("tensor dimensions/size") }
++            size *= dim
++        }
++        return size
++    }
++
++    func validate() throws {
++        guard try Self.byteCount(shape: shape, dtype: dtype) == bytes.count else {
++            throw ResumableTokenError.invalid("tensor byte length")
++        }
++    }
++
++    public func restored() throws -> MLXArray {
++        try validate()
++        return MLXArray(bytes, shape, dtype: try Self.type(dtype))
++    }
++}
++
++/// Codecs must be pure, deterministic value encoders/decoders, without model or external
++/// side effects. Capture MLX arrays as ResumableTensor values, never retain live references.
++public struct ResumableStatePayload: Codable, Equatable, Sendable {
++    public let metadata: Data
++    public let tensors: [ResumableTensor]
++
++    public init(metadata: Data = Data(), tensors: [ResumableTensor] = []) {
++        self.metadata = metadata
++        self.tensors = tensors
++    }
++
++    func validate() throws {
++        guard metadata.count <= 65_536, tensors.count <= 128 else {
++            throw ResumableTokenError.oversized
++        }
++        for tensor in tensors { try tensor.validate() }
++    }
++}
++
++struct ResumableCodecDescriptor: Codable, Equatable {
++    let id: String
++    let type: String
++    let schema: Int
++}
++
++struct ResumableStateEntry: Codable {
++    let descriptor: ResumableCodecDescriptor
++    let payload: ResumableStatePayload
++}
++
++/// Value-type registration set. Every present State key must match its exact registered
++/// Swift type. The full registration schema is bound even when state is initially nil.
++public struct ResumableStateCodecs {
++    struct Codec {
++        let descriptor: ResumableCodecDescriptor
++        let encode: (Any) throws -> ResumableStatePayload
++        let decode: (ResumableStatePayload) throws -> Any
++    }
++    private var codecs: [String: Codec] = [:]
++
++    public init() {}
++
++    public mutating func register<T>(
++        _ key: LMOutput.Key<T>, type: String, schema: Int,
++        encode: @escaping (T) throws -> ResumableStatePayload,
++        decode: @escaping (ResumableStatePayload) throws -> T
++    ) throws {
++        guard codecs[key.id] == nil, codecs.count < 64,
++            !key.id.isEmpty, key.id.utf8.count <= 256,
++            !type.isEmpty, type.utf8.count <= 256, schema > 0
++        else { throw ResumableTokenError.invalid("duplicate/conflicting codec registration") }
++        codecs[key.id] = Codec(
++            descriptor: .init(id: key.id, type: type, schema: schema),
++            encode: { value in
++                guard Swift.type(of: value) == T.self, let typed = value as? T else {
++                    throw ResumableTokenError.unsupported("model state type")
++                }
++                let result = try encode(typed)
++                try result.validate()
++                return result
++            }, decode: { try decode($0) })
++    }
++
++    var descriptors: [ResumableCodecDescriptor] {
++        codecs.values.map(\.descriptor).sorted { $0.id < $1.id }
++    }
++
++    func capture(_ state: LMOutput.State?) throws -> [ResumableStateEntry]? {
++        guard let state else { return nil }
++        return try state.checkpointContents.keys.sorted().map { id in
++            guard let codec = codecs[id], let value = state.checkpointContents[id] else {
++                throw ResumableTokenError.unsupported("unregistered model state key")
++            }
++            return try .init(descriptor: codec.descriptor, payload: codec.encode(value))
++        }
++    }
++
++    func restore(_ entries: [ResumableStateEntry]?) throws -> LMOutput.State? {
++        guard let entries else { return nil }
++        guard entries.count <= codecs.count else { throw ResumableTokenError.incompatible }
++        var seen = Set<String>()
++        // Validate every envelope before invoking any registered decoder.
++        for entry in entries {
++            let id = entry.descriptor.id
++            guard seen.insert(id).inserted,
++                codecs[id]?.descriptor == entry.descriptor
++            else { throw ResumableTokenError.incompatible }
++            try entry.payload.validate()
++        }
++        var contents: [String: Any] = [:]
++        for entry in entries {
++            contents[entry.descriptor.id] = try codecs[entry.descriptor.id]!.decode(entry.payload)
++        }
++        return LMOutput.State(checkpointContents: contents)
++    }
++}
++
++/// Exact supported cache layout, supplied by the model owner before any forward call.
++public struct ResumableCacheSpec: Codable, Equatable, Sendable {
++    // A separate live-storage ceiling. Schema 2 restores the captured allocation
++    // length so source and restored drivers cross this boundary on the same step.
++    static let maximumLiveTensorBytes = 8 * 1024 * 1024
++    public enum Kind: String, Codable, Sendable { case simple, rotating }
++    public let kind: Kind
++    public let heads: Int
++    public let keyDimension: Int
++    public let valueDimension: Int
++    public let dtype: String
++    public let maxSize: Int
++    public let keep: Int
++    public let allocationStep: Int
++
++    public init(kind: Kind, heads: Int, keyDimension: Int, valueDimension: Int,
++                dtype: String = "float32", maxSize: Int = 0, keep: Int = 0,
++                allocationStep: Int = 256) {
++        self.kind = kind; self.heads = heads; self.keyDimension = keyDimension
++        self.valueDimension = valueDimension; self.dtype = dtype
++        self.maxSize = maxSize; self.keep = keep; self.allocationStep = allocationStep
++    }
++
++    func validate() throws {
++        guard (1...8192).contains(heads), (1...8192).contains(keyDimension),
++            (1...8192).contains(valueDimension),
++            ["float16", "bfloat16", "float32"].contains(dtype),
++            (1...4096).contains(allocationStep)
++        else { throw ResumableTokenError.unsupported("cache layout") }
++        switch kind {
++        case .simple:
++            guard maxSize == 0, keep == 0, allocationStep == 256 else {
++                throw ResumableTokenError.unsupported("simple cache configuration")
++            }
++        case .rotating:
++            guard (1...65_536).contains(maxSize), keep >= 0, keep < maxSize else {
++                throw ResumableTokenError.unsupported("rotating cache configuration")
++            }
++        }
++    }
++
++    func validateLive(_ cache: KVCache) throws {
++        guard (kind == .simple && Swift.type(of: cache) == KVCacheSimple.self)
++            || (kind == .rotating && Swift.type(of: cache) == RotatingKVCache.self),
++            cache.offset >= 0, cache.offset <= 1_048_576
++        else { throw ResumableTokenError.unsupported("live cache family/offset") }
++        if let simple = cache as? KVCacheSimple, simple.step != allocationStep {
++            throw ResumableTokenError.unsupported("simple cache allocation step")
++        }
++        let arrays = cache.innerState()
++        guard arrays.count == (cache.offset == 0 ? 0 : 2) else {
++            throw ResumableTokenError.invalid("live cache storage count")
++        }
++        for (i, array) in arrays.enumerated() {
++            guard array.ndim == 4, array.shape[0] == 1, array.shape[1] == heads,
++                array.shape[2] > 0,
++                array.shape[3] == (i == 0 ? keyDimension : valueDimension),
++                String(describing: array.dtype) == dtype,
++                array.nbytes <= Self.maximumLiveTensorBytes,
++                kind != .simple || array.shape[2] >= cache.offset
++            else { throw ResumableTokenError.unsupported("live cache storage shape/dtype/size") }
++        }
++        guard arrays.count < 2 || arrays[0].shape[2] == arrays[1].shape[2] else {
++            throw ResumableTokenError.invalid("live cache storage lengths")
++        }
++    }
++
++    func makeCache() -> KVCache {
++        switch kind {
++        case .simple: KVCacheSimple()
++        case .rotating: RotatingKVCache(maxSize: maxSize, keep: keep, step: allocationStep)
++        }
++    }
++}
++
++struct ResumableCacheRecord: Codable {
++    let offset: Int
++    // Logical state omits unused spare capacity. Keep its length, not its bytes:
++    // pinned cache growth depends on this physical allocation even before wrap.
++    let allocationLength: Int
++    let metadata: [String]
++    let tensors: [ResumableTensor]
++
++    init(capturing cache: KVCache, spec: ResumableCacheSpec, consumed: Int, window: Int) throws {
++        guard (spec.kind == .simple && Swift.type(of: cache) == KVCacheSimple.self)
++            || (spec.kind == .rotating && Swift.type(of: cache) == RotatingKVCache.self)
++        else { throw ResumableTokenError.unsupported("cache family/subclass") }
++        if let simple = cache as? KVCacheSimple, simple.step != spec.allocationStep {
++            throw ResumableTokenError.unsupported("simple cache allocation step")
++        }
++        try spec.validateLive(cache)
++        offset = cache.offset
++        allocationLength = cache.innerState().first?.dim(2) ?? 0
++        metadata = cache.metaState
++        // Settle all owned storage, including spare allocation, before freezing logical state.
++        eval(cache.innerState())
++        tensors = try cache.state.map { try ResumableTensor(capturing: $0) }
++        try validate(spec: spec, consumed: consumed, window: window)
++    }
++
++    func validate(spec: ResumableCacheSpec, consumed: Int, window: Int) throws {
++        try spec.validate()
++        guard offset == consumed, offset >= 0, offset <= 1_048_576 else {
++            throw ResumableTokenError.invalid("cache offset")
++        }
++        guard tensors.count == (offset == 0 ? 0 : 2) else {
++            throw ResumableTokenError.invalid("cache tensor count")
++        }
++        for (i, t) in tensors.enumerated() {
++            try t.validate()
++            guard t.dtype == spec.dtype, t.shape.count == 4,
++                t.shape[0] == 1, t.shape[1] == spec.heads,
++                t.shape[3] == (i == 0 ? spec.keyDimension : spec.valueDimension)
++            else { throw ResumableTokenError.invalid("cache shape/dtype") }
++        }
++        let length = tensors.first?.shape[2] ?? 0
++        guard allocationLength >= length, (allocationLength == 0) == (offset == 0) else {
++            throw ResumableTokenError.invalid("cache allocation length")
++        }
++        let dtypeSize = try ResumableTensor.type(spec.dtype).size
++        for dimension in [spec.keyDimension, spec.valueDimension] {
++            let rowBytes = spec.heads * dimension * dtypeSize
++            guard allocationLength <= ResumableCacheSpec.maximumLiveTensorBytes / rowBytes else {
++                throw ResumableTokenError.invalid("cache allocation byte bound")
++            }
++        }
++        if spec.kind == .rotating, allocationLength > spec.maxSize + window - 1 {
++            throw ResumableTokenError.invalid("rotating cache allocation length")
++        }
++        guard tensors.count < 2 || tensors[1].shape[2] == length else {
++            throw ResumableTokenError.invalid("cache key/value lengths")
++        }
++        switch spec.kind {
++        case .simple:
++            guard metadata == [""], length == offset else {
++                throw ResumableTokenError.invalid("simple cache metadata")
++            }
++        case .rotating:
++            guard metadata.count == 5,
++                metadata.prefix(4).map({ Int($0) }) == [spec.keep, spec.maxSize, spec.allocationStep, offset],
++                let index = Int(metadata[4]), index >= 0, index <= length,
++                length <= offset, length <= spec.maxSize + window - 1
++            else { throw ResumableTokenError.invalid("rotating cache metadata") }
++            if offset <= spec.maxSize {
++                guard length == offset, index == offset else {
++                    throw ResumableTokenError.invalid("rotating cache initial cursor")
++                }
++            } else {
++                guard length >= spec.maxSize,
++                    (length > spec.maxSize ? index == length : index > spec.keep)
++                else { throw ResumableTokenError.invalid("rotating cache wrapped cursor") }
++            }
++        }
++    }
++
++    func restore(spec: ResumableCacheSpec) throws -> KVCache {
++        // Called only after complete record validation; never apply unchecked legacy setters.
++        var cache = spec.makeCache()
++        if !tensors.isEmpty {
++            cache.state = try tensors.map { tensor in
++                let logical = try tensor.restored()
++                let padding = allocationLength - tensor.shape[2]
++                guard padding > 0 else { return logical }
++                var spareShape = tensor.shape
++                spareShape[2] = padding
++                return concatenated([logical, MLXArray.zeros(spareShape, dtype: logical.dtype)], axis: 2)
++            }
++            // The legacy Simple setter infers offset from physical array length.
++            // Restore the captured logical offset after reconstructing its capacity.
++            if let simple = cache as? KVCacheSimple { simple.offset = offset }
++        }
++        cache.metaState = metadata
++        return cache
++    }
++}
++
++struct ResumableRingRecord: Codable {
++    let buffer: [Int32]
++    let count: Int
++    let writeIndex: Int
++
++    func validate(capacity: Int, vocabulary: Int) throws {
++        guard buffer.count == capacity, count >= 0, count <= capacity,
++            writeIndex >= 0, writeIndex < capacity,
++            (count == capacity || writeIndex == count),
++            buffer.allSatisfy({ $0 >= 0 && $0 < vocabulary })
++        else { throw ResumableTokenError.invalid("processor ring") }
++    }
++}
++
++struct ResumableDocument: Codable {
++    var version: Int = 2
++    var identity: ResumableTokenIdentity
++    var options: ResumableTokenOptions
++    var cacheSpecs: [ResumableCacheSpec]
++    var codecs: [ResumableCodecDescriptor]
++    var promptCount: Int
++    var tokenCount: Int
++    var pending: Int?
++    var exhausted: Bool
++    var randomKey: ResumableTensor?
++    var randomDraws: Int
++    var rings: [ResumableRingRecord?]
++    var caches: [ResumableCacheRecord]
++    var state: [ResumableStateEntry]?
++}
++
++/// Frozen value; the checksum detects accidental corruption, not hostile modification.
++/// This is not encrypted production storage or a crash-safe host transaction.
++public struct ResumableTokenCheckpoint: Sendable, Equatable {
++    public static let maximumBytes = 8 * 1024 * 1024
++    public let data: Data
++    struct Envelope: Codable { let payload: Data; let sha256: String }
++
++    static func digest(_ data: Data) -> String {
++        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
++    }
++
++    static func encoder() -> JSONEncoder {
++        let encoder = JSONEncoder()
++        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
++        return encoder
++    }
++
++    init(document: ResumableDocument) throws {
++        let payload = try Self.encoder().encode(document)
++        guard payload.count <= Self.maximumBytes else { throw ResumableTokenError.oversized }
++        let data = try Self.encoder().encode(Envelope(payload: payload, sha256: Self.digest(payload)))
++        guard data.count <= Self.maximumBytes else { throw ResumableTokenError.oversized }
++        self.data = data
++    }
++
++    public init(data: Data) throws {
++        guard data.count <= Self.maximumBytes else { throw ResumableTokenError.oversized }
++        self.data = data
++        _ = try document()
++    }
++
++    func document() throws -> ResumableDocument {
++        guard data.count <= Self.maximumBytes else { throw ResumableTokenError.oversized }
++        do {
++            let envelope = try JSONDecoder().decode(Envelope.self, from: data)
++            guard Self.digest(envelope.payload) == envelope.sha256 else {
++                throw ResumableTokenError.invalid("checksum")
++            }
++            // Reject previous formats before decoding schema-specific cache fields.
++            struct Header: Decodable { let version: Int }
++            let header = try JSONDecoder().decode(Header.self, from: envelope.payload)
++            guard header.version == 2 else { throw ResumableTokenError.incompatible }
++            return try JSONDecoder().decode(ResumableDocument.self, from: envelope.payload)
++        } catch let error as ResumableTokenError { throw error }
++        catch { throw ResumableTokenError.invalid("checkpoint encoding") }
++    }
++}
+diff --git a/Tests/MLXLMTests/ResumableTokenDriverTests.swift b/Tests/MLXLMTests/ResumableTokenDriverTests.swift
+new file mode 100644
+--- /dev/null
++++ b/Tests/MLXLMTests/ResumableTokenDriverTests.swift
+@@ -0,0 +1,320 @@
++import Foundation
++import MLX
++import MLXNN
++import XCTest
++@testable import MLXLMCommon
++
++struct CheckpointTestState {
++    let position: Int
++    let running: MLXArray
++}
++let checkpointTestKey = LMOutput.Key<CheckpointTestState>("s72.test.state")
++
++func checkpointTestCodecs() throws -> ResumableStateCodecs {
++    var codecs = ResumableStateCodecs()
++    try codecs.register(checkpointTestKey, type: "position-and-running-v1", schema: 1,
++        encode: { value in
++            .init(metadata: try JSONEncoder().encode(value.position),
++                  tensors: [try ResumableTensor(capturing: value.running)])
++        }, decode: { payload in
++            let position = try JSONDecoder().decode(Int.self, from: payload.metadata)
++            guard (0...1_048_576).contains(position), payload.tensors.count == 1,
++                payload.tensors[0].shape == [2], payload.tensors[0].dtype == "float32"
++            else { throw ResumableTokenError.invalid("test state payload") }
++            return try .init(position: position, running: payload.tensors[0].restored())
++        })
++    return codecs
++}
++
++final class CheckpointTestModel: Module, LanguageModel {
++    var calls = 0
++    var prepares = 0
++    var unknownAt: Int?
++    var stateFromCall = 1
++    var wrongType = false
++    var unsupportedLogits = false
++    var outputs: [[Float]] = []
++
++    func newCache(parameters: GenerateParameters?) -> [KVCache] { [KVCacheSimple()] }
++    func prepare(_ input: LMInput, cache: [KVCache], state: LMOutput.State?, windowSize: Int?) throws -> PrepareResult {
++        prepares += 1
++        return .tokens(input.text)
++    }
++    func callAsFunction(_ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?) -> LMOutput {
++        calls += 1
++        if unsupportedLogits {
++            return .init(logits: MLXArray(Array(repeating: Double(0), count: input.tokens.dim(1) * 16), [1, input.tokens.dim(1), 16]))
++        }
++        let tokens = input.tokens.asType(.float32)
++        let previous = state?[checkpointTestKey]
++        let running = (previous?.running ?? MLXArray([Float(0), 1])) + tokens.sum()
++        let keys = broadcast(tokens.reshaped(1, 1, -1, 1), to: [1, 1, tokens.dim(1), 4])
++        let pair = cache![0].update(keys: keys, values: keys * 0.5)
++        let shift = pair.0.sum() * 0.03 + running.sum() * 0.07
++        let row = sin(MLXArray.arange(16).asType(.float32) * 0.37 + shift) * 1.7
++        let logits = broadcast(row.reshaped(1, 1, 16), to: [1, tokens.dim(1), 16])
++        outputs.append(logits.asArray(Float.self))
++        var next: LMOutput.State? = nil
++        if calls >= stateFromCall {
++            next = LMOutput.State()
++            next?[checkpointTestKey] = .init(position: (previous?.position ?? 0) + tokens.dim(1), running: running)
++        }
++        if wrongType { next?[LMOutput.Key<Int>(checkpointTestKey.id)] = 17 }
++        if let unknownAt, calls >= unknownAt { next?[LMOutput.Key<Int>("unregistered")] = 9 }
++        return .init(logits: logits, state: next)
++    }
++}
++
++let checkpointPrompt = [1, 2, 1, 3, 4]
++func checkpointIdentity(_ tokens: [Int] = checkpointPrompt) throws -> ResumableTokenIdentity {
++    try .init(model: "state-test", configuration: "v1-vocab16", weights: "analytic-v1",
++        input: ResumableTokenIdentity.inputDigest(tokens), backend: "same-test-metal-little-endian",
++        dependency: "mlx-swift-lm:83f3ef6/mlx-swift:0bb916c")
++}
++func checkpointOptions(stochastic: Bool = false, maximum: Int = 12) -> ResumableTokenOptions {
++    .init(vocabularySize: 16, maximumTokens: maximum, prefillStepSize: 2,
++        temperature: stochastic ? 0.7 : 0, topP: 0.9, topK: 8, minP: 0.05, seed: 91,
++        repetitionPenalty: 1.1, repetitionContextSize: 3, presencePenalty: 0.15,
++        presenceContextSize: 4, frequencyPenalty: 0.2, frequencyContextSize: 5)
++}
++func checkpointSpecs(rotating: Bool = false) -> [ResumableCacheSpec] {
++    [.init(kind: rotating ? .rotating : .simple, heads: 1, keyDimension: 4, valueDimension: 4,
++        maxSize: rotating ? 4 : 0, keep: rotating ? 1 : 0)]
++}
++func checkpointPrepare(_ model: CheckpointTestModel = .init(), options: ResumableTokenOptions = checkpointOptions(), rotating: Bool = false) throws -> ResumableTokenDriver {
++    try .prepare(model: model, tokens: checkpointPrompt, identity: checkpointIdentity(), options: options,
++        cacheSpecs: checkpointSpecs(rotating: rotating), codecs: checkpointTestCodecs())
++}
++func checkpointDrain(_ driver: ResumableTokenDriver) throws -> [Int] {
++    var result: [Int] = []
++    while let step = try driver.advance() { result.append(step.token) }
++    return result
++}
++
++final class ResumableTokenDriverTests: XCTestCase {
++    func testAllBoundariesAndFullStateContinuation() throws {
++        for rotating in [false, true] {
++            for stochastic in [false, true] {
++                for cut in [0, 1, 7, 12] {
++                    let options = checkpointOptions(stochastic: stochastic)
++                    let source = try checkpointPrepare(options: options, rotating: rotating)
++                    for _ in 0..<cut { _ = try source.advance() }
++                    let frozen = try source.capture()
++                    let originalBytes = frozen.data
++                    let d = try frozen.document()
++                    XCTAssertEqual(d.tokenCount, cut)
++                    XCTAssertEqual(d.randomDraws, stochastic ? min(cut + 1, 12) : 0)
++                    XCTAssertNotNil(d.state)
++                    XCTAssertEqual(d.rings.compactMap { $0?.count }, [3, 4, 5])
++                    let suffix = try checkpointDrain(source)
++                    XCTAssertEqual(frozen.data, originalBytes, "capture changed after source advance")
++                    let freshModel = CheckpointTestModel()
++                    let restored = try ResumableTokenDriver.restore(ResumableTokenCheckpoint(data: frozen.data),
++                        model: freshModel, identity: checkpointIdentity(), options: options,
++                        cacheSpecs: checkpointSpecs(rotating: rotating), codecs: checkpointTestCodecs())
++                    XCTAssertEqual(freshModel.calls, 0)
++                    XCTAssertEqual(freshModel.prepares, 0)
++                    XCTAssertEqual(try checkpointDrain(restored), suffix)
++                    XCTAssertEqual(try restored.capture().data, try source.capture().data)
++                    if cut == 12 { XCTAssertEqual(freshModel.calls, 0) }
++                    source.close(); restored.close()
++                }
++            }
++        }
++    }
++
++    func testExhaustionZeroAndCancellationDoNotAdvanceModel() throws {
++        for maximum in [0, 1, 3] {
++            let model = CheckpointTestModel()
++            let driver = try checkpointPrepare(model, options: checkpointOptions(maximum: maximum))
++            XCTAssertEqual(try checkpointDrain(driver).count, maximum)
++            let calls = model.calls
++            XCTAssertNil(try driver.advance()); XCTAssertNil(try driver.advance())
++            XCTAssertEqual(model.calls, calls)
++            if maximum == 0 { XCTAssertEqual(calls, 0) }
++            driver.close(); driver.close()
++            XCTAssertThrowsError(try driver.advance())
++            XCTAssertThrowsError(try driver.capture())
++            XCTAssertEqual(model.calls, calls)
++        }
++        let model = CheckpointTestModel()
++        let active = try checkpointPrepare(model)
++        let calls = model.calls
++        active.close()
++        XCTAssertThrowsError(try active.advance())
++        XCTAssertEqual(model.calls, calls)
++    }
++
++    func testUnexpectedStateRefusesWithoutReturningTokenPair() throws {
++        let model = CheckpointTestModel()
++        let driver = try checkpointPrepare(model)
++        model.unknownAt = model.calls + 1
++        XCTAssertThrowsError(try driver.advance())
++        XCTAssertTrue(driver.isClosed)
++        XCTAssertThrowsError(try driver.capture())
++        let bad = CheckpointTestModel(); bad.wrongType = true
++        XCTAssertThrowsError(try checkpointPrepare(bad))
++        let absent = CheckpointTestModel(); absent.unknownAt = 1
++        XCTAssertThrowsError(try checkpointPrepare(absent))
++    }
++
++    func testUnsupportedLogitsRefuseBeforeGPUDispatch() throws {
++        let bad = CheckpointTestModel(); bad.unsupportedLogits = true
++        XCTAssertThrowsError(try checkpointPrepare(bad))
++        let later = CheckpointTestModel()
++        let driver = try checkpointPrepare(later)
++        later.unsupportedLogits = true
++        XCTAssertThrowsError(try driver.advance())
++        XCTAssertTrue(driver.isClosed)
++    }
++
++    func testLegacyStochasticSamplerMatchesOwnedExplicitKeySequence() throws {
++        let options = checkpointOptions(stochastic: true, maximum: 8)
++        let driver = try checkpointPrepare(options: options)
++        let expected = try checkpointDrain(driver)
++        let legacyModel = CheckpointTestModel()
++        var iterator = try TokenIterator(input: .init(tokens: MLXArray(checkpointPrompt)), model: legacyModel,
++            parameters: options.parameters)
++        var actual: [Int] = []
++        while let token = iterator.next() { actual.append(token) }
++        eval(iterator.state?[checkpointTestKey]?.running ?? MLXArray(Float(0)))
++        XCTAssertEqual(actual, expected)
++        driver.close()
++    }
++
++    func testInitiallyNilStateCanAppearWhenRegistered() throws {
++        let model = CheckpointTestModel(); model.stateFromCall = 4
++        let d = try checkpointPrepare(model)
++        XCTAssertNil(try d.capture().document().state)
++        _ = try d.advance()
++        XCTAssertNotNil(try d.capture().document().state)
++        d.close()
++    }
++
++    func testInvalidDeclarationsRefuseBeforeModelWork() throws {
++        let model = CheckpointTestModel()
++        for mutation in [
++            { (o: inout ResumableTokenOptions) in o.sampler = "unknown" },
++            { $0.prefillStepSize = 0 }, { $0.temperature = -.infinity },
++            { $0.topK = 100 }, { $0.repetitionContextSize = 0 },
++        ] {
++            var o = checkpointOptions(); mutation(&o)
++            XCTAssertThrowsError(try checkpointPrepare(model, options: o))
++        }
++        XCTAssertEqual(model.calls, 0)
++        XCTAssertThrowsError(try ResumableTokenDriver.prepare(model: model, tokens: [16],
++            identity: checkpointIdentity([16]), options: checkpointOptions(), cacheSpecs: checkpointSpecs()))
++        XCTAssertThrowsError(try ResumableTokenDriver.assess(identity: checkpointIdentity(), options: checkpointOptions(),
++            cacheSpecs: [.init(kind: .rotating, heads: 1, keyDimension: 4, valueDimension: 4, maxSize: 4, keep: 4)]))
++        XCTAssertEqual(model.calls, 0)
++    }
++
++    func testLegacyIteratorKeepsItsPipelineAndTokens() throws {
++        let model = CheckpointTestModel()
++        let options = checkpointOptions(maximum: 8)
++        let driver = try checkpointPrepare(model, options: options)
++        let expected = try checkpointDrain(driver)
++        let legacyModel = CheckpointTestModel()
++        var iterator = try TokenIterator(input: .init(tokens: MLXArray(checkpointPrompt)), model: legacyModel,
++            parameters: options.parameters)
++        var actual: [Int] = []
++        while let token = iterator.next() { actual.append(token) }
++        eval(iterator.state?[checkpointTestKey]?.running ?? MLXArray(Float(0)))
++        XCTAssertEqual(actual, expected)
++        XCTAssertEqual(iterator.tokenCount, 8)
++        XCTAssertEqual(legacyModel.prepares, 1)
++        // Legacy processes the prompt in one call here, then still computes its extra pending token.
++        XCTAssertEqual(legacyModel.calls, 9)
++        driver.close()
++    }
++
++    func testPenaltyRingsMatchExistingCompositionAfterWrap() throws {
++        let options = checkpointOptions()
++        var processor = PenaltyProcessor.resumable(options)
++        var legacy = options.parameters.processor()!
++        let prompt = MLXArray(checkpointPrompt)
++        processor.prompt(prompt); legacy.prompt(prompt)
++        for value in [1, 2, 3, 1, 1, 7, 9, 2] {
++            let logits = MLXArray.arange(16).asType(.float32).reshaped(1, 16) - 7
++            XCTAssertEqual(processor.process(logits: logits).asArray(Float.self), legacy.process(logits: logits).asArray(Float.self))
++            let snapshot = processor.captureResumable()
++            processor = try PenaltyProcessor.restoredResumable(snapshot, options: options)
++            let token = MLXArray([Int32(value)])
++            processor.didSample(token: token); legacy.didSample(token: token)
++        }
++    }
++}
++
++private final class CacheAllocationBoundaryModel: Module, LanguageModel {
++    var physicalSlots: [Int] = []
++    var physicalTensorBytes: [Int] = []
++    var calls = 0
++    func newCache(parameters: GenerateParameters?) -> [KVCache] { [KVCacheSimple()] }
++    func prepare(_ input: LMInput, cache: [KVCache], state: LMOutput.State?, windowSize: Int?) throws -> PrepareResult {
++        throw ResumableTokenError.unsupported("boundary fixture must not re-prefill")
++    }
++    func callAsFunction(_ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?) -> LMOutput {
++        calls += 1
++        let keys = broadcast(input.tokens.asType(.float32).reshaped(1, 1, -1, 1),
++            to: [1, 32, input.tokens.dim(1), 256])
++        let values = keys * 0.5
++        let pair = cache![0].update(keys: keys, values: values)
++        let storage = cache![0].innerState()
++        physicalSlots.append(storage[0].dim(2))
++        physicalTensorBytes.append(storage[0].nbytes)
++        let row = sin(MLXArray.arange(4).asType(.float32) + pair.0.mean() + pair.1.mean())
++        return .init(logits: broadcast(row.reshaped(1, 1, 4), to: [1, input.tokens.dim(1), 4]))
++    }
++}
++
++final class ResumableTokenCacheAllocationTests: XCTestCase {
++    private func checkBoundary(rotating: Bool) throws {
++        try autoreleasepool {
++            let prompt = [1]
++            let identity = try ResumableTokenIdentity(model: "cache-allocation-boundary-v1",
++                configuration: "f32-batch1-heads32-dim256-step256", weights: "analytic-no-weights",
++                input: ResumableTokenIdentity.inputDigest(prompt), backend: "same-native-metal",
++                dependency: "lm:83f3ef6dc5bc24daeea33cfd9e18ab1383bb0bc8")
++            let options = ResumableTokenOptions(vocabularySize: 4, maximumTokens: 2)
++            let specs: [ResumableCacheSpec] = [.init(kind: rotating ? .rotating : .simple,
++                heads: 32, keyDimension: 256, valueDimension: 256,
++                maxSize: rotating ? 257 : 0)]
++            let sourceModel = CacheAllocationBoundaryModel()
++            let source = try ResumableTokenDriver.prepare(model: sourceModel, tokens: prompt,
++                identity: identity, options: options, cacheSpecs: specs)
++            defer { source.close() }
++            let c0 = try source.capture()
++            XCTAssertEqual(sourceModel.physicalSlots, [256])
++            XCTAssertEqual(sourceModel.physicalTensorBytes, [8_388_608])
++            XCTAssertLessThan(c0.data.count, ResumableTokenCheckpoint.maximumBytes)
++            let expected = try checkpointDrain(source)
++            let expectedState = try source.capture()
++            XCTAssertEqual(sourceModel.physicalSlots, [256, 256])
++            let freshModel = CacheAllocationBoundaryModel()
++            let restored = try ResumableTokenDriver.restore(ResumableTokenCheckpoint(data: c0.data),
++                model: freshModel, identity: identity, options: options, cacheSpecs: specs)
++            defer { restored.close() }
++            XCTAssertEqual(freshModel.calls, 0)
++            do {
++                let actual = try checkpointDrain(restored)
++                let actualState = try restored.capture()
++                XCTAssertEqual(actual, expected)
++                XCTAssertEqual(actualState.data, expectedState.data)
++                XCTAssertEqual(freshModel.physicalSlots, [256])
++                XCTAssertEqual(freshModel.physicalTensorBytes, [8_388_608])
++                XCTAssertLessThanOrEqual(Memory.peakMemory, 128 * 1024 * 1024)
++                print("RC1_OBSERVATION cache=\(rotating ? "rotating257" : "simple") source_slots=\(sourceModel.physicalSlots) restored_slots=\(freshModel.physicalSlots) checkpoint_bytes=\(c0.data.count) mlx_peak_bytes=\(Memory.peakMemory)")
++            } catch {
++                print("RC1_REFUSAL cache=\(rotating ? "rotating257" : "simple") source_slots=\(sourceModel.physicalSlots) restored_slots=\(freshModel.physicalSlots) error=\(error)")
++                throw error
++            }
++        }
++        Memory.clearCache()
++    }
++    func testSimpleAllocationBoundaryRestoresCapacityAndSuffix() throws {
++        try checkBoundary(rotating: false)
++    }
++    func testRotatingAllocationBoundaryRestoresCapacityAndSuffix() throws {
++        try checkBoundary(rotating: true)
++    }
++}
+diff --git a/Tests/MLXLMTests/ResumableTokenCheckpointTests.swift b/Tests/MLXLMTests/ResumableTokenCheckpointTests.swift
+new file mode 100644
+--- /dev/null
++++ b/Tests/MLXLMTests/ResumableTokenCheckpointTests.swift
+@@ -0,0 +1,102 @@
++import Foundation
++import MLX
++import XCTest
++@testable import MLXLMCommon
++
++final class ResumableTokenCheckpointTests: XCTestCase {
++    func testCorruptTruncatedOversizedAndIncompatibleRefusalsDoNotMutate() throws {
++        let model = CheckpointTestModel()
++        let driver = try checkpointPrepare(model, options: checkpointOptions(stochastic: true), rotating: true)
++        _ = try driver.advance()
++        let original = try driver.capture()
++        let calls = model.calls
++        func refused(_ checkpoint: ResumableTokenCheckpoint) {
++            XCTAssertThrowsError(try ResumableTokenDriver.restore(checkpoint, model: model,
++                identity: checkpointIdentity(), options: checkpointOptions(stochastic: true),
++                cacheSpecs: checkpointSpecs(rotating: true), codecs: checkpointTestCodecs()))
++            XCTAssertEqual(model.calls, calls)
++            XCTAssertEqual(try driver.capture().data, original.data)
++        }
++        var corrupt = original.data; corrupt[corrupt.startIndex] ^= 1
++        XCTAssertThrowsError(try ResumableTokenCheckpoint(data: corrupt))
++        XCTAssertThrowsError(try ResumableTokenCheckpoint(data: original.data.dropLast()))
++        XCTAssertThrowsError(try ResumableTokenCheckpoint(data: Data(repeating: 0, count: ResumableTokenCheckpoint.maximumBytes + 1)))
++        let mutations: [(inout ResumableDocument) -> Void] = [
++            { $0.version = 3 }, { $0.options.sampler = "custom-unknown" },
++            { $0.options.seed += 1 }, { $0.tokenCount = -1 }, { $0.pending = 99 },
++            { $0.exhausted = true }, { $0.randomDraws = 0 }, { $0.randomKey = nil },
++            { $0.rings = [] }, { $0.state = ($0.state ?? []) + ($0.state ?? []) },
++            { $0.codecs = [] }, { $0.cacheSpecs = [] },
++        ]
++        for mutation in mutations {
++            var d = try original.document(); mutation(&d)
++            let c = try ResumableTokenCheckpoint(document: d)
++            if d.version == 3 { XCTAssertThrowsError(try c.document()) }
++            else { refused(c) }
++        }
++        var previousSchema = try original.document()
++        previousSchema.version = 1
++        let oldData = try ResumableTokenCheckpoint(document: previousSchema).data
++        XCTAssertThrowsError(try ResumableTokenCheckpoint(data: oldData)) {
++            XCTAssertEqual($0 as? ResumableTokenError, .incompatible)
++        }
++        // Tampered payloads below have recomputed checksums: validate before invoking
++        // legacy array/cache setters, not merely relying on the integrity envelope.
++        let replacements: [(String, Any)] = [
++            ("allocationLength", 0), ("allocationLength", Int.max),
++            ("offset", -1), ("metadata", ["1", "4", "256", "6", "999"]),
++            ("tensors", []),
++        ]
++        for (field, value) in replacements {
++            var object = try JSONSerialization.jsonObject(with: ResumableTokenCheckpoint.encoder().encode(original.document())) as! [String: Any]
++            var caches = object["caches"] as! [[String: Any]]
++            caches[0][field] = value; object["caches"] = caches
++            let d = try JSONDecoder().decode(ResumableDocument.self, from: JSONSerialization.data(withJSONObject: object))
++            refused(try .init(document: d))
++        }
++        for (field, value) in [("shape", [1, 1, -1, 4] as Any), ("dtype", "complex64" as Any), ("bytes", "AA==" as Any)] {
++            var object = try JSONSerialization.jsonObject(with: ResumableTokenCheckpoint.encoder().encode(original.document())) as! [String: Any]
++            var caches = object["caches"] as! [[String: Any]]
++            var tensors = caches[0]["tensors"] as! [[String: Any]]
++            tensors[0][field] = value; caches[0]["tensors"] = tensors; object["caches"] = caches
++            let d = try JSONDecoder().decode(ResumableDocument.self, from: JSONSerialization.data(withJSONObject: object))
++            refused(try .init(document: d))
++        }
++        for field in ["model", "configuration", "weights", "input", "backend", "dependency"] {
++            var object = try JSONSerialization.jsonObject(with: ResumableTokenCheckpoint.encoder().encode(original.document())) as! [String: Any]
++            var identity = object["identity"] as! [String: Any]; identity[field] = "changed"
++            object["identity"] = identity
++            let d = try JSONDecoder().decode(ResumableDocument.self, from: JSONSerialization.data(withJSONObject: object))
++            refused(try .init(document: d))
++        }
++        driver.close()
++    }
++
++    func testCodecRegistrationExactTypesAndPayloadRefusal() throws {
++        var codecs = try checkpointTestCodecs()
++        XCTAssertThrowsError(try codecs.register(checkpointTestKey, type: "same", schema: 1,
++            encode: { _ in .init() }, decode: { _ in .init(position: 0, running: MLXArray([Float(0), 0])) }))
++        XCTAssertThrowsError(try codecs.register(LMOutput.Key<Int>(checkpointTestKey.id), type: "conflicting", schema: 1,
++            encode: { _ in .init() }, decode: { _ in 0 }))
++        XCTAssertNil(try codecs.restore(nil))
++        XCTAssertNotNil(try codecs.restore([]))
++        var state = LMOutput.State(); state[LMOutput.Key<Int>(checkpointTestKey.id)] = 2
++        XCTAssertThrowsError(try codecs.capture(state))
++        state = LMOutput.State(); state[LMOutput.Key<Int>("unknown")] = 2
++        XCTAssertThrowsError(try codecs.capture(state))
++        let malformed = ResumableStateEntry(descriptor: codecs.descriptors[0], payload: .init(metadata: Data([0xff])))
++        XCTAssertThrowsError(try codecs.restore([malformed]))
++    }
++
++    func testFrozenTensorIsIndependentAndCheckedBeforeAllocation() throws {
++        let live = MLXArray([Float(1), 2, 3])
++        let frozen = try ResumableTensor(capturing: live)
++        live[0] = MLXArray(Float(99))
++        XCTAssertEqual(try frozen.restored().asArray(Float.self), [1, 2, 3])
++        for shape in [[Int.max, 2], [0], [-1], Array(repeating: 1, count: 9)] {
++            let value = ["shape": shape, "dtype": "float32", "bytes": "AAAAAA=="] as [String: Any]
++            let tensor = try JSONDecoder().decode(ResumableTensor.self, from: JSONSerialization.data(withJSONObject: value))
++            XCTAssertThrowsError(try tensor.restored())
++        }
++    }
++}
