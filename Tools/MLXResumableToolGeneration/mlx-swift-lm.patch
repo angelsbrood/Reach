@@ -1,0 +1,894 @@
+diff --git a/Libraries/MLXLMCommon/ResumableToolGeneration.swift b/Libraries/MLXLMCommon/ResumableToolGeneration.swift
+new file mode 100644
+--- /dev/null
++++ b/Libraries/MLXLMCommon/ResumableToolGeneration.swift
+@@ -0,0 +1,156 @@
++import Foundation
++
++/// The nested S75 codec preserves typed arguments, negative-zero bits and UTF-8 bytes.
++public enum ResumableToolGenerationRecord: Codable, Sendable {
++    case parsed(ResumableToolCallRecord)
++    case terminal(ResumableTextCompletion)
++}
++
++/// One serially confined, unconstrained generation/proposal pass. Both children are
++/// exclusively owned and settled at public boundaries; no work runs between calls.
++public final class ResumableToolGeneration {
++    public struct Batch: Encodable {
++        public let token: Int?
++        public let records: [ResumableToolGenerationRecord]
++        public let checkpoint: ResumableToolGenerationCheckpoint
++        private enum CodingKeys: CodingKey { case token, records, checkpoint }
++        public func encode(to encoder: Encoder) throws {
++            var values = encoder.container(keyedBy: CodingKeys.self)
++            try values.encodeIfPresent(token, forKey: .token)
++            try values.encode(records, forKey: .records)
++            try values.encode(checkpoint.data, forKey: .checkpoint)
++        }
++    }
++    public static let maximumBatchBytes = 48 * 1024 * 1024
++    public static let maximumRecordBytes = 2 * 1024 * 1024
++    public private(set) var isClosed = false
++    public private(set) var terminalReason: ResumableTextEnd?
++    private var text: ResumableTextOutput?
++    private var parser: ResumableToolCallProcessor?
++    private var saved: ResumableToolGenerationCheckpoint
++    private var forwarded: UInt64
++
++    private init(text: ResumableTextOutput, parser: ResumableToolCallProcessor,
++                 saved: ResumableToolGenerationCheckpoint, forwarded: UInt64) {
++        self.text = text; self.parser = parser; self.saved = saved; self.forwarded = forwarded
++        terminalReason = text.terminalReason
++        if terminalReason != nil { releaseChildren() }
++    }
++    public static func prepare(model: any LanguageModel, tokens: [Int], identity: ResumableTokenIdentity,
++                               rawOptions: ResumableTokenOptions, cacheSpecs: [ResumableCacheSpec],
++                               codecs: ResumableStateCodecs = .init(), tokenizer: any Tokenizer,
++                               options: ResumableTextOptions, configuration: ResumableToolCallConfiguration,
++                               namespace: String) throws -> ResumableToolGeneration {
++        // Reject parser/configuration errors before the raw driver's settled lookahead.
++        let parser = try ResumableToolCallProcessor.prepare(configuration: configuration, namespace: namespace)
++        var text: ResumableTextOutput?
++        do {
++            let child = try ResumableTextOutput.prepare(model: model, tokens: tokens, identity: identity,
++                rawOptions: rawOptions, cacheSpecs: cacheSpecs, codecs: codecs, tokenizer: tokenizer, options: options)
++            text = child
++            let document = ToolGenerationDocument(text: try child.capture().data, parser: try parser.capture().data,
++                forwardedChunks: 0, disposition: .active)
++            try document.validate()
++            return try .init(text: child, parser: parser, saved: .init(document: document), forwarded: 0)
++        } catch { text?.close(); parser.close(); throw error }
++    }
++    /// Full S73/S75 restore, even for terminal frozen values. No model/prefill/sample,
++    /// output emission or parser EOS. Terminal children are validated and then closed.
++    public static func restore(_ checkpoint: ResumableToolGenerationCheckpoint, model: any LanguageModel,
++                               identity: ResumableTokenIdentity, rawOptions: ResumableTokenOptions,
++                               cacheSpecs: [ResumableCacheSpec], codecs: ResumableStateCodecs = .init(),
++                               tokenizer: any Tokenizer, options: ResumableTextOptions,
++                               configuration: ResumableToolCallConfiguration, namespace: String) throws -> ResumableToolGeneration {
++        let d = try checkpoint.document()
++        let parser = try ResumableToolCallProcessor.restore(.init(data: d.parser), configuration: configuration, namespace: namespace)
++        do {
++            let text = try ResumableTextOutput.restore(.init(data: d.text), model: model, identity: identity,
++                rawOptions: rawOptions, cacheSpecs: cacheSpecs, codecs: codecs, tokenizer: tokenizer, options: options)
++            return .init(text: text, parser: parser, saved: checkpoint, forwarded: d.forwardedChunks)
++        } catch { parser.close(); throw error }
++    }
++    public func capture() throws -> ResumableToolGenerationCheckpoint {
++        guard !isClosed else { throw ResumableTokenError.closed }
++        return saved
++    }
++    public func advance() throws -> Batch? {
++        guard !isClosed else { throw ResumableTokenError.closed }
++        guard terminalReason == nil else { return nil }
++        do {
++            guard let text, let parser, let child = try text.advance() else {
++                throw ResumableTokenError.invalid("missing active child")
++            }
++            var records: [ResumableToolGenerationRecord] = []
++            var terminal: ResumableTextCompletion?
++            for record in child.records {
++                switch record {
++                case .text(let bytes):
++                    guard terminal == nil else { throw ResumableTokenError.invalid("text after terminal") }
++                    guard !bytes.isEmpty else { continue }
++                    guard bytes.count <= 64 * 1024, forwarded < 999_999 else { throw ResumableTokenError.oversized }
++                    guard let chunk = String(data: bytes, encoding: .utf8), Data(chunk.utf8) == bytes else {
++                        throw ResumableTokenError.invalid("forwarded UTF-8")
++                    }
++                    records += try parser.consume(chunk).records.map { .parsed($0) }
++                    forwarded += 1
++                case .terminal(let completion):
++                    guard terminal == nil, completion.reason != .cancelled else {
++                        throw ResumableTokenError.invalid("normal terminal")
++                    }
++                    terminal = completion
++                }
++            }
++            if let terminal {
++                guard let final = try parser.finish() else { throw ResumableTokenError.invalid("duplicate parser EOS") }
++                records += final.records.map { .parsed($0) }
++                records.append(.terminal(terminal))
++            }
++            return try settle(token: child.token, records: records, text: child.checkpoint,
++                parser: parser.capture(), disposition: terminal == nil ? .active : .normalFinished,
++                terminal: terminal?.reason)
++        } catch { close(); throw error }
++    }
++    /// Discard S73's cancellation flush; freeze and close S75 without consume/EOS.
++    /// An unfinished buffered parser is legitimate only under cancelledFrozen.
++    public func cancel() throws -> Batch? {
++        guard !isClosed else { throw ResumableTokenError.closed }
++        guard terminalReason == nil else { return nil }
++        do {
++            let frozen = try saved.document().parser
++            guard let text, let child = try text.cancel(), child.token == nil else {
++                throw ResumableTokenError.invalid("missing cancellation child")
++            }
++            let endings = child.records.compactMap { record -> ResumableTextCompletion? in
++                if case .terminal(let completion) = record { return completion }; return nil
++            }
++            guard endings.count == 1, endings[0].reason == .cancelled else {
++                throw ResumableTokenError.invalid("cancellation terminal")
++            }
++            return try settle(token: nil, records: [.terminal(endings[0])], text: child.checkpoint,
++                parser: .init(data: frozen), disposition: .cancelledFrozen, terminal: .cancelled)
++        } catch { close(); throw error }
++    }
++    private func settle(token: Int?, records: [ResumableToolGenerationRecord], text: ResumableTextCheckpoint,
++                        parser: ResumableToolCallCheckpoint, disposition: ToolGenerationDisposition,
++                        terminal: ResumableTextEnd?) throws -> Batch {
++        let document = ToolGenerationDocument(text: text.data, parser: parser.data,
++            forwardedChunks: forwarded, disposition: disposition)
++        try document.validate()
++        let next = try ResumableToolGenerationCheckpoint(document: document)
++        let batch = Batch(token: token, records: records, checkpoint: next)
++        try Self.validateBatch(batch)
++        saved = next; terminalReason = terminal
++        if terminal != nil { releaseChildren() }
++        return batch
++    }
++    static func validateBatch(_ batch: Batch) throws {
++        let terminals = batch.records.filter { if case .terminal = $0 { return true }; return false }.count
++        guard batch.records.count <= 4097, batch.records.count - terminals <= 4096, terminals <= 1,
++            try ToolCheckpointEncoding.encode(batch.records).count <= maximumRecordBytes,
++            try ToolCheckpointEncoding.encode(batch).count <= maximumBatchBytes else {
++            throw ResumableTokenError.oversized
++        }
++    }
++    private func releaseChildren() { text?.close(); parser?.close(); text = nil; parser = nil }
++    public func close() { isClosed = true; releaseChildren() }
++}
+diff --git a/Libraries/MLXLMCommon/ResumableToolGenerationCheckpoint.swift b/Libraries/MLXLMCommon/ResumableToolGenerationCheckpoint.swift
+new file mode 100644
+--- /dev/null
++++ b/Libraries/MLXLMCommon/ResumableToolGenerationCheckpoint.swift
+@@ -0,0 +1,89 @@
++import Foundation
++
++enum ToolGenerationDisposition: String, Codable, Sendable {
++    case active, normalFinished, cancelledFrozen
++}
++
++struct ToolGenerationDocument: Codable {
++    var version = 1
++    var policy = "S76-ordered-proposal-cancel-discard-v1"
++    var textCandidate = "bd3fb02e7fab42887593512599de64ecb4d7c7c242d91359d37158d2a8227113"
++    var parserCandidate = "c7ae60342894f77b58e3b5cb51a11b0a1251db95a7bbc9386307eb17cec27ffd"
++    var text: Data
++    var parser: Data
++    // Retained: raw tokens do not determine the number of nonempty text chunks.
++    // Parser sequence is derived: forwardedChunks plus one normal EOS, never cancel.
++    var forwardedChunks: UInt64
++    var disposition: ToolGenerationDisposition
++
++    func validate() throws {
++        guard version == 1, policy == "S76-ordered-proposal-cancel-discard-v1",
++            textCandidate == "bd3fb02e7fab42887593512599de64ecb4d7c7c242d91359d37158d2a8227113",
++            parserCandidate == "c7ae60342894f77b58e3b5cb51a11b0a1251db95a7bbc9386307eb17cec27ffd" else {
++            throw ResumableTokenError.incompatible
++        }
++        let t = try ResumableTextCheckpoint(data: text).document()
++        let raw = try ResumableTokenCheckpoint(data: t.raw).document()
++        let p = try ResumableToolCallCheckpoint(data: parser).document()
++        // Full raw value/codec validation is completed by S73 restore, even for
++        // terminal values. document() alone is not raw value validation.
++        guard t.output.rawDigest == ResumableTokenCheckpoint.digest(t.raw),
++            t.output.rawCount == raw.tokenCount, t.output.promptCount == raw.promptCount,
++            (0...65_536).contains(t.output.rawCount), forwardedChunks <= 999_999 else {
++            throw ResumableTokenError.invalid("tool generation positions")
++        }
++        let normal = disposition == .normalFinished
++        guard p.sequence == forwardedChunks + (normal ? 1 : 0), p.finished == normal,
++            forwardedChunks <= UInt64(t.output.rawCount) + (normal ? 1 : 0) else {
++            throw ResumableTokenError.invalid("parser operation join")
++        }
++        if t.output.rawCount == 0 {
++            guard forwardedChunks == 0 else { throw ResumableTokenError.invalid("tool generation C0") }
++        }
++        switch disposition {
++        case .active:
++            guard t.output.terminal == nil else { throw ResumableTokenError.invalid("active join") }
++        case .normalFinished:
++            guard t.output.terminal == .stop || t.output.terminal == .length else {
++                throw ResumableTokenError.invalid("normal ending join")
++            }
++        case .cancelledFrozen:
++            guard t.output.terminal == .cancelled else { throw ResumableTokenError.invalid("cancelled join") }
++        }
++    }
++}
++
++/// Immutable local value; checksum detects ordinary corruption, not arbitrary forgery.
++/// Construction checks encoding/joins; restore also performs full child validation.
++public struct ResumableToolGenerationCheckpoint: Equatable, Sendable {
++    public static let maximumBytes = 32 * 1024 * 1024
++    public let data: Data
++
++    init(document: ToolGenerationDocument) throws {
++        guard document.text.count <= ResumableTextCheckpoint.maximumBytes,
++            document.parser.count <= ResumableToolCallCheckpoint.maximumBytes else {
++            throw ResumableTokenError.oversized
++        }
++        let payload = try ToolCheckpointEncoding.encode(document)
++        guard payload.count <= Self.maximumBytes else { throw ResumableTokenError.oversized }
++        let encoded = try ToolCheckpointEncoding.encode(ResumableTokenCheckpoint.Envelope(
++            payload: payload, sha256: ResumableTokenCheckpoint.digest(payload)))
++        guard encoded.count <= Self.maximumBytes else { throw ResumableTokenError.oversized }
++        data = encoded
++    }
++    public init(data: Data) throws {
++        guard data.count <= Self.maximumBytes else { throw ResumableTokenError.oversized }
++        self.data = data
++        _ = try document()
++    }
++    func document() throws -> ToolGenerationDocument {
++        guard data.count <= Self.maximumBytes else { throw ResumableTokenError.oversized }
++        let envelope = try JSONDecoder().decode(ResumableTokenCheckpoint.Envelope.self, from: data)
++        guard ResumableTokenCheckpoint.digest(envelope.payload) == envelope.sha256 else {
++            throw ResumableTokenError.invalid("tool generation checksum")
++        }
++        let document = try JSONDecoder().decode(ToolGenerationDocument.self, from: envelope.payload)
++        try document.validate()
++        return document
++    }
++}
+diff --git a/Tests/MLXLMTests/ResumableToolGenerationTests.swift b/Tests/MLXLMTests/ResumableToolGenerationTests.swift
+new file mode 100644
+--- /dev/null
++++ b/Tests/MLXLMTests/ResumableToolGenerationTests.swift
+@@ -0,0 +1,490 @@
++import CryptoKit
++import Foundation
++import Metal
++import MLX
++import MLXLLM
++@testable import MLXLMCommon
++import MLXNN
++
++struct CheckFailure: Error, CustomStringConvertible {
++    let description: String
++    init(_ description: String) { self.description = description }
++}
++func check(_ value: Bool, _ label: String) throws {
++    if !value { throw CheckFailure(label) }
++}
++func tgHash(_ data: Data) -> String {
++    SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
++}
++func encoder() -> JSONEncoder {
++    let e = JSONEncoder(); e.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]; return e
++}
++struct FixtureState { let position: Int; let running: MLXArray }
++let stateKey = LMOutput.Key<FixtureState>("s76.fixture.state")
++func codecs() throws -> ResumableStateCodecs {
++    var result = ResumableStateCodecs()
++    try result.register(stateKey, type: "position-running-v1", schema: 1, encode: {
++        .init(metadata: try encoder().encode($0.position), tensors: [try .init(capturing: $0.running)])
++    }, decode: {
++        let position = try JSONDecoder().decode(Int.self, from: $0.metadata)
++        try check((0...1_048_576).contains(position) && $0.tensors.count == 1, "typed state metadata")
++        try check($0.tensors[0].shape == [2] && $0.tensors[0].dtype == "float32", "typed state tensor")
++        return try .init(position: position, running: $0.tensors[0].restored())
++    })
++    return result
++}
++
++/// Calls/outputs are observation-only; they do not influence the forward calculation.
++final class FixtureModel: Module, LanguageModel {
++    let llama: LlamaModel?
++    let weightsIdentity: String
++    let weightBytes: Int
++    let script: [Int]
++    let vocabulary: Int
++    var faultAt: Int?
++    var calls = 0
++    var prepares = 0
++    var outputs: [[Float]] = []
++
++    init(kind: String, script: [Int], vocabulary: Int) throws {
++        self.script = script; self.vocabulary = vocabulary
++        if kind == "llama" {
++            let model = LlamaModel(.init(hiddenSize: 16, hiddenLayers: 2, intermediateSize: 32,
++                attentionHeads: 2, rmsNormEps: 0.00001, vocabularySize: vocabulary, kvHeads: 1))
++            var values: [(String, MLXArray)] = []
++            var material = Data()
++            var count = 0
++            for (name, array) in model.parameters().flattened().sorted(by: { $0.0 < $1.0 }) {
++                let salt = name.utf8.reduce(0) { ($0 + Int($1)) % 997 }
++                let floats = (0..<array.size).map { index -> Float in
++                    let value = Float((index * 73 + salt * 19) % 251 - 125) / 4096
++                    return name.contains("norm") ? 1 + value : value
++                }
++                let fixed = MLXArray(floats, array.shape)
++                values.append((name, fixed)); count += fixed.nbytes
++                material.append(try encoder().encode([name, String(describing: array.shape)]))
++                material.append(fixed.asData(access: .copy).data)
++            }
++            try model.update(parameters: ModuleParameters.unflattened(values), verify: .all)
++            eval(model)
++            self.llama = model; weightsIdentity = tgHash(material); weightBytes = count
++        } else {
++            try check(kind == "state", "fixture kind")
++            llama = nil; weightsIdentity = tgHash(Data("native-forced-tool-cache-state-v1".utf8)); weightBytes = 0
++        }
++        try check(weightBytes <= 128 * 1024 * 1024, "model tensor ceiling")
++        super.init()
++    }
++    func newCache(parameters: GenerateParameters?) -> [KVCache] {
++        llama?.newCache(parameters: parameters) ?? [KVCacheSimple()]
++    }
++    func prepare(_ input: LMInput, cache: [KVCache], state: LMOutput.State?, windowSize: Int?) throws -> PrepareResult {
++        prepares += 1
++        throw CheckFailure("resumable worker must not enter model.prepare")
++    }
++    func callAsFunction(_ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?) -> LMOutput {
++        calls += 1
++        if let llama {
++            let logits = llama(input.tokens, cache: cache)
++            outputs.append(logits.asArray(Float.self))
++            return .init(logits: logits)
++        }
++        let tokens = input.tokens.asType(.float32)
++        let previous = state?[stateKey]
++        let running = (previous?.running ?? MLXArray([Float(0), 1])) + tokens.sum()
++        let keys = broadcast(tokens.reshaped(1, 1, -1, 1), to: [1, 1, tokens.dim(1), 4])
++        let pair = cache![0].update(keys: keys, values: keys * 0.5)
++        let shift = pair.0.sum() * 0.03 + running.sum() * 0.07
++        let consumed = (previous?.position ?? 0) + tokens.dim(1)
++        let index = min(max(0, consumed - 5), script.count - 1)
++        let mask = MLXArray.arange(vocabulary) .== script[index]
++        let row = MLX.where(mask, shift, MLXArray(-Float.infinity))
++        let logits = broadcast(row.reshaped(1, 1, vocabulary), to: [1, tokens.dim(1), vocabulary])
++        outputs.append(logits.asArray(Float.self))
++        var next = LMOutput.State()
++        next[stateKey] = .init(position: (previous?.position ?? 0) + tokens.dim(1), running: running)
++        if faultAt == calls { next[LMOutput.Key<Int>("s76.intentional-unregistered-fault")] = 1 }
++        return .init(logits: logits, state: next)
++    }
++}
++
++struct TextFixtureTokenizer: Tokenizer {
++    var pieces: [Int: String] = [1: "a", 2: "b", 3: "\n", 4: "  ", 5: ",",
++        6: "<", 7: "stop", 8: ">hidden", 9: "{\"tool\":", 10: "<tool_call>",
++        13: "e\u{301}", 14: "é", 15: "tail"]
++    func encode(text: String, addSpecialTokens: Bool) -> [Int] { [] }
++    func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String {
++        var result = "", index = 0
++        while index < tokenIds.count {
++            if tokenIds[index] == 11 {
++                if index + 1 < tokenIds.count && tokenIds[index + 1] == 12 {
++                    result += "中"; index += 2; continue
++                }
++                result += "\u{fffd}"
++            } else if tokenIds[index] == 12 { result += "\u{fffd}" }
++            else { result += pieces[tokenIds[index]] ?? "" }
++            index += 1
++        }
++        return result.replacingOccurrences(of: "  ,", with: " ,")
++    }
++    func convertTokenToId(_ token: String) -> Int? { nil }
++    func convertIdToToken(_ id: Int) -> String? { pieces[id] }
++    var bosToken: String? { nil }
++    var eosToken: String? { nil }
++    var unknownToken: String? { nil }
++    func applyChatTemplate(messages: [[String: any Sendable]], tools: [[String: any Sendable]]?,
++                           additionalContext: [String: any Sendable]?) throws -> [Int] { [] }
++}
++
++func payload(_ checkpoint: Data) throws -> Any {
++    let envelope = try JSONSerialization.jsonObject(with: checkpoint) as! [String: Any]
++    let bytes = Data(base64Encoded: envelope["payload"] as! String)!
++    try check(tgHash(bytes) == envelope["sha256"] as? String, "actual envelope checksum")
++    return try JSONSerialization.jsonObject(with: bytes)
++}
++func equivalent(_ lhs: Any, _ rhs: Any, path: String = "checkpoint") throws {
++    if let a = lhs as? [String: Any], let b = rhs as? [String: Any] {
++        try check(Set(a.keys) == Set(b.keys), "keys at \(path)")
++        if a["shape"] != nil && a["dtype"] != nil && a["bytes"] != nil {
++            let x = try JSONDecoder().decode(ResumableTensor.self, from: JSONSerialization.data(withJSONObject: a))
++            let y = try JSONDecoder().decode(ResumableTensor.self, from: JSONSerialization.data(withJSONObject: b))
++            try check(x.shape == y.shape && x.dtype == y.dtype, "tensor layout at \(path)")
++            if x.dtype.contains("float") {
++                try check(allClose(x.restored(), y.restored(), rtol: 1e-5, atol: 1e-6).item(Bool.self), "tensor values at \(path)")
++            } else { try check(x.bytes == y.bytes, "exact integer tensor at \(path)") }
++        } else {
++            for key in a.keys.sorted() { try equivalent(a[key]!, b[key]!, path: path + "." + key) }
++        }
++    } else if let a = lhs as? [Any], let b = rhs as? [Any] {
++        try check(a.count == b.count, "array count at \(path)")
++        for i in a.indices { try equivalent(a[i], b[i], path: path + "[\(i)]") }
++    } else {
++        try check((lhs as? NSObject)?.isEqual(rhs) == true, "exact metadata at \(path)")
++    }
++}
++func boundedRead(_ path: String, maximum: Int) throws -> Data {
++    let url = URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath()
++    try check(url.path.hasPrefix(URL(fileURLWithPath: "/private/tmp").standardizedFileURL.resolvingSymlinksInPath().path + "/"), "private fixture path")
++    let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? Int.max
++    try check(size <= maximum, "fixture size")
++    let result = try Data(contentsOf: url)
++    try check(result.count <= maximum, "fixture size after read")
++    return result
++}
++
++
++let tgNamespace = "0123456789abcdef0123456789abcdef"
++let tgFirstID = "call_777e803074536a79970e719934685f6f"
++
++struct TGFixture {
++    var name: String
++    var kind = "state"
++    var script: [Int]
++    var tokenizer: TextFixtureTokenizer
++    var configuration: ResumableToolCallConfiguration
++    var rotating = true
++    var stochastic = true
++    var limit: Int
++    var stops: Set<String> = []
++    var stopIDs: Set<Int> = [30]
++    var unknown: Int? = 31
++    var cancelAfter: Int?
++    var vocabulary = 64
++}
++
++func tgFixture(_ name: String) throws -> TGFixture {
++    var tok = TextFixtureTokenizer()
++    switch name {
++    case "json":
++        tok.pieces[16] = "<tool"
++        tok.pieces[17] = "_call>{\"name\":\"alpha\",\"arguments\":{\"n\":1,\"s\":\""
++        tok.pieces[18] = "\"},\"id\":\"\(tgFirstID)\"}</tool_call>"
++        tok.pieces[19] = "between\n"
++        tok.pieces[20] = "<tool_call>{\"name\":\"beta\",\"arguments\":{\"b\":true}}</tool_call>tail<tool_call>{\"name\":\"gamma\",\"arguments\":{\"items\":[1,2]},\"id\":\"\(tgFirstID)\"}</tool_call>"
++        tok.pieces[21] = "<sto"; tok.pieces[22] = "p>hidden"
++        return try .init(name: name, script: [16,17,11,12,18,19,20,21,22], tokenizer: tok,
++            configuration: .init(format: .json), limit: 9, stops: ["<stop>"])
++    case "xml":
++        tok.pieces[16] = "before<tool_call><function=typed><parameter=n>"
++        tok.pieces[17] = "1</parameter><parameter=x>1.5</parameter><parameter=s>e\u{301}"
++        tok.pieces[18] = "</parameter></function></tool_call>after"
++        let tools: [[String: JSONValue]] = [["type": .string("function"), "function": .object([
++            "name": .string("typed"), "parameters": .object(["type": .string("object"), "properties": .object([
++                "n": .object(["type": .string("integer")]), "x": .object(["type": .string("number")]),
++                "s": .object(["type": .string("string")])])])])]]
++        return try .init(name: name, script: [16,17,18], tokenizer: tok,
++            configuration: .init(format: .xmlFunction, tools: tools), rotating: false, limit: 3)
++    case "mistral", "cancel":
++        tok.pieces[16] = "[TOOL_CALLS]eos [ARGS]{\"n\":"
++        tok.pieces[17] = "7}"
++        tok.pieces[18] = "<stop"; tok.pieces[19] = ">hidden"
++        return try .init(name: name, script: name == "cancel" ? [16,17,18,19] : [16,17,30], tokenizer: tok,
++            configuration: .init(format: .mistral), limit: name == "cancel" ? 4 : 3,
++            stops: name == "cancel" ? ["<stop>"] : [], cancelAfter: name == "cancel" ? 3 : nil)
++    case "length-flush":
++        tok.pieces[16] = "hello<sto"
++        return try .init(name: name, script: [16], tokenizer: tok, configuration: .init(format: .json),
++            rotating: false, stochastic: false, limit: 1, stops: ["<stop>"])
++    case "zero":
++        return try .init(name: name, script: [1], tokenizer: tok, configuration: .init(format: .json), limit: 0)
++    case "llama":
++        tok.pieces = Dictionary(uniqueKeysWithValues: (0..<16).map { ($0, "p\($0) ") })
++        return try .init(name: name, kind: "llama", script: [], tokenizer: tok, configuration: .init(format: .json),
++            rotating: false, limit: 5, stopIDs: [], unknown: nil, vocabulary: 16)
++    default: throw CheckFailure("fixture name")
++    }
++}
++
++struct TGSetup {
++    let item: TGFixture
++    let model: FixtureModel
++    let rawOptions: ResumableTokenOptions
++    let specs: [ResumableCacheSpec]
++    let registry: ResumableStateCodecs
++    let identity: ResumableTokenIdentity
++    let options: ResumableTextOptions
++    let prompt = [1,2,1,3,4]
++
++    init(_ item: TGFixture) throws {
++        self.item = item
++        model = try FixtureModel(kind: item.kind, script: item.script, vocabulary: item.vocabulary)
++        rawOptions = .init(vocabularySize: item.vocabulary, maximumTokens: item.limit, prefillStepSize: 2,
++            temperature: item.stochastic ? 0.7 : 0, topP: 0.9, topK: 8, minP: 0.05, seed: 91,
++            repetitionPenalty: 1.1, repetitionContextSize: 3, presencePenalty: 0.15,
++            presenceContextSize: 4, frequencyPenalty: 0.2, frequencyContextSize: 5)
++        let spec = ResumableCacheSpec(kind: item.rotating ? .rotating : .simple, heads: 1,
++            keyDimension: item.kind == "llama" ? 8 : 4, valueDimension: item.kind == "llama" ? 8 : 4,
++            maxSize: item.rotating ? 4 : 0, keep: item.rotating ? 1 : 0)
++        specs = Array(repeating: spec, count: item.kind == "llama" ? 2 : 1)
++        registry = item.kind == "state" ? try codecs() : .init()
++        let pieces = try encoder().encode(item.tokenizer.pieces)
++        let definition = tgHash(pieces + (try encoder().encode(item.script)))
++        let backend = "arm64-little-endian;swift6.4;" + ProcessInfo.processInfo.operatingSystemVersionString
++            + ";" + (MTLCreateSystemDefaultDevice()?.name ?? "unavailable")
++        identity = try .init(model: item.kind, configuration: item.name + ";s76-v1;" + definition,
++            weights: model.weightsIdentity, input: ResumableTokenIdentity.inputDigest(prompt), backend: backend,
++            dependency: "lm:83f3ef6dc5bc24daeea33cfd9e18ab1383bb0bc8;mlx:0bb916c67f4b9e5c682cbe02a42c701c93ab5021")
++        options = try .init(tokenizerIdentity: "s76-byte-v1;" + tgHash(pieces), stopTokenIDs: item.stopIDs,
++            unknownTokenID: item.unknown, stopStrings: item.stops)
++    }
++    func prepare() throws -> ResumableToolGeneration {
++        try .prepare(model: model, tokens: prompt, identity: identity, rawOptions: rawOptions, cacheSpecs: specs,
++            codecs: registry, tokenizer: item.tokenizer, options: options, configuration: item.configuration, namespace: tgNamespace)
++    }
++    func restore(_ checkpoint: ResumableToolGenerationCheckpoint, namespace: String = tgNamespace,
++                 configuration: ResumableToolCallConfiguration? = nil) throws -> ResumableToolGeneration {
++        try .restore(checkpoint, model: model, identity: identity, rawOptions: rawOptions, cacheSpecs: specs,
++            codecs: registry, tokenizer: item.tokenizer, options: options,
++            configuration: configuration ?? item.configuration, namespace: namespace)
++    }
++    func text() throws -> ResumableTextOutput {
++        try .prepare(model: model, tokens: prompt, identity: identity, rawOptions: rawOptions, cacheSpecs: specs,
++            codecs: registry, tokenizer: item.tokenizer, options: options)
++    }
++}
++
++struct TGObserved: Codable {
++    let token: Int?
++    let records: [ResumableToolGenerationRecord]
++}
++
++func tgStep(_ driver: ResumableToolGeneration, item: TGFixture) throws -> ResumableToolGeneration.Batch? {
++    let d = try driver.capture().document()
++    let count = try ResumableTextCheckpoint(data: d.text).document().output.rawCount
++    if count == item.cancelAfter { return try driver.cancel() }
++    return try driver.advance()
++}
++func tgDrain(_ driver: ResumableToolGeneration, item: TGFixture) throws -> [TGObserved] {
++    var rows: [TGObserved] = []
++    while let batch = try tgStep(driver, item: item) { rows.append(.init(token: batch.token, records: batch.records)) }
++    return rows
++}
++
++// Separately advanced actual S73 plus S75 ordered oracle, with explicit cancel policy.
++// It has no composite restore/capture logic, and feeds only freshly generated text.
++func tgReference(_ item: TGFixture) throws -> ([TGObserved], Data, Data) {
++    let s = try TGSetup(item), text = try s.text()
++    let parser = try ResumableToolCallProcessor.prepare(configuration: item.configuration, namespace: tgNamespace)
++    defer { text.close(); parser.close() }
++    var rows: [TGObserved] = []
++    var step = 0
++    while true {
++        let cancelling = step == item.cancelAfter
++        guard let batch = try cancelling ? text.cancel() : text.advance() else { break }
++        var records: [ResumableToolGenerationRecord] = []
++        for record in batch.records {
++            switch record {
++            case .text(let bytes):
++                if !cancelling && !bytes.isEmpty {
++                    records += try parser.consume(String(decoding: bytes, as: UTF8.self)).records.map { .parsed($0) }
++                }
++            case .terminal(let completion):
++                if !cancelling { records += try parser.finish()!.records.map { .parsed($0) } }
++                records.append(.terminal(completion))
++            }
++        }
++        rows.append(.init(token: batch.token, records: records)); step += 1
++    }
++    return (rows, try text.capture().data, try parser.capture().data)
++}
++
++func tgCompareText(_ actual: Data, _ expected: Data) throws {
++    let a = try ResumableTextCheckpoint(data: actual).document()
++    let b = try ResumableTextCheckpoint(data: expected).document()
++    try equivalent(payload(a.raw), payload(b.raw), path: "raw")
++    var ao = try JSONSerialization.jsonObject(with: encoder().encode(a.output)) as! [String: Any]
++    var bo = try JSONSerialization.jsonObject(with: encoder().encode(b.output)) as! [String: Any]
++    try check(ao.removeValue(forKey: "rawDigest") as? String == tgHash(a.raw), "actual raw digest")
++    try check(bo.removeValue(forKey: "rawDigest") as? String == tgHash(b.raw), "expected raw digest")
++    try equivalent(ao, bo, path: "text")
++}
++func tgCompare(_ actual: ResumableToolGenerationCheckpoint, _ expected: ResumableToolGenerationCheckpoint) throws {
++    let a = try actual.document(), b = try expected.document()
++    try check(a.forwardedChunks == b.forwardedChunks && a.disposition == b.disposition, "exact join metadata")
++    try check(a.parser == b.parser, "exact parser checkpoint")
++    try tgCompareText(a.text, b.text)
++}
++
++func tgExplicit(_ rows: [TGObserved], item: TGFixture) throws {
++    let records = rows.flatMap(\.records)
++    let calls = records.compactMap { r -> ToolCall? in if case .parsed(.toolCall(let call)) = r { return call }; return nil }
++    let response = records.reduce(into: Data()) { d, r in if case .parsed(.response(let bytes)) = r { d.append(bytes) } }
++    let endings = records.compactMap { r -> ResumableTextCompletion? in if case .terminal(let c) = r { return c }; return nil }
++    try check(endings.count == 1 && endings[0].promptTokens == 5, "one semantic terminal")
++    switch item.name {
++    case "json":
++        try check(calls.map(\.function.name) == ["alpha","beta","gamma"], "concrete generated JSON calls")
++        try check(calls.map(\.id) == [tgFirstID, ToolCallIDSequence(namespace: tgNamespace).candidate(format: .json, at: 1),
++            ToolCallIDSequence(namespace: tgNamespace).candidate(format: .json, at: 2)], "supplied and collision-resolved IDs")
++        try check(calls[0].function.arguments["n"] == .int(1) && calls[0].function.arguments["s"] == .string("中"), "generated Unicode arguments")
++        try check(calls[1].function.arguments["b"] == .bool(true) && calls[2].function.arguments["items"] == .array([.int(1),.int(2)]), "generated typed arguments")
++        try check(response == Data("between\ntail".utf8), "JSON response bytes")
++        let order = records.map { r -> String in
++            switch r { case .parsed(.toolCall(let c)): return c.function.name
++            case .parsed(.response(let d)): return String(decoding:d,as:UTF8.self)
++            case .terminal: return "END" }
++        }
++        try check(order == ["alpha","between\n","beta","tail","gamma","END"], "ordered call-text-call")
++        try check(endings[0].reason == .stop && endings[0].rawTokens == 9 && endings[0].generationTokens == 9, "stop before length counts")
++    case "xml":
++        try check(calls.map(\.function.name) == ["typed"] && response == Data("beforeafter".utf8), "schema-aware generated XML")
++        guard case .int(1)? = calls[0].function.arguments["n"], case .double(let x)? = calls[0].function.arguments["x"],
++            case .string(let s)? = calls[0].function.arguments["s"] else { throw CheckFailure("XML typed arguments") }
++        try check(x.bitPattern == (1.5 as Double).bitPattern && Data(s.utf8) == Data("e\u{301}".utf8), "XML fractional number and UTF-8")
++        try check(endings[0].reason == .length && endings[0].generationTokens == 3, "XML length counts")
++    case "mistral":
++        try check(calls.map(\.function.name) == ["eos"] && calls[0].function.arguments["n"] == .int(7), "specialized EOS generated call")
++        try check(calls[0].id == ToolCallIDSequence(namespace:tgNamespace).candidate(format:.mistral,at:0), "Mistral ID")
++        try check(response.isEmpty && endings[0].reason == .stop && endings[0].rawTokens == 3 && endings[0].generationTokens == 2, "intercepted EOS accounting")
++    case "cancel":
++        try check(calls.isEmpty && response.isEmpty && records.count == 1 && endings[0].reason == .cancelled,
++            "cancel discards stop flush and cannot recover buffered call")
++        try check(endings[0].rawTokens == 3 && endings[0].generationTokens == 3, "cancel counts")
++    case "length-flush": try check(response == Data("hello<sto".utf8) && calls.isEmpty && endings[0].reason == .length, "normal stop-prefix flush")
++    case "zero": try check(rows.count == 1 && rows[0].token == nil && records.count == 1 && endings[0].rawTokens == 0, "zero budget")
++    case "llama": try check(calls.isEmpty && !response.isEmpty && endings[0].reason == .length, "tiny Llama prose composition")
++    default: break
++    }
++}
++
++import XCTest
++
++final class ResumableToolGenerationTests: XCTestCase {
++    func verifyCuts(_ item: TGFixture) throws {
++        let reference = try tgReference(item)
++        try tgExplicit(reference.0, item: item)
++        let original = try TGSetup(item), live = try original.prepare()
++        defer { live.close() }
++        var snapshots = [try live.capture()], rows: [TGObserved] = []
++        while let batch = try tgStep(live, item: item) {
++            rows.append(.init(token: batch.token, records: batch.records)); snapshots.append(batch.checkpoint)
++        }
++        try tgExplicit(rows, item: item)
++        XCTAssertEqual(try encoder().encode(rows), try encoder().encode(reference.0))
++        let final = try live.capture(), d = try final.document()
++        try tgCompareText(d.text, reference.1)
++        XCTAssertEqual(d.parser, reference.2)
++        for cut in snapshots.indices {
++            let fresh = try TGSetup(item), resumed = try fresh.restore(snapshots[cut])
++            defer { resumed.close() }
++            XCTAssertEqual(fresh.model.calls, 0); XCTAssertEqual(fresh.model.prepares, 0)
++            XCTAssertEqual(try resumed.capture(), snapshots[cut])
++            let suffix = try tgDrain(resumed, item: item)
++            XCTAssertEqual(try encoder().encode(suffix), try encoder().encode(Array(rows.dropFirst(cut))), "\(item.name) cut \(cut)")
++            try tgCompare(resumed.capture(), final)
++            let calls = fresh.model.calls, terminal = try resumed.capture()
++            XCTAssertNil(try resumed.advance()); XCTAssertNil(try resumed.cancel())
++            XCTAssertEqual(fresh.model.calls, calls); XCTAssertEqual(try resumed.capture(), terminal)
++        }
++        XCTAssertEqual(original.model.prepares, 0)
++    }
++
++    func testGeneratedJSONAtEveryCutAndBothCacheKinds() throws {
++        var item = try tgFixture("json")
++        try verifyCuts(item)
++        item.rotating = false; item.stochastic = false
++        try verifyCuts(item)
++    }
++    func testSchemaEOSFlushAndZeroAtEveryCut() throws {
++        for name in ["xml","mistral","length-flush","zero"] { try verifyCuts(tgFixture(name)) }
++    }
++    func testCancellationAtEveryCutAndFrozenTerminal() throws {
++        let item = try tgFixture("cancel")
++        try verifyCuts(item)
++        let s = try TGSetup(item), live = try s.prepare()
++        defer { live.close() }
++        for _ in 0..<3 { _ = try live.advance() }
++        let before = try live.capture().document()
++        let textBefore = try ResumableTextCheckpoint(data: before.text).document()
++        let parserBefore = try ResumableToolCallCheckpoint(data: before.parser).document()
++        XCTAssertEqual(textBefore.output.buffer, Data("<stop".utf8))
++        XCTAssertEqual(parserBefore.parser.state, "collectingToolCall")
++        XCTAssertFalse(parserBefore.finished)
++        let calls = s.model.calls, batch = try XCTUnwrap(live.cancel())
++        let after = try batch.checkpoint.document()
++        XCTAssertEqual(after.disposition, .cancelledFrozen)
++        XCTAssertEqual(after.parser, before.parser)
++        XCTAssertEqual(try ResumableTextCheckpoint(data: after.text).document().raw, textBefore.raw)
++        XCTAssertEqual(batch.records.count, 1); XCTAssertEqual(s.model.calls, calls)
++        XCTAssertTrue(try ResumableTextCheckpoint(data: after.text).document().output.buffer.isEmpty)
++    }
++    func testTinyLlamaCompositionAtEveryCut() throws { try verifyCuts(tgFixture("llama")) }
++
++    func testNoWorkTransitionsConfigurationAndClose() throws {
++        let zero = try TGSetup(tgFixture("zero")), z = try zero.prepare()
++        defer { z.close() }
++        XCTAssertEqual(zero.model.calls, 0)
++        _ = try z.advance(); XCTAssertEqual(zero.model.calls, 0)
++        let s = try TGSetup(tgFixture("json"))
++        XCTAssertThrowsError(try ResumableToolGeneration.prepare(model:s.model,tokens:s.prompt,identity:s.identity,
++            rawOptions:s.rawOptions,cacheSpecs:s.specs,codecs:s.registry,tokenizer:s.item.tokenizer,options:s.options,
++            configuration:s.item.configuration,namespace:"invalid"))
++        XCTAssertEqual(s.model.calls, 0)
++        let live = try s.prepare(), saved = try live.capture(), calls = s.model.calls
++        let cancel = try XCTUnwrap(live.cancel())
++        XCTAssertEqual(s.model.calls, calls)
++        XCTAssertEqual(try cancel.checkpoint.document().parser, try saved.document().parser)
++        live.close(); live.close()
++        XCTAssertThrowsError(try live.capture()); XCTAssertThrowsError(try live.advance()); XCTAssertThrowsError(try live.cancel())
++        let fresh = try TGSetup(s.item), earlier = try fresh.restore(saved)
++        XCTAssertEqual(fresh.model.calls, 0); XCTAssertNotNil(try earlier.advance()); earlier.close()
++    }
++
++    func testOversizedForwardAndPostAdvanceFaultAreAtomic() throws {
++        var huge = try tgFixture("length-flush")
++        huge.tokenizer.pieces[16] = String(repeating:"x",count:64*1024+1)
++        huge.script = [16,1]; huge.limit = 2
++        let s = try TGSetup(huge), live = try s.prepare(), c0 = try live.capture(), calls = s.model.calls
++        XCTAssertThrowsError(try live.advance())
++        XCTAssertGreaterThan(s.model.calls, calls); XCTAssertTrue(live.isClosed); XCTAssertThrowsError(try live.capture())
++        let fresh = try TGSetup(huge), older = try fresh.restore(c0)
++        XCTAssertEqual(fresh.model.calls, 0); older.close()
++
++        let normal = try TGSetup(tgFixture("json")), faulted = try normal.prepare(), saved = try faulted.capture()
++        normal.model.faultAt = normal.model.calls + 1
++        XCTAssertThrowsError(try faulted.advance())
++        XCTAssertTrue(faulted.isClosed); XCTAssertThrowsError(try faulted.capture())
++        let independent = try TGSetup(normal.item), valid = try independent.restore(saved)
++        XCTAssertNotNil(try valid.advance()); valid.close()
++    }
++}
+diff --git a/Tests/MLXLMTests/ResumableToolGenerationCheckpointTests.swift b/Tests/MLXLMTests/ResumableToolGenerationCheckpointTests.swift
+new file mode 100644
+--- /dev/null
++++ b/Tests/MLXLMTests/ResumableToolGenerationCheckpointTests.swift
+@@ -0,0 +1,139 @@
++import Foundation
++import MLX
++import XCTest
++@testable import MLXLMCommon
++
++final class ResumableToolGenerationCheckpointTests: XCTestCase {
++    func testEnvelopeSchemasAndExpectedBindings() throws {
++        let s = try TGSetup(tgFixture("json")), live = try s.prepare()
++        defer { live.close() }
++        _ = try live.advance()
++        let saved = try live.capture(), d = try saved.document()
++        for mutation: (inout ToolGenerationDocument) -> Void in [
++            { $0.version += 1 }, { $0.policy = "other" }, { $0.textCandidate = "other" }, { $0.parserCandidate = "other" }
++        ] {
++            var bad = d; mutation(&bad)
++            XCTAssertThrowsError(try s.restore(.init(document: bad)))
++        }
++        for change: (inout ResumableTextDocument) -> Void in [
++            { $0.version += 1 }, { $0.rawSchema = 1 }, { $0.rawCandidate = "other" }
++        ] {
++            var bad = d, text = try ResumableTextCheckpoint(data:d.text).document()
++            change(&text); bad.text = try ResumableTextCheckpoint(document:text).data
++            XCTAssertThrowsError(try s.restore(.init(document:bad)))
++        }
++        var badParser = try ResumableToolCallCheckpoint(data:d.parser).document()
++        badParser.version += 1
++        var bad = d; bad.parser = try ResumableToolCallCheckpoint(document:badParser).data
++        XCTAssertThrowsError(try s.restore(.init(document:bad)))
++        XCTAssertThrowsError(try ResumableToolGenerationCheckpoint(data:saved.data.dropLast()))
++        var corrupt = saved.data; corrupt[corrupt.count/2] ^= 1
++        XCTAssertThrowsError(try ResumableToolGenerationCheckpoint(data:corrupt))
++        XCTAssertThrowsError(try ResumableToolGenerationCheckpoint(data:Data(count:ResumableToolGenerationCheckpoint.maximumBytes+1)))
++        let fresh = try TGSetup(s.item)
++        XCTAssertThrowsError(try fresh.restore(saved,namespace:String(repeating:"a",count:32)))
++        XCTAssertThrowsError(try fresh.restore(saved,configuration:.init(format:.mistral)))
++        XCTAssertThrowsError(try fresh.restore(saved,configuration:.init(format:.json,tools:[])))
++        var other = s.item; other.tokenizer.pieces[16] = "changed"
++        XCTAssertThrowsError(try TGSetup(other).restore(saved))
++        XCTAssertEqual(fresh.model.calls,0); XCTAssertEqual(try live.capture(),saved)
++    }
++
++    func testCrossChildPositionsLifecycleAndC0() throws {
++        let s = try TGSetup(tgFixture("json")), live = try s.prepare()
++        defer { live.close() }
++        let c0 = try live.capture()
++        for _ in 0..<3 { _ = try live.advance() }
++        let saved = try live.capture(), d = try saved.document()
++        var bad = d; bad.parser = try c0.document().parser
++        XCTAssertThrowsError(try s.restore(.init(document:bad)))
++        bad = d; bad.text = try c0.document().text
++        XCTAssertThrowsError(try s.restore(.init(document:bad)))
++        for mutation: (inout ToolGenerationDocument) -> Void in [
++            { $0.forwardedChunks += 1 }, { $0.forwardedChunks = UInt64.max },
++            { $0.disposition = .normalFinished }, { $0.disposition = .cancelledFrozen }
++        ] {
++            bad = d; mutation(&bad)
++            XCTAssertThrowsError(try s.restore(.init(document:bad)))
++        }
++        bad = d
++        var parser = try ResumableToolCallCheckpoint(data:bad.parser).document()
++        parser.sequence += 1; bad.parser = try ResumableToolCallCheckpoint(document:parser).data
++        XCTAssertThrowsError(try s.restore(.init(document:bad)))
++        bad = d
++        var text = try ResumableTextCheckpoint(data:bad.text).document()
++        text.output.rawCount += 1; bad.text = try ResumableTextCheckpoint(document:text).data
++        XCTAssertThrowsError(try s.restore(.init(document:bad)))
++        XCTAssertEqual(try live.capture(),saved)
++    }
++
++    func testTerminalValuesStillReceiveFullRawAndTextValidation() throws {
++        for name in ["json","cancel"] {
++            let s = try TGSetup(tgFixture(name)), live = try s.prepare()
++            defer { live.close() }
++            _ = try tgDrain(live,item:s.item)
++            let saved = try live.capture(), d = try saved.document()
++            let fresh = try TGSetup(s.item)
++            // Keep valid outer/text checksums while corrupting a raw invariant that
++            // document() does not validate. Terminal restore must call the raw validator.
++            var bad = d, text = try ResumableTextCheckpoint(data:d.text).document()
++            var raw = try ResumableTokenCheckpoint(data:text.raw).document()
++            raw.randomDraws += 1
++            text.raw = try ResumableTokenCheckpoint(document:raw).data
++            text.output.rawDigest = tgHash(text.raw)
++            bad.text = try ResumableTextCheckpoint(document:text).data
++            XCTAssertThrowsError(try fresh.restore(.init(document:bad)))
++            bad = d; text = try ResumableTextCheckpoint(data:d.text).document()
++            text.output.generationCount += 1; bad.text = try ResumableTextCheckpoint(document:text).data
++            XCTAssertThrowsError(try fresh.restore(.init(document:bad)))
++            bad = d; bad.disposition = name == "json" ? .cancelledFrozen : .normalFinished
++            XCTAssertThrowsError(try fresh.restore(.init(document:bad)))
++            bad = d
++            var p = try ResumableToolCallCheckpoint(data:d.parser).document()
++            p.finished.toggle(); bad.parser = try ResumableToolCallCheckpoint(document:p).data
++            XCTAssertThrowsError(try fresh.restore(.init(document:bad)))
++            XCTAssertEqual(fresh.model.calls,0); XCTAssertEqual(fresh.model.prepares,0)
++            let restored = try fresh.restore(saved)
++            XCTAssertNil(try restored.advance()); XCTAssertNil(try restored.cancel())
++            XCTAssertEqual(try restored.capture(),saved); restored.close()
++        }
++    }
++
++    func testOuterRecordCodecPreservesTypesAndUTF8() throws {
++        let args: [String:JSONValue] = ["i":.int(Int.max),"d":.double(1),"z":.double(-0.0),
++            "s":.string("e\u{301}"),"a":.array([.null,.bool(true),.object(["x":.string("é")])])]
++        let records: [ResumableToolGenerationRecord] = [.parsed(.response(Data("é e\u{301}".utf8))),
++            .parsed(.toolCall(.init(function:.init(name:"typed",arguments:args),id:"keep")))]
++        let bytes = try encoder().encode(records)
++        let decoded = try JSONDecoder().decode([ResumableToolGenerationRecord].self,from:bytes)
++        XCTAssertEqual(try encoder().encode(decoded),bytes)
++        guard case .parsed(.toolCall(let call)) = decoded[1],
++            case .int(Int.max)? = call.function.arguments["i"], case .double(let one)? = call.function.arguments["d"],
++            case .double(let zero)? = call.function.arguments["z"] else { return XCTFail("typed codec") }
++        XCTAssertEqual(one.bitPattern,Double(1).bitPattern); XCTAssertEqual(zero.bitPattern,Double(-0.0).bitPattern)
++    }
++
++    func testEncodedCompositeAndAggregateBounds() throws {
++        let s = try TGSetup(tgFixture("zero")), live = try s.prepare()
++        defer { live.close() }
++        let c0 = try live.capture(), d = try c0.document()
++        var bad = d; bad.text = Data(count:ResumableTextCheckpoint.maximumBytes+1)
++        XCTAssertThrowsError(try ResumableToolGenerationCheckpoint(document:bad))
++        bad = d; bad.parser = Data(count:ResumableToolCallCheckpoint.maximumBytes+1)
++        XCTAssertThrowsError(try ResumableToolGenerationCheckpoint(document:bad))
++        // Account for actual envelope/base64 overhead, including metadata.
++        bad = d; bad.text = Data(count:ResumableTextCheckpoint.maximumBytes)
++        bad.parser = Data(count:ResumableToolCallCheckpoint.maximumBytes)
++        bad.policy = String(repeating:"x",count:2*1024*1024)
++        XCTAssertThrowsError(try ResumableToolGenerationCheckpoint(document:bad))
++        let record = ResumableToolGenerationRecord.parsed(.response(Data(repeating:97,count:512*1024)))
++        XCTAssertThrowsError(try ResumableToolGeneration.validateBatch(.init(token:nil,records:[record,record,record],checkpoint:c0)))
++        let tiny = ResumableToolGenerationRecord.parsed(.response(Data([97])))
++        XCTAssertThrowsError(try ResumableToolGeneration.validateBatch(.init(token:nil,records:Array(repeating:tiny,count:4097),checkpoint:c0)))
++        // Actual combined batch encoding adds another base64 layer, rather than
++        // comparing only the raw checkpoint payload byte count.
++        var medium = d; medium.text = Data(count:16*1024*1024); medium.parser = Data()
++        let maximum = try ResumableToolGenerationCheckpoint(document:medium)
++        XCTAssertGreaterThan(try encoder().encode(ResumableToolGeneration.Batch(token:nil,records:[],checkpoint:maximum)).count,maximum.data.count)
++    }
++}
