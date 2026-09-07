@@ -673,7 +673,15 @@ establishes protocol selection. A local success DTO cannot do so. Missing or
 unknown capability, disabled opt-in and incompatible model/profile fail with
 typed `DurableWireError`; declaring capability alone never accepts a session.
 
-Begin/recover use the selected reference and original ticket. Their matching
+Begin uses the selected reference and original ticket. S88 also allows a fresh,
+declared, opted-in requester to send recovery using its original ticket and
+reference from selected disk state, without opening a replacement session.
+This enters pending `recovering`; it does not fabricate opened or accepted state.
+Known profile and the exact configured model remain required. Pending exchanges
+reject capability/open overwrite. The original ticket and session remain selected
+after the matching recovery acceptance and on subsequent recovery.
+
+The matching
 incoming accepted response must name the pending request, generation/operation
 and kind. Recovery preserves exact original context and client-root/witness
 bindings; it has no create/begin fallback. Batch, receipt and knowledge require
@@ -686,8 +694,8 @@ A matching refusal is possible during open, begin, recovery or receipt. It is
 returned as a typed `.refused` message and closes the exchange; it does not
 silently begin volatile work. Reasons are `unavailable`, `incompatible`,
 `unauthorized`, `expired`, `unknown-lost`, `invalid` and `busy-full`. Stale or
-unrelated replies cannot establish selection. Successful test replies are
-synthetic; the checker's `accepted` phase means correlated protocol selection,
+unrelated replies cannot establish selection. The checker's `accepted` phase
+means correlated protocol selection,
 not authenticated caller admission or persistence readiness.
 
 ### Data bounds and authority
@@ -738,7 +746,7 @@ Knowledge and acknowledgements grant no invocation permission. Missing/unbegun/
 unknown outcomes must not become known failure, automatic retry or a claim that
 an effect never executed.
 
-Future adapters must verify tickets, original context, witnesses, prefix/call
+Adapters must verify tickets, original context, witnesses, prefix/call
 history and outcomes against current authenticated retained state before acting.
 Issued/expiry values inside opaque data remain in the **issuer's clock domain**;
 do not compare remote raw monotonic time to local monotonic time or renew it.
@@ -751,3 +759,35 @@ narrow codec inheritance preserves all v0/v1 bytes and does not advertise v2.
 The offline `Tools/DurableSessionProtocol/run.py` comparison binds those changed
 bytes against committed S86 source. The unavailable historical golden corpus
 is excluded explicitly; skipped/no-op tests are not new S87 proof.
+
+### Offline adapter candidate (S88)
+
+`Tools/DurableSessionWireAdapters` connects this vocabulary to the real S82–S86
+implementations through separate host and client adapters. It uses current full
+ReachWire sources, a bounded raw binary frame lane and local same-boot fixtures.
+Both entries require explicit dialect 2, opt-in/readiness and the configured model
+and profile before durable entry. It does not change shipping dispatch or offers.
+
+The host derives sessionID from the issuer-verified ticket namespace, checks the
+current exact caller and issuer clock, and rechecks authorization before publication.
+Complete canonical WireGenerationRequest bytes, original request UUID, model,
+profile, route and adapter revision bind the stored provider request ID; the
+wire operation ID binds its operation ID. Only the explicit deterministic tiny
+`ordinary` and `required` request mappings are supported. Native fixture preparation
+is local host glue, not a general prompt preparer or remote authentication policy.
+
+Fresh client entry supplies bootstrap location and current local authorization.
+S85 acquisition and S86 selected encrypted state supply its original ticket/context;
+the host verifies retained request/history and S84 attachment before returning the
+real acceptance. Original batch bytes and first/count/commit/skip cross the wire
+unchanged. Client S83 receipts are checked by S84 before host retirement. Exact
+receipt retry uses the retained tombstone fingerprint and does not require live
+request/context export after retirement.
+
+Tool knowledge is read from the authorized selected journal, or checked as a
+read-only peer report against retained context/call/outcome bindings. Receiving it
+cannot create intent, grant permission, overwrite a local outcome or attest that
+an effect ran. The required-tool fixture keeps its counted local effect and trusted
+completion oracle separate from wire reports. Client knowledge remains independently
+readable after host retirement. Remote transport adoption, cross-host clocks and
+real tool effects remain outside this candidate.

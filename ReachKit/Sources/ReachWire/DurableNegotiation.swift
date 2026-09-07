@@ -74,12 +74,16 @@ public struct DurableNegotiation: Sendable {
     public private(set) var refusal: DurableRefusalReason?
     private var profiles: [String]?
     private var opening: DurableSessionOpenPayload?
-    private var session: DurableSessionOpenedPayload?
+    private var session: Selection?
     private var pending: PendingGeneration?
     private var generation: DurableGenerationAcceptedPayload?
     private var clientRoot: String?
     private var receipt: DurableReceiptPayload?
 
+    private struct Selection: Sendable {
+        var session: DurableSessionReference
+        var ticket: Data
+    }
     private struct PendingGeneration: Sendable {
         var requestID: String
         var reference: DurableGenerationReference
@@ -87,6 +91,7 @@ public struct DurableNegotiation: Sendable {
         var originalContext: Data?
         var originalContextDigest: String?
         var clientRoot: String?
+        var originalTicket: Data?
     }
 
     public init(selectedDialect: UInt8 = Wire.baselineVersion, modelID: String, localOptIn: Bool = false) throws {
@@ -137,12 +142,12 @@ public struct DurableNegotiation: Sendable {
         guard phase != .refused else { throw DurableWireError.notAccepted }
         switch message {
         case .capabilities(let frame):
-            guard incoming, session == nil, opening == nil else { throw DurableWireError.correlation }
+            guard incoming, session == nil, opening == nil, pending == nil else { throw DurableWireError.correlation }
             guard DurableWire.exact(frame.payload.modelID, modelID) else { throw DurableWireError.incompatible }
             profiles = frame.payload.profiles
             phase = .declared
         case .open(let frame):
-            guard !incoming, session == nil, opening == nil else { throw DurableWireError.correlation }
+            guard !incoming, session == nil, opening == nil, pending == nil else { throw DurableWireError.correlation }
             guard localOptIn else { throw DurableWireError.localOptOut }
             guard DurableWire.exact(frame.payload.modelID, modelID), frame.payload.profile == DurableWire.profile else { throw DurableWireError.incompatible }
             guard profiles?.contains(DurableWire.profile) == true else { throw DurableWireError.unavailable }
@@ -155,7 +160,7 @@ public struct DurableNegotiation: Sendable {
                   DurableWire.exact(p.requestID, opening.requestID),
                   DurableWire.exact(p.session.modelID, opening.modelID),
                   DurableWire.exact(p.session.profile, opening.profile) else { throw DurableWireError.correlation }
-            session = p; self.opening = nil; phase = .selected
+            session = Selection(session: p.session, ticket: p.ticket); self.opening = nil; phase = .selected
         case .begin(let frame):
             let p = frame.payload
             guard !incoming, phase == .selected, pending == nil, generation == nil else { throw DurableWireError.notAccepted }
@@ -164,15 +169,22 @@ public struct DurableNegotiation: Sendable {
             phase = .beginning
         case .recover(let frame):
             let p = frame.payload
-            guard !incoming, (phase == .selected || phase == .accepted), pending == nil, receipt == nil else { throw DurableWireError.notAccepted }
-            try requireSelection(p.reference, ticket: p.ticket)
+            guard !incoming, [.declared, .selected, .accepted].contains(phase), pending == nil, opening == nil, receipt == nil else { throw DurableWireError.notAccepted }
+            if session == nil {
+                // Selected disk state supplies original credentials. This is only
+                // a pending request; no replacement open or synthetic acceptance.
+                guard localOptIn else { throw DurableWireError.localOptOut }
+                guard DurableWire.exact(p.reference.session.modelID, modelID), p.reference.session.profile == DurableWire.profile else { throw DurableWireError.incompatible }
+                guard profiles?.contains(DurableWire.profile) == true else { throw DurableWireError.unavailable }
+            } else { try requireSelection(p.reference, ticket: p.ticket) }
             if let generation {
                 try requireGeneration(p.reference, context: p.contextDigest)
                 guard generation.context == p.context else { throw DurableWireError.correlation }
             }
             if let clientRoot, clientRoot != p.clientRoot { throw DurableWireError.correlation }
             pending = PendingGeneration(requestID: p.requestID, reference: p.reference, kind: .recover,
-                                        originalContext: p.context, originalContextDigest: p.contextDigest, clientRoot: p.clientRoot)
+                                        originalContext: p.context, originalContextDigest: p.contextDigest, clientRoot: p.clientRoot,
+                                        originalTicket: p.ticket)
             phase = .recovering
         case .accepted(let frame):
             let p = frame.payload
@@ -180,6 +192,10 @@ public struct DurableNegotiation: Sendable {
                   p.kind == pending.kind, try DurableWire.same(p.reference, pending.reference) else { throw DurableWireError.correlation }
             if let original = pending.originalContext, original != p.context { throw DurableWireError.correlation }
             if let digest = pending.originalContextDigest, !DurableWire.exact(digest, p.contextDigest) { throw DurableWireError.correlation }
+            if session == nil {
+                guard pending.kind == .recover, let ticket = pending.originalTicket else { throw DurableWireError.notAccepted }
+                session = Selection(session: pending.reference.session, ticket: ticket)
+            }
             generation = p; clientRoot = pending.clientRoot ?? clientRoot
             self.pending = nil; phase = .accepted
         case .batch(let frame):

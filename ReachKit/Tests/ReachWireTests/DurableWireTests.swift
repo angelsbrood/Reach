@@ -65,6 +65,54 @@ import Testing
         expectRefusal { _ = try DurableMessage.decode(RawFrame(type: P.frameType, body: body), version: 2) }
     }
 
+    @Test func freshDeclaredRecoveryRemainsPendingUntilExactReply() throws {
+        var state = try DurableNegotiation(selectedDialect: 2, modelID: model, localOptIn: true)
+        _ = try state.receive(raw(caps))
+        _ = try state.send(recover)
+        #expect(state.phase == .recovering)
+        expectRefusal { _ = try state.receive(raw(caps)) }
+        expectRefusal { _ = try state.send(open) }
+        expectRefusal { _ = try state.send(recover) }
+        expectRefusal { _ = try state.receive(raw(opened)) }
+        expectRefusal { _ = try state.receive(raw(accepted)) }
+        expectRefusal { _ = try state.receive(altered(recovered) { $0["contextDigest"] = digest }) }
+        expectRefusal { _ = try state.receive(altered(recovered) { $0["context"] = Data("changed".utf8).base64EncodedString() }) }
+        #expect(state.phase == .recovering)
+        _ = try state.receive(raw(recovered))
+        #expect(state.phase == .accepted)
+        var changed = try raw(recover).decode(DurableGenerateRecover.self)
+        changed.payload.ticket[0] ^= 1
+        expectRefusal { _ = try state.send(.recover(changed)) }
+        changed = try raw(recover).decode(); changed.payload.reference.session.sessionID = root
+        expectRefusal { _ = try state.send(.recover(changed)) }
+        _ = try state.send(recover); _ = try state.receive(raw(recovered))
+        _ = try state.receive(raw(batch))
+    }
+
+    @Test func freshRecoveryRequiresLocalDeclarationAndExactSelection() throws {
+        for optIn in [false, true] {
+            for declared in [false, true] {
+                var state = try DurableNegotiation(selectedDialect: 2, modelID: model, localOptIn: optIn)
+                if declared { _ = try state.receive(raw(caps)) }
+                if optIn && declared { _ = try state.send(recover) }
+                else { expectRefusal { _ = try state.send(recover) } }
+            }
+        }
+        for profiles in [[], ["other-profile"]] {
+            var state = try DurableNegotiation(selectedDialect: 2, modelID: model, localOptIn: true)
+            _ = try state.receive(raw(.capabilities(.init(.init(modelID: model, profiles: profiles)))))
+            expectRefusal { _ = try state.send(recover) }
+        }
+        for field in ["modelID", "profile"] {
+            var state = try DurableNegotiation(selectedDialect: 2, modelID: model, localOptIn: true)
+            _ = try state.receive(raw(caps))
+            var request = try raw(recover).decode(DurableGenerateRecover.self)
+            if field == "modelID" { request.payload.reference.session.modelID = "other" }
+            else { request.payload.reference.session.profile = "other" }
+            expectRefusal { _ = try state.send(.recover(request)) }
+        }
+    }
+
     @Test func defaultsAndExplicitSyntheticOffer() throws {
         #expect(Wire.version == 1 && Wire.supportedVersions == [1,0])
         #expect(Wire.baselineVersion == 0)
