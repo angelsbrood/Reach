@@ -53,6 +53,17 @@ private func corpusReencode(_ raw: RawFrame, version: UInt8) throws -> Data {
     case .appEnrollBegin: try FrameCodec.encode(try raw.decode(AppEnrollBegin.self), for: version)
     case .appEnrollCertRequest: try FrameCodec.encode(try raw.decode(AppEnrollCertRequest.self), for: version)
     case .appEnrollGrant: try FrameCodec.encode(try raw.decode(AppEnrollGrant.self), for: version)
+    case .durableCapabilities: try FrameCodec.encode(try raw.decode(DurableCapabilities.self), for: version)
+    case .durableSessionOpen: try FrameCodec.encode(try raw.decode(DurableSessionOpen.self), for: version)
+    case .durableSessionOpened: try FrameCodec.encode(try raw.decode(DurableSessionOpened.self), for: version)
+    case .durableGenerateBegin: try FrameCodec.encode(try raw.decode(DurableGenerateBegin.self), for: version)
+    case .durableGenerationAccepted: try FrameCodec.encode(try raw.decode(DurableGenerationAccepted.self), for: version)
+    case .durableGenerateRecover: try FrameCodec.encode(try raw.decode(DurableGenerateRecover.self), for: version)
+    case .durableBatch: try FrameCodec.encode(try raw.decode(DurableBatch.self), for: version)
+    case .durableReceipt: try FrameCodec.encode(try raw.decode(DurableReceipt.self), for: version)
+    case .durableReceiptAccepted: try FrameCodec.encode(try raw.decode(DurableReceiptAccepted.self), for: version)
+    case .durableToolKnowledge: try FrameCodec.encode(try raw.decode(DurableToolKnowledge.self), for: version)
+    case .durableRefused: try FrameCodec.encode(try raw.decode(DurableRefused.self), for: version)
     }
 }
 

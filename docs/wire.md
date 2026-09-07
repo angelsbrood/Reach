@@ -618,3 +618,136 @@ does not cross.
 - **Bodies are JSON.** Chosen for legibility while the shape is still moving —
   every frame on this wire can be read by a human with a hex dump and patience,
   which during a ceremony debugged at a kitchen table is worth more than bytes.
+
+## Inactive durable-session vocabulary (S87, dialect 2)
+
+This is an offline protocol/compatibility candidate, **not runtime adoption**.
+`Wire.version` remains 1; default offers remain `[1, 0]`, and default envelope
+encoding is dialect 0. ALPN (`reach/0`, `reach-enroll/0`), Bonjour/enrollment
+defaults and retired frame values 5/6 are unchanged. Only an explicit synthetic
+`Wire.negotiate(offered: [2, 1, 0], supported: [2, 1, 0])` selects 2 here.
+No production caller advertises a durable profile or opens a durable session.
+
+`FrameType` values 50–60 are introduced in dialect 2. Default, v0 and v1
+encoding refuse every value in this band. `DurableMessage.decode` and
+`DurableNegotiation.receive` gate the selected dialect **before body decode
+or dispatch**. `RawFrame.decode` alone and `JSONDecoder` do not establish a
+selected dialect or accepted session. Direct DTO decoding proves syntax only;
+the raw-frame boundary additionally checks actual encoded body size.
+
+| Value | Frame | Fields / meaning |
+|---|---|---|
+| 50 | DurableCapabilities | `modelID`, explicit `profiles`; empty is unavailable |
+| 51 | DurableSessionOpen | `requestID`, `modelID`, `profile`, `durable: true` |
+| 52 | DurableSessionOpened | Matching `requestID`, `session`, original opaque `ticket` |
+| 53 | DurableGenerateBegin | `requestID`, `reference`, original `ticket`, existing `WireGenerationRequest` in `request` |
+| 54 | DurableGenerationAccepted | Matching `requestID`, `reference`, `kind: begin/recover`, original `context`, `contextDigest` |
+| 55 | DurableGenerateRecover | `requestID`, `reference`, original `ticket/context/contextDigest`, `clientRoot`, `witness` |
+| 56 | DurableBatch | `reference`, `contextDigest`, `first/count/commit/skip`, original full `bytes` |
+| 57 | DurableReceipt | `requestID`, `reference`, whole-prefix `witness` |
+| 58 | DurableReceiptAccepted | Exactly matching `requestID/reference/witness` |
+| 59 | DurableToolKnowledge | `reference`, `contextDigest`, exact `callID/name/arguments` bytes, `state`, conditional `outcome` |
+| 60 | DurableRefused | Matching `correlation`, bounded `reason` |
+
+The Swift frame aliases use `DurablePacket<...Payload>`; `payload` is flattened
+in JSON (there is no `payload` wrapper key). Validate and encode frame packets
+through `FrameCodec` or `DurableMessage`, not standalone payload components.
+`session` contains `modelID/profile/sessionID`; `reference` contains `session`,
+`generationID` and stable `operationID`. A refusal correlation contains
+`requestID/operation`, plus `sessionID/generationID` for begin, recover or receipt;
+open correlations omit both. A refusal never creates a new operation identity.
+
+### Explicit requester-side selection
+
+`DurableNegotiation` is a pure requester-side checker for one selected
+session/generation exchange. It has no runtime callback, provider, clock,
+storage, key, automatic identity generation, retry, renewal or fallback path.
+The caller supplies a dialect already selected by its handshake and explicit
+local opt-in (default false). The only recognized profile is
+`reach-durable-session-v1`.
+
+The peer's incoming model-scoped capability declaration precedes an outgoing
+explicit durable open. Known profile, matching model and local opt-in are all
+required to send that request. Only its matching incoming opened response
+establishes protocol selection. A local success DTO cannot do so. Missing or
+unknown capability, disabled opt-in and incompatible model/profile fail with
+typed `DurableWireError`; declaring capability alone never accepts a session.
+
+Begin/recover use the selected reference and original ticket. Their matching
+incoming accepted response must name the pending request, generation/operation
+and kind. Recovery preserves exact original context and client-root/witness
+bindings; it has no create/begin fallback. Batch, receipt and knowledge require
+the accepted generation/context. Receipt acknowledgement must match the entire
+pending witness. Failed decode, send, direction or correlation checks leave
+state unchanged. `observeVolatileOpen` discards durable state: an ordinary
+SessionOpen remains volatile even at dialect 2.
+
+A matching refusal is possible during open, begin, recovery or receipt. It is
+returned as a typed `.refused` message and closes the exchange; it does not
+silently begin volatile work. Reasons are `unavailable`, `incompatible`,
+`unauthorized`, `expired`, `unknown-lost`, `invalid` and `busy-full`. Stale or
+unrelated replies cannot establish selection. Successful test replies are
+synthetic; the checker's `accepted` phase means correlated protocol selection,
+not authenticated caller admission or persistence readiness.
+
+### Data bounds and authority
+
+All new frame packets validate constructed values on encode and decoded values
+on decode. Required fields reject omission and null; enums are strict. Optional
+outcome/correlation fields reject explicit null and conflicting presence.
+Unknown optional JSON keys remain additive. Profile-list uniqueness is semantic
+validation; **JSONDecoder does not guarantee duplicate object-key rejection**.
+
+- Profile lists contain at most eight unique, nonempty ASCII names of at most
+  64 bytes each. Other free identifiers are nonempty UTF-8 of at most 256 bytes.
+  Session and client-root UUID strings use canonical lowercase spelling.
+- Original opaque ticket bytes are 41–4,096 bytes. Original opaque client
+  context is nonempty and at most 1 MiB. Both remain exact binary `Data` carried
+  in base64; their interiors are never decoded/re-encoded by ReachWire.
+  Wire checks only digest spelling; it does not recompute or authenticate the
+  context's digest. A trusted adapter must verify its relation to the original
+  bytes and current authenticated retained state. Recovery correlation preserves
+  both the original context bytes and the declared digest independently.
+- The full S84 witness contains `version: 1`, `policy: s84-host-client-v1`,
+  `context`, `clientRoot`, UInt64 `revision/high`, `terminal`, `prefix`,
+  `registrations` and `calls`. Digests are lowercase 64-hex. High is at most
+  65,536; high zero requires revision zero, nonterminal and zero registrations;
+  positive high requires positive revision. Registrations are 0–32.
+- Durable first/high is **one-based**, with high zero meaning no durable
+  receipt. Legacy Ev/EvAck keeps its zero-based event sequence. Terminal does
+  not mean tool effects completed; this receipt is not an app-display receipt.
+- Batch first is positive; count is 1–4,096; checked last is at most 65,536;
+  skip is `0..<count`; commit is lowercase 64-hex. Full original batch bytes
+  are nonempty and at most 8 MiB, preserved even for positive skip. Parsing
+  neither truncates to the suffix nor verifies committed history/boundaries.
+- Call ID/name/argument bytes preserve exact UTF-8 identity, limited to
+  256/1,024/8 MiB, with nonempty ID/name. `state: unknown` has no outcome;
+  `state: known` requires an S83-shaped outcome with version 1, kind
+  `success/failure`, exact result bytes and digest. Its sorted, unescaped-slash
+  canonical JSON is at most 1 MiB, including base64 and JSON overhead. Carrying
+  the digest does not verify its trusted S83 call/context binding.
+- The transport cap remains 16 MiB (type plus body). New control JSON bodies
+  are at most 2 MiB; batch/tool-knowledge JSON bodies are at most 14 MiB,
+  including overhead and unknown optional keys. Only the new band uses sorted
+  JSON keys **with unescaped slashes**. Legacy encoding remains byte-identical.
+
+No ticket is issued or MAC-verified, record created, receipt committed, effect
+executed or caller authenticated by this module. Wire data carries no local
+paths, keys, injected clock, `allowed`, create flags or retained caller authority.
+Knowledge and acknowledgements grant no invocation permission. Missing/unbegun/
+unknown outcomes must not become known failure, automatic retry or a claim that
+an effect never executed.
+
+Future adapters must verify tickets, original context, witnesses, prefix/call
+history and outcomes against current authenticated retained state before acting.
+Issued/expiry values inside opaque data remain in the **issuer's clock domain**;
+do not compare remote raw monotonic time to local monotonic time or renew it.
+S83's same-host clock policy is not a solved cross-host policy. Changed/missing
+state requires honest refusal or uncertainty. Runtime capability readiness,
+authorization/consent, remote persistence and retention are later adoption work.
+
+HelloAck's existing relay declaration semantics apply at v1 **or later**. This
+narrow codec inheritance preserves all v0/v1 bytes and does not advertise v2.
+The offline `Tools/DurableSessionProtocol/run.py` comparison binds those changed
+bytes against committed S86 source. The unavailable historical golden corpus
+is excluded explicitly; skipped/no-op tests are not new S87 proof.

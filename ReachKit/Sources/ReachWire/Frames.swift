@@ -58,7 +58,7 @@ public struct HelloAck: WireFrame, Equatable {
     /// decoder built before mapped reachability continues to ignore it.
     public var roads: [RoadEndpoint]?
     /// Lower-tier relay calling cards. This field has meaning only when the
-    /// selected dialect is v1: omission preserves the separate authenticated
+    /// selected dialect is v1 or later: omission preserves the separate authenticated
     /// relay store, an empty array clears it, and a nonempty array replaces it.
     public var relayRoads: [RoadEndpoint]?
 
@@ -98,10 +98,10 @@ public struct HelloAck: WireFrame, Equatable {
         addrs = try container.decodeIfPresent([String].self, forKey: .addrs)
         port = try container.decodeIfPresent(UInt16.self, forKey: .port)
         roads = try container.decodeIfPresent([RoadEndpoint].self, forKey: .roads)
-        if version == 1, container.contains(.relayRoads) {
+        if version >= 1, container.contains(.relayRoads) {
             // `decodeIfPresent` folds explicit null into omission, but those
             // have different authority: omission preserves and null is not a
-            // dialect-v1 value at all. Decode the array directly so null is a
+            // dialect-v1-or-later value at all. Decode the array directly so null is a
             // wire error rather than a silent preserve.
             let decoded = try container.decode([RoadEndpoint].self, forKey: .relayRoads)
             try Self.validateRelayRoads(decoded, codingPath: decoder.codingPath + [CodingKeys.relayRoads])
@@ -119,7 +119,7 @@ public struct HelloAck: WireFrame, Equatable {
         try container.encodeIfPresent(addrs, forKey: .addrs)
         try container.encodeIfPresent(port, forKey: .port)
         try container.encodeIfPresent(roads, forKey: .roads)
-        if version == 1, let relayRoads {
+        if version >= 1, let relayRoads {
             try Self.validateRelayRoads(relayRoads, codingPath: encoder.codingPath + [CodingKeys.relayRoads])
             try container.encode(relayRoads, forKey: .relayRoads)
         }

@@ -47,6 +47,21 @@ public enum FrameType: UInt8, Codable, Sendable, CaseIterable {
     case appEnrollCertRequest = 41
     case appEnrollGrant = 42
 
+    // Inactive durable vocabulary: only an explicit future-v2 exchange may use this band.
+    case durableCapabilities = 50
+    case durableSessionOpen = 51
+    case durableSessionOpened = 52
+    case durableGenerateBegin = 53
+    case durableGenerationAccepted = 54
+    case durableGenerateRecover = 55
+    case durableBatch = 56
+    case durableReceipt = 57
+    case durableReceiptAccepted = 58
+    case durableToolKnowledge = 59
+    case durableRefused = 60
+
+    public var isDurable: Bool { (50...60).contains(rawValue) }
+
     /// The first dialect that may send this type. Exhaustive on purpose: a
     /// future enum case cannot compile until its compatibility gate is named.
     public var introducedInVersion: UInt8 {
@@ -58,6 +73,8 @@ public enum FrameType: UInt8, Codable, Sendable, CaseIterable {
              .enrollComplete, .enrollConfirmed, .appEnrollBegin,
              .appEnrollCertRequest, .appEnrollGrant:
             Wire.baselineVersion
+        case .durableCapabilities, .durableSessionOpen, .durableSessionOpened, .durableGenerateBegin, .durableGenerationAccepted, .durableGenerateRecover, .durableBatch, .durableReceipt, .durableReceiptAccepted, .durableToolKnowledge, .durableRefused:
+            DurableWire.version
         }
     }
 }
@@ -86,8 +103,14 @@ public struct RawFrame: Sendable {
 
     public func decode<F: WireFrame>(_ as: F.Type = F.self) throws -> F {
         guard F.frameType == type else { throw WireError.unexpectedFrame(type) }
+        if type.isDurable { try DurableWire.requireBody(body, type: type) }
         do {
-            return try JSONDecoder().decode(F.self, from: body)
+            let value = try JSONDecoder().decode(F.self, from: body)
+            if type.isDurable {
+                guard let durable = value as? any DurableWireFrame else { throw DurableWireError.invalid }
+                try durable.validateDurable()
+            }
+            return value
         } catch {
             throw WireError.malformedFrame("\(type): \(error)")
         }
@@ -163,7 +186,13 @@ public enum FrameCodec {
         )
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
+        if type(of: frame).frameType.isDurable {
+            guard let durable = frame as? any DurableWireFrame else { throw DurableWireError.invalid }
+            try durable.validateDurable()
+            encoder.outputFormatting.insert(.withoutEscapingSlashes)
+        }
         let body = try encoder.encode(frame)
+        if type(of: frame).frameType.isDurable { try DurableWire.requireBody(body, type: type(of: frame).frameType) }
         let (frameLength, overflow) = body.count.addingReportingOverflow(1)
         guard !overflow, frameLength <= Int(maxFrameLength) else {
             throw WireError.frameTooLarge(overflow ? .max : UInt32(clamping: frameLength))
