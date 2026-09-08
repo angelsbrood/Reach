@@ -20,13 +20,13 @@ public struct RequestPolicy: AdapterRequestPolicy {
     public func route(_ request:WireGenerationRequest) throws -> String {
         try RequestBounds.check(request,revision:descriptor.revision)
         let result:String
-        if request.portableSchema != nil { result="guided" }
+        if request.portableSchema != nil && request.tools.isEmpty { result="guided" }
         else if request.tools.isEmpty {
             guard request.options.toolCalling != .required else { throw PreparationError.unsupported }; result="ordinary"
         } else {
             guard request.tools.count<=8,Set(request.tools.map(\.name)).count==request.tools.count else { throw PreparationError.unsupported }
             if request.options.toolCalling == .required { result="required" }
-            else if descriptor.revision==ModelDescriptor.allowedRevision && (request.options.toolCalling==nil || request.options.toolCalling == .allowed) { result="allowed" }
+            else if [ModelDescriptor.allowedRevision,ModelDescriptor.schemaToolRevision].contains(descriptor.revision) && (request.options.toolCalling==nil || request.options.toolCalling == .allowed) { result="allowed" }
             else { throw PreparationError.unsupported }
         }
         _=try resolve(request.options,route:result);return result
@@ -35,8 +35,8 @@ public struct RequestPolicy: AdapterRequestPolicy {
         let maximum=options.maximumResponseTokens ?? 512
         guard (0...512).contains(maximum),options.temperature.map({$0.isFinite && $0>=0 && $0<=Double(Float.greatestFiniteMagnitude)}) ?? true else { throw PreparationError.unsupported }
         if let t=options.temperature,t>0,Float(t)==0 { throw PreparationError.unsupported }
-        if route=="guided" && ![ModelDescriptor.schemaRevision,ModelDescriptor.allowedRevision].contains(descriptor.revision) { throw PreparationError.unsupported }
-        if route=="allowed" && descriptor.revision != ModelDescriptor.allowedRevision { throw PreparationError.unsupported }
+        if route=="guided" && ![ModelDescriptor.schemaRevision,ModelDescriptor.allowedRevision,ModelDescriptor.schemaToolRevision].contains(descriptor.revision) { throw PreparationError.unsupported }
+        if route=="allowed" && ![ModelDescriptor.allowedRevision,ModelDescriptor.schemaToolRevision].contains(descriptor.revision) { throw PreparationError.unsupported }
         if route=="required" || route=="guided" || route=="allowed" {
             if let sampling=options.sampling { guard case .greedy=sampling else { throw PreparationError.unsupported } }
             guard options.temperature==nil || options.temperature==0 else { throw PreparationError.unsupported }
@@ -64,7 +64,7 @@ public struct RequestPolicy: AdapterRequestPolicy {
     }
     public func validateRequestID(_ id:String,route:String) throws {
         let fields=id.split(separator:":",omittingEmptySubsequences:false).map(String.init)
-        let routes=descriptor.revision==ModelDescriptor.allowedRevision ? ["ordinary","required","guided","allowed"] : (descriptor.revision==ModelDescriptor.schemaRevision ? ["ordinary","required","guided"] : ["ordinary","required"])
+        let routes=[ModelDescriptor.allowedRevision,ModelDescriptor.schemaToolRevision].contains(descriptor.revision) ? ["ordinary","required","guided","allowed"] : (descriptor.revision==ModelDescriptor.schemaRevision ? ["ordinary","required","guided"] : ["ordinary","required"])
         guard routes.contains(route),fields.count==4,fields[0]=="s89",fields[1]==(try descriptor.identity),
               let uuid=UUID(uuidString:fields[2]),uuid.uuidString.lowercased()==fields[2],PreparationEncoding.isDigest(fields[3]) else { throw PreparationError.identity }
     }
@@ -97,13 +97,18 @@ public enum RequestBounds {
     }
     /// Canonical selected tool declarations have one shared tree/string budget.
     /// Original descriptions/history remain bound by the authenticated request ID.
-    public static func validateStoredTools(names:[String],schemas:[String]) throws {
+    public static func validateStoredTools(names:[String],schemas:[String],responseSchema:String?=nil) throws {
         guard (1...8).contains(names.count),names.count==schemas.count,Set(names).count==names.count else { throw PreparationError.unsupported }
         let budget=Budget();var encodedBytes=0
         for (name,source) in zip(names,schemas) {
             try budget.identifier(name);encodedBytes+=source.utf8.count+name.utf8.count
             guard encodedBytes<=65_536 else { throw PreparationError.oversized }
             _=try canonicalSchema(source,budget:budget)
+        }
+        if let responseSchema {
+            encodedBytes+=responseSchema.utf8.count
+            guard encodedBytes<=65_536 else { throw PreparationError.oversized }
+            _=try canonicalSchema(responseSchema,budget:budget)
         }
     }
     private static func canonicalSchema(_ source:String,budget:Budget) throws -> String {
@@ -114,9 +119,12 @@ public enum RequestBounds {
         guard canonical==source else { throw PreparationError.identity };return canonical
     }
     public static func check(_ r:WireGenerationRequest,revision:String=ModelDescriptor.legacyRevision) throws {
-        guard [ModelDescriptor.legacyRevision,ModelDescriptor.schemaRevision,ModelDescriptor.allowedRevision].contains(revision),r.context.reasoning==nil else { throw PreparationError.unsupported }
+        guard [ModelDescriptor.legacyRevision,ModelDescriptor.schemaRevision,ModelDescriptor.allowedRevision,ModelDescriptor.schemaToolRevision].contains(revision),r.context.reasoning==nil else { throw PreparationError.unsupported }
         if r.portableSchema != nil {
-            guard [ModelDescriptor.schemaRevision,ModelDescriptor.allowedRevision].contains(revision),r.tools.isEmpty,r.options.toolCalling != .required,r.context.includeSchemaInPrompt==false else { throw PreparationError.unsupported }
+            guard [ModelDescriptor.schemaRevision,ModelDescriptor.allowedRevision,ModelDescriptor.schemaToolRevision].contains(revision),r.options.toolCalling != .required,r.context.includeSchemaInPrompt==false else { throw PreparationError.unsupported }
+            if !r.tools.isEmpty {
+                guard revision==ModelDescriptor.schemaToolRevision,r.options.toolCalling==nil || r.options.toolCalling == .allowed else { throw PreparationError.unsupported }
+            }
         } else { guard r.context.includeSchemaInPrompt==nil else { throw PreparationError.unsupported } }
         let budget=Budget()
         func string(_ s:String) throws { try budget.string(s) }

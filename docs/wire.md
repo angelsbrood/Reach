@@ -842,3 +842,28 @@ semantics remain; no tools execute here. S89/S90 revisions/defaults and all ship
 wire layouts/offers/readiness remain unchanged. The additive offline harness proves
 Llama prose continuation and separately bound structural two-call integration;
 it does not claim newly executed Llama-guided tool selection or production adoption.
+
+S92 adds owner-selected `s92-public-chat-schema-tools-v1` to this same local preparer.
+A response schema plus 1...8 unique offered tools uses allowed only for nil/allowed
+mode, explicitly false `includeSchemaInPrompt` and nil reasoning. Combined required/
+disallowed refuse. Old revisions, default selection and noncombined route rules remain.
+Response/tool schemas share throwing portable capture and complete-request limits;
+stored names/tool/response schemas share one byte/tree budget. The canonical non-nil
+response schema joins the same-model allowed declaration without prompt injection.
+S92 stable entry/parser domains bind the optional fallback; stored validation precedes
+attachment without original request preparation or digest-preimage reconstruction.
+
+The unchanged coordinator hides probe prose and prefers ordered tool proposals;
+otherwise schema fallback consumes the exact original prepared tokens. Maximum
+0...512/default512 applies independently to each pass, with final usage including
+hidden probe work. Unsupported fallback compilation throws after probe and fallback
+factory evaluation but before fallback model-state preparation/forwards; no wire
+terminal is invented by that thrown-error boundary. An unused unsupported fallback
+never compiles on the tool branch. Combined zero/insufficient guidance remains
+incomplete/error without success usage, preserving already committed visible output.
+The additive `Tools/DurableSchemaToolPreparation` harness proves real tiny-Llama
+schema continuation and separately identified structural two-tool continuation.
+Fresh original preparation/template/request tokenization/issue/begin stay zero;
+grammar/repair encodes and later new-pass prefills are separately observed. This adds
+no shipping wire layout, coordinator, native engine, production loading or tool effect;
+offers remain [1,0] and opt-in/readiness off.

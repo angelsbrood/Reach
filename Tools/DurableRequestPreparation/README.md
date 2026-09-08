@@ -128,3 +128,25 @@ re-encodes and grammar encodes, and later new-pass factories/prefills, are separ
 observed legitimate work. `../DurableAllowedToolPreparation/README.md` describes
 the real Llama prose proof and distinct structural tool-path proof. No mixed-model
 product selection, new parser format, production loading or tool execution.
+
+## Explicit combined schema/tool revision (S92)
+
+`ModelDescriptor.schemaToolRevision` selects `s92-public-chat-schema-tools-v1`.
+Response schema plus 1...8 unique tools uses allowed for nil/allowed tool mode,
+explicitly false `includeSchemaInPrompt` and nil reasoning. Combined required or
+disallowed refuse. Other routes retain their existing behavior under this revision;
+S89 stays default and every old revision keeps its encoded identities/admission.
+
+The response schema joins the canonical allowed declaration without prompt injection.
+Both schema kinds share throwing capture and whole-request limits; stored names/tool/
+response schemas share one byte/tree budget. S92 entry/parser domains bind the optional
+canonical fallback while S91 domains stay unchanged. Complete stored validation runs
+before attachment without re-preparing the original request.
+
+Schema-present probe prose stays hidden. Proposals select ordered tool guidance;
+otherwise fallback uses original prepared tokens. Maximum 0...512/default512 is per
+pass, with nil/greedy sampling and nil/zero temperature. An unsupported fallback grammar
+throws after probe/fallback factory evaluation but before fallback preparation/forwards;
+an unused fallback never compiles. Combined zero budget is incomplete/error without
+final usage. See `../DurableSchemaToolPreparation/README.md` for focused Llama schema
+recovery, distinct structural tool recovery and exact fresh-preparation counter scope.
