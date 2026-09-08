@@ -1,6 +1,6 @@
 # Durable request preparation candidate (S89)
 
-This offline tool prepares real bounded text/tool requests for the existing S88
+With its default `s89-public-chat-tools-v1` revision, this offline tool prepares real bounded text/tool requests for the existing S88
 durable adapters. It is not daemon/SDK adoption or a production model registry.
 The default adapter policy remains the exact two-request S88 fixture contract.
 A trusted local owner explicitly supplies `RequestPolicy`, its immutable
@@ -83,3 +83,26 @@ or physical-media erasure claims. Limits are 16 GiB aggregate allocated disk,
 3 GiB fixtures, >=20 GiB sampled free disk, 192 MiB per log/evidence and 128 MiB
 native peak/weight tensors. Canonical source installation and terminal Architecture
 review are separate from the runner's local PASS.
+
+## Explicit schema revision (S90)
+
+`ModelDescriptor.schemaRevision` selects `s90-public-chat-schema-v1` on this same
+preparer. No encoded descriptor field was added, and the old default revision,
+ordinary/required request identities, tokens and bindings retain their S89 bytes.
+`NativePreparationFixture` and `PreparationPair` accept an explicit revision;
+their defaults remain unchanged. Guided runtime selection reuses the existing
+provider, adapters, stores and native grammar implementation.
+
+The selected schema route requires no offered tools/reasoning, no required mode,
+and explicitly false `includeSchemaInPrompt`; nil/true refuse. Sampling is
+nil/greedy, temperature nil/zero, maximum 0...512 with default 512. The response
+schema uses the same throwing tree extraction and shared whole-request bounds.
+It becomes a canonical guided specification; text/history still use the same
+chat/template path without schema prompt injection. Stored guided declarations
+must match the selected native identity, tokens, grammar, vocabulary/tokenizer,
+EOS/UNK, cache/codec, options and stable IDs before attach/acceptance.
+
+Compiler compatibility is checked by the existing native prepare/restore path,
+not portable admission or `assess`: it may fail after accepted begin and model
+factory evaluation but before prefill. See `../DurableSchemaPreparation/README.md`
+for the focused offline native continuation harness and its literal reuse scope.

@@ -7,20 +7,22 @@ public enum PreparationError: Error { case unsupported, oversized, identity, tem
 /// Immutable owner attestation of selected local artifacts. This portable value
 /// deliberately has no native runtime, tokenizer closure, or MLX dependency.
 public struct ModelDescriptor: Codable, Equatable, Sendable {
+    public static let legacyRevision="s89-public-chat-tools-v1"
+    public static let schemaRevision="s90-public-chat-schema-v1"
     public let model: String, configuration: String, weights: String, backend: String, dependency: String
     public let tokenizerAlgorithm: String, template: String, vocabulary: [String]
     public let codec: String, nativePolicy: String
     public let revision: String
     public init(model: String, configuration: String, weights: String, backend: String, dependency: String,
                 tokenizerAlgorithm: String, template: String, vocabulary: [String], codec: String, nativePolicy: String,
-                revision: String = "s89-public-chat-tools-v1") throws {
+                revision: String = ModelDescriptor.legacyRevision) throws {
         self.model=model; self.configuration=configuration; self.weights=weights; self.backend=backend; self.dependency=dependency
         self.tokenizerAlgorithm=tokenizerAlgorithm; self.template=template; self.vocabulary=vocabulary
         self.codec=codec; self.nativePolicy=nativePolicy; self.revision=revision
         try validate()
     }
     public func validate() throws {
-        guard revision == "s89-public-chat-tools-v1", !template.isEmpty, template.utf8.count<=8192,
+        guard [Self.legacyRevision,Self.schemaRevision].contains(revision), !template.isEmpty, template.utf8.count<=8192,
               [model,configuration,weights,backend,dependency,tokenizerAlgorithm,codec,nativePolicy].allSatisfy({ !$0.isEmpty && $0.utf8.count<=1024 }),
               (1...4096).contains(vocabulary.count), vocabulary.allSatisfy({ !$0.isEmpty && $0.utf8.count<=256 && !$0.utf8.contains(0) }),
               vocabulary.reduce(0,{$0+$1.utf8.count})<=256*1024 else { throw PreparationError.identity }

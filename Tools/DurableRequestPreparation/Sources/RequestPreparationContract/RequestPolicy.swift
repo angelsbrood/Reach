@@ -18,10 +18,10 @@ public struct RequestPolicy: AdapterRequestPolicy {
         guard c.dialect==2,c.model==descriptor.model,c.profile==DurableWire.profile else { throw AdapterError.incompatible }
     }
     public func route(_ request:WireGenerationRequest) throws -> String {
-        try RequestBounds.check(request)
-        guard request.portableSchema==nil,request.context.includeSchemaInPrompt==nil,request.context.reasoning==nil else { throw PreparationError.unsupported }
+        try RequestBounds.check(request,revision:descriptor.revision)
         let result:String
-        if request.tools.isEmpty {
+        if request.portableSchema != nil { result="guided" }
+        else if request.tools.isEmpty {
             guard request.options.toolCalling != .required else { throw PreparationError.unsupported }; result="ordinary"
         } else {
             guard request.tools.count<=8,request.options.toolCalling == .required,
@@ -33,7 +33,8 @@ public struct RequestPolicy: AdapterRequestPolicy {
         let maximum=options.maximumResponseTokens ?? 512
         guard (0...512).contains(maximum),options.temperature.map({$0.isFinite && $0>=0 && $0<=Double(Float.greatestFiniteMagnitude)}) ?? true else { throw PreparationError.unsupported }
         if let t=options.temperature,t>0,Float(t)==0 { throw PreparationError.unsupported }
-        if route=="required" {
+        if route=="guided" && descriptor.revision != ModelDescriptor.schemaRevision { throw PreparationError.unsupported }
+        if route=="required" || route=="guided" {
             if let sampling=options.sampling { guard case .greedy=sampling else { throw PreparationError.unsupported } }
             guard options.temperature==nil || options.temperature==0 else { throw PreparationError.unsupported }
             return .init(maximum:maximum,temperature:0,topK:0,topP:1,seed:0)
@@ -60,7 +61,8 @@ public struct RequestPolicy: AdapterRequestPolicy {
     }
     public func validateRequestID(_ id:String,route:String) throws {
         let fields=id.split(separator:":",omittingEmptySubsequences:false).map(String.init)
-        guard ["ordinary","required"].contains(route),fields.count==4,fields[0]=="s89",fields[1]==(try descriptor.identity),
+        let routes=descriptor.revision==ModelDescriptor.schemaRevision ? ["ordinary","required","guided"] : ["ordinary","required"]
+        guard routes.contains(route),fields.count==4,fields[0]=="s89",fields[1]==(try descriptor.identity),
               let uuid=UUID(uuidString:fields[2]),uuid.uuidString.lowercased()==fields[2],PreparationEncoding.isDigest(fields[3]) else { throw PreparationError.identity }
     }
     public func validateContext(_ context:ClientContext,configuration:AdapterConfiguration) throws {
@@ -70,10 +72,9 @@ public struct RequestPolicy: AdapterRequestPolicy {
 
 /// Preflight collection, tree and string limits before canonical serialization.
 public enum RequestBounds {
-    public static func check(_ r:WireGenerationRequest) throws {
-        guard r.portableSchema==nil,r.context.includeSchemaInPrompt==nil,r.context.reasoning==nil else { throw PreparationError.unsupported }
-        var budget=65_536,nodes=8192
-        func string(_ s:String) throws { budget-=s.utf8.count;guard budget>=0 else { throw PreparationError.oversized } }
+    private final class Budget {
+        var bytes=65_536,nodes=8192
+        func string(_ s:String) throws { bytes-=s.utf8.count;guard bytes>=0 else { throw PreparationError.oversized } }
         func identifier(_ s:String) throws { guard !s.isEmpty,s.utf8.count<=256 else { throw PreparationError.unsupported };try string(s) }
         func value(_ v:WireJSONValue,_ depth:Int=0) throws {
             nodes-=1;guard nodes>=0,depth<=32 else { throw PreparationError.oversized }
@@ -85,12 +86,32 @@ public enum RequestBounds {
             default:break
             }
         }
+    }
+    /// Recovered declarations have no raw request preimage. Check their retained
+    /// canonical schema with the same tree ceilings before native compilation.
+    public static func canonicalStoredSchema(_ source:String) throws -> String {
+        guard !source.isEmpty,source.utf8.count<=65_536 else { throw PreparationError.oversized }
+        let schema=try JSONDecoder().decode(WireGenerationSchema.self,from:Data(source.utf8))
+        let tree=try PreparationEncoding.schemaValue(schema);try Budget().value(tree)
+        let canonical=String(decoding:try PreparationEncoding.encode(tree),as:UTF8.self)
+        guard canonical==source else { throw PreparationError.identity };return canonical
+    }
+    public static func check(_ r:WireGenerationRequest,revision:String=ModelDescriptor.legacyRevision) throws {
+        guard [ModelDescriptor.legacyRevision,ModelDescriptor.schemaRevision].contains(revision),r.context.reasoning==nil else { throw PreparationError.unsupported }
+        if r.portableSchema != nil {
+            guard revision==ModelDescriptor.schemaRevision,r.tools.isEmpty,r.options.toolCalling != .required,r.context.includeSchemaInPrompt==false else { throw PreparationError.unsupported }
+        } else { guard r.context.includeSchemaInPrompt==nil else { throw PreparationError.unsupported } }
+        let budget=Budget()
+        func string(_ s:String) throws { try budget.string(s) }
+        func identifier(_ s:String) throws { try budget.identifier(s) }
+        func value(_ v:WireJSONValue) throws { try budget.value(v) }
         func metadata(_ m:[String:WireJSONValue]) throws { try value(.object(m)) }
         func segments(_ ss:[WireTranscript.Segment]) throws {
             guard ss.count<=64 else { throw PreparationError.oversized }
             for s in ss { guard case .text(let t)=s else { throw PreparationError.unsupported };try identifier(t.id);try string(t.content) }
         }
         guard (1...64).contains(r.portableTranscript.entries.count),r.tools.count<=8 else { throw PreparationError.oversized }
+        if let schema=r.portableSchema { try value(PreparationEncoding.schemaValue(schema)) }
         for t in r.tools { try identifier(t.name);guard t.description.utf8.count<=8192 else { throw PreparationError.oversized };try string(t.description);try value(PreparationEncoding.schemaValue(t.portableParameters)) }
         for e in r.portableTranscript.entries {
             switch e {

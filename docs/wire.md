@@ -805,3 +805,22 @@ request preparation or replacement tokens/options/IDs/seed. No frame layout or
 shipping capability/dispatch changes. S89's offline tiny-Llama proof uses known
 non-secret disposable fixture keys; S88's Keychain/acquisition/crash evidence is
 reused for its unchanged scope.
+
+S90 extends that same preparer with the owner-selected
+`s90-public-chat-schema-v1` revision; `s89-public-chat-tools-v1` stays the default.
+The schema route requires a portable response schema, no offered tools/reasoning,
+no required tool mode, explicitly false `includeSchemaInPrompt`, nil/greedy sampling
+and nil/zero temperature. Maximum tokens defaults to 512 and accepts 0...512.
+Throwing extraction applies the existing shared whole-request bounds before full
+serialization. Schema bytes feed the guided grammar, while text/history use the
+same chat-template path; schema-only changes may preserve tokens but change the
+complete request identity and grammar. Stored guided binding validation precedes
+attach/acceptance and uses the selected native identity, tokens, canonical schema,
+policy and stable IDs. It does not reconstruct a raw request during recovery.
+Grammar compilation remains a native boundary after model factory evaluation and
+potentially accepted begin, before prefill; portable admission does not promise
+arbitrary compiler support. Accepted EOS produces the existing usage/complete tail;
+insufficient budget and cancellation do not invent success usage. The additive
+`Tools/DurableSchemaPreparation` harness proves actual tiny-Llama selected-disk
+continuation with a visible checkpoint prefix and zero fresh request preparation.
+Wire layouts, shipping offers [1,0] and default opt-in/readiness are unchanged.

@@ -4,8 +4,8 @@ import MLXLMCommon
 import RequestPreparationContract
 
 public enum TranscriptPreparation {
-    public static func input(_ request:WireGenerationRequest) throws -> UserInput {
-        try RequestBounds.check(request)
+    public static func input(_ request:WireGenerationRequest,revision:String=RequestPreparationContract.ModelDescriptor.legacyRevision) throws -> UserInput {
+        try RequestBounds.check(request,revision:revision)
         var chat:[Chat.Message]=[],pending:[String:String]=[:],seen=Set<String>()
         func text(_ segments:[WireTranscript.Segment]) throws -> String {
             try segments.map { guard case .text(let t)=$0 else { throw PreparationError.unsupported };return t.content }.joined()

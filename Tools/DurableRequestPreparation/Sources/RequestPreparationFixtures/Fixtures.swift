@@ -70,7 +70,7 @@ public final class PreparationTokenizer: Tokenizer, @unchecked Sendable {
 public final class NativePreparationFixture {
     public let tokenizer:PreparationTokenizer,model:FixtureModel,preparer:RequestPreparation
     public private(set) var factories=0
-    public init() throws {
+    public init(revision:String=RequestPreparationContract.ModelDescriptor.legacyRevision) throws {
         let tokenizer=PreparationTokenizer(),model=try FixtureModel(kind:"llama",script:[0],promptCount:0)
         self.tokenizer=tokenizer;self.model=model
         let config=LlamaConfiguration(hiddenSize:16,hiddenLayers:2,intermediateSize:32,attentionHeads:2,rmsNormEps:0.00001,vocabularySize:258,kvHeads:1)
@@ -79,7 +79,7 @@ public final class NativePreparationFixture {
         let dependency="lm:83f3ef6dc5bc24daeea33cfd9e18ab1383bb0bc8;mlx:0bb916c67f4b9e5c682cbe02a42c701c93ab5021;mlx-c:0726ca922fc902c4c61ef9c27d94132be418e945;core:ce45c52505c8158ea48d2a54e8caae05efd86bfe;xgrammar:v0.1.30;numerics:0c0290ff6b24942dadb83a929ffaaa1481df04a2;arguments:6a52f3251125d74daf04fcbd5e6f08a75d074382;native35:e1199349f22a4da30d791aa683692d295d6fb9a21f1643ffd9ac176ded97ff37"
         func descriptor(_ native:String) throws -> RequestPreparationContract.ModelDescriptor {
             try .init(model:"s89-tiny-llama",configuration:configuration,weights:model.weightsIdentity,backend:backend,dependency:dependency,
-                tokenizerAlgorithm:"utf8-byte-plus-one;no-bos;v1",template:tokenizer.template,vocabulary:S79ByteTokenizer.vocab,codec:"none-v1",nativePolicy:native)
+                tokenizerAlgorithm:"utf8-byte-plus-one;no-bos;v1",template:tokenizer.template,vocabulary:S79ByteTokenizer.vocab,codec:"none-v1",nativePolicy:native,revision:revision)
         }
         let preliminary=try descriptor("pending"),text=try ResumableTextOptions(tokenizerIdentity:preliminary.tokenizerIdentity,stopTokenIDs:[0],unknownTokenID:257)
         var closing=[Float](repeating:0,count:258);closing[0]=200;closing[35]=100;closing[126]=50
@@ -94,7 +94,7 @@ public final class NativePreparationFixture {
     public func runtime(_ binding:ProviderBinding,configuration:AdapterConfiguration) throws -> ProviderRuntime {
         try preparer.validateStored(binding,configuration:configuration)
         let runtime=ProviderNativeRuntime(tokenizer:tokenizer,codecs:.init(),model:{ self.factories+=1;return self.model })
-        switch binding.lane { case .ordinary:return .ordinary(runtime);case .required:return .required(runtime);default:throw PreparationError.unsupported }
+        switch binding.lane { case .ordinary:return .ordinary(runtime);case .required:return .required(runtime);case .guided:return .guided(runtime);default:throw PreparationError.unsupported }
     }
 }
 
@@ -126,7 +126,7 @@ public final class PreparationPair {
     public private(set) var batches:[DurableBatchPayload]=[]
     public private(set) var accepted:DurableGenerationAcceptedPayload?
     public private(set) var beginBytes:Data?,ticket:Data?
-    public init(root:String,fresh:Bool) throws {
+    public init(root:String,fresh:Bool,revision:String=RequestPreparationContract.ModelDescriptor.legacyRevision) throws {
         try PreparationFixtures.root(root);self.root=root
         if fresh { guard mkdir(root,0o700)==0 else { throw PreparationError.identity } }
         let hostClock=try FixtureLifecycleClock(id:"s89-host",time:1_000_000_000),clientClock=try FixtureClientClock(id:"s89-client",time:1_000_000_000)
@@ -143,7 +143,7 @@ public final class PreparationPair {
         let identity=try LifecycleIdentity(incarnation:core.hostID,clock:hostClock),keys=try LifecycleKeys(catalog:Data(repeating:1,count:32),ticket:Data(repeating:2,count:32))
         hostOwner=try fresh ? .initialize(at:root+"/host",identity:identity,keys:keys,clock:hostClock) : .reopen(at:root+"/host",identity:identity,keys:keys,clock:hostClock)
         clientOwner=try .init(path:root+"/client",create:fresh,environment:.init(rootID:core.clientID,clock:clientClock),metadataKey:Data(repeating:3,count:32),clock:clientClock)
-        native=try NativePreparationFixture();let n=native
+        native=try NativePreparationFixture(revision:revision);let n=native
         host=try .init(configuration:n.configuration,owner:hostOwner,authorization:hostAuth,expectedClientRoot:core.clientID,allowNew:fresh,
             prepare:{try n.preparer.prepare($0,reference:$1,configuration:$2)},runtime:{try n.runtime($0,configuration:$1)},requestPolicy:n.preparer.policy,
             validatePrepared:{try n.preparer.validateStored($0,configuration:$1)})

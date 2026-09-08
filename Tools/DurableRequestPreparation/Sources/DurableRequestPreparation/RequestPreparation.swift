@@ -39,7 +39,7 @@ public final class RequestPreparation {
     public func prepare(_ request:WireGenerationRequest,reference:DurableGenerationReference,configuration:AdapterConfiguration) throws -> ProviderBinding {
         try policy.validate(configuration)
         let route=try policy.route(request),resolved=try policy.resolve(request.options,route:route)
-        let input=try TranscriptPreparation.input(request),messages=DefaultMessageGenerator().generate(from:input)
+        let input=try TranscriptPreparation.input(request,revision:policy.descriptor.revision),messages=DefaultMessageGenerator().generate(from:input)
         preparations+=1;templateCalls+=1
         let tokens=try tokenizer.applyChatTemplate(messages:messages,tools:input.tools,additionalContext:input.additionalContext)
         try checkTokens(tokens);lastTokens=tokens
@@ -51,13 +51,20 @@ public final class RequestPreparation {
             let options=ResumableTokenOptions(vocabularySize:d.vocabulary.count,maximumTokens:resolved.maximum,prefillStepSize:native.prefill,
                 temperature:resolved.temperature,topP:resolved.topP,topK:resolved.topK,seed:resolved.seed)
             binding = .init(operationID:reference.operationID,requestID:requestID,lane:.ordinary(.init(model:model,tokens:tokens,options:options,text:native.text,entryID:ids.0,segmentID:ids.1)))
-        } else {
+        } else if route=="required" {
             let tools=try request.tools.map { RequiredToolDefinition(name:$0.name,schemaJSON:String(decoding:try PreparationEncoding.encode(PreparationEncoding.schemaValue($0.portableParameters)),as:UTF8.self)) }
             let required=try RequiredToolBinding(requestIdentity:requestID,entryID:ids.0,callID:ids.1,tools:tools,identity:model.identity,
                 cacheSpecs:native.caches,codecIdentity:native.codec,vocabulary:d.vocabulary,vocabularyType:.byteFallback,
                 tokenizerIdentity:d.tokenizerIdentity,eosTokenID:tokenizer.eosTokenId!,unknownTokenID:tokenizer.unknownTokenId,
                 fastForward:true,options:native.guidedOptions(maximum:resolved.maximum))
             binding = .init(operationID:reference.operationID,requestID:requestID,lane:.required(required,tokens:tokens))
+        } else {
+            guard let schema=request.portableSchema else { throw PreparationError.unsupported }
+            let source=String(decoding:try PreparationEncoding.encode(PreparationEncoding.schemaValue(schema)),as:UTF8.self)
+            let specification=ResumableGrammarSpecification(jsonSchema:source,vocabulary:d.vocabulary,vocabularyType:.byteFallback,
+                tokenizerIdentity:try d.tokenizerIdentity,eosTokenID:tokenizer.eosTokenId!,unknownTokenID:tokenizer.unknownTokenId,fastForward:true)
+            binding = .init(operationID:reference.operationID,requestID:requestID,lane:.guided(.init(model:model,tokens:tokens,
+                specification:specification,options:native.guidedOptions(maximum:resolved.maximum),entryID:ids.0,segmentID:ids.1)))
         }
         try validateStored(binding,configuration:configuration);return binding
     }
@@ -86,6 +93,15 @@ public final class RequestPreparation {
             let expected=ResumableTokenOptions(vocabularySize:d.vocabulary.count,maximumTokens:b.options.maximumTokens,prefillStepSize:native.prefill,
                 temperature:b.options.temperature,topP:b.options.topP,topK:b.options.topK,seed:b.options.seed)
             guard b.options==expected,b.options.temperature==0 || b.options.topP>0 else { throw PreparationError.identity }
+        case .guided(let b):
+            guard d.revision==RequestPreparationContract.ModelDescriptor.schemaRevision,(0...512).contains(b.options.model.maximumTokens) else { throw PreparationError.identity }
+            try checkTokens(b.tokens)
+            let source=try RequestBounds.canonicalStoredSchema(b.specification.source)
+            let specification=ResumableGrammarSpecification(jsonSchema:source,vocabulary:d.vocabulary,vocabularyType:.byteFallback,
+                tokenizerIdentity:try d.tokenizerIdentity,eosTokenID:tokenizer.eosTokenId!,unknownTokenID:tokenizer.unknownTokenId,fastForward:true)
+            let expected=ProviderGuidedBinding(model:.init(identity:try identity(b.tokens),cacheSpecs:native.caches,codecIdentity:native.codec),tokens:b.tokens,
+                specification:specification,options:native.guidedOptions(maximum:b.options.model.maximumTokens),entryID:ids.0,segmentID:ids.1)
+            guard try PreparationEncoding.encode(b)==PreparationEncoding.encode(expected) else { throw PreparationError.identity }
         case .required(let b,let tokens):
             try checkTokens(tokens)
             guard (0...512).contains(b.options.model.maximumTokens),(1...8).contains(b.tools.count) else { throw PreparationError.identity }
