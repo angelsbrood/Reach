@@ -274,30 +274,59 @@ final class ResumeOnce<T: Sendable>: @unchecked Sendable {
 /// the network queue and routinely beats the caller to the question, so a box
 /// that only held a waiting continuation would drop the answer and hang.
 final class Latch<T: Sendable>: @unchecked Sendable {
+    private final class Waiter: @unchecked Sendable {
+        let id = UUID()
+        var cancelled = false
+        var continuation: CheckedContinuation<T, Error>?
+    }
     private var settled: Result<T, Error>?
-    private var waiting: [CheckedContinuation<T, Error>] = []
+    private var waiting: [UUID: Waiter] = [:]
     private let lock = NSLock()
+
+    var pendingWaiterCount: Int { lock.withLock { waiting.count } }
 
     func settle(_ result: Result<T, Error>) {
         lock.lock()
         guard settled == nil else { return lock.unlock() }
         settled = result
-        let pending = waiting
-        waiting = []
+        let pending = waiting.values.compactMap { waiter -> CheckedContinuation<T, Error>? in
+            defer { waiter.continuation = nil }
+            return waiter.continuation
+        }
+        waiting.removeAll()
         lock.unlock()
         for continuation in pending { continuation.resume(with: result) }
     }
 
+    private func cancel(_ waiter: Waiter) {
+        lock.lock()
+        waiter.cancelled = true
+        waiting.removeValue(forKey: waiter.id)
+        let continuation = waiter.continuation
+        waiter.continuation = nil
+        lock.unlock()
+        continuation?.resume(throwing: CancellationError())
+    }
+
     func value() async throws -> T {
-        try await withCheckedThrowingContinuation { continuation in
-            lock.lock()
-            if let settled {
-                lock.unlock()
-                continuation.resume(with: settled)
-            } else {
-                waiting.append(continuation)
-                lock.unlock()
+        let waiter = Waiter()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                lock.lock()
+                if waiter.cancelled || Task.isCancelled {
+                    lock.unlock()
+                    continuation.resume(throwing: CancellationError())
+                } else if let settled {
+                    lock.unlock()
+                    continuation.resume(with: settled)
+                } else {
+                    waiter.continuation = continuation
+                    waiting[waiter.id] = waiter
+                    lock.unlock()
+                }
             }
+        } onCancel: {
+            self.cancel(waiter)
         }
     }
 }
@@ -359,17 +388,22 @@ public final class QUICListener: Sendable {
     /// say it is what a restart looks like.
     public func waitUntilReady(timeout: Duration = .seconds(10)) async throws {
         let readiness = self.readiness
-        try await withThrowingTaskGroup(of: Void.self) { group in
-            group.addTask { try await readiness.value() }
-            let port = self.port
-            group.addTask {
-                try await Task.sleep(for: timeout)
-                throw TransportError.listenerCouldNotBind(
-                    port: port, detail: "it neither bound nor failed within \(timeout)"
-                )
+        do {
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                defer { group.cancelAll() }
+                group.addTask { try await readiness.value() }
+                let port = self.port
+                group.addTask {
+                    try await Task.sleep(for: timeout)
+                    throw TransportError.listenerCouldNotBind(
+                        port: port, detail: "it neither bound nor failed within \(timeout)"
+                    )
+                }
+                try await group.next()
             }
-            try await group.next()
-            group.cancelAll()
+        } catch {
+            listener.cancel()
+            throw error
         }
     }
 

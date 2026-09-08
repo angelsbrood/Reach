@@ -128,6 +128,10 @@ public final class DurableHostWireAdapter {
             guard let attached=state.attachment else { throw AdapterError.unavailable }
             let exported=try owner.exportClientContext(ticket:incoming,authorization:authorization,attachment:attached)
             try AdapterContract.require(exported==original)
+            // attachClient validated the original durable witness. Apply that
+            // cursor even when replay is empty, before a later native step.
+            // This acknowledges delivery only; it never retires a terminal.
+            try owner.acknowledgeDelivery(ticket:incoming,authorization:authorization,attachment:attached,through:p.witness.high)
             let reply=try publish(.accepted(.init(.init(requestID:p.requestID,reference:p.reference,kind:.recover,context:exported,contextDigest:p.contextDigest))),ticket:incoming)
             ticket=incoming;reference=p.reference;attachment=attached;context=exported;status=state;clientHigh=p.witness.high;recoveries+=1;return [reply]
         case .receipt(let f):
@@ -160,6 +164,17 @@ public final class DurableHostWireAdapter {
         _=try owner.wireSessionID(ticket:ticket,authorization:authorization,publicationHook:publicationHook)
         try gate()
         status=state;return state
+    }
+    /// Demand-driven transport seam: validate the bounded committed workset,
+    /// encode one batch, then re-read from updated clientHigh after its receipt.
+    public func replayNext() throws -> Data? {
+        guard let reference else { throw AdapterError.unavailable }
+        let (ticket,attachment,context)=try live(reference)
+        let batches=try owner.replayForClient(ticket:ticket,authorization:authorization,attachment:attachment,after:clientHigh)
+        guard batches.count<=4096,batches.reduce(0,{$0+$1.bytes.count})<=16<<20 else { throw AdapterError.oversized }
+        guard let b=batches.first else { return nil }
+        let bytes=try publish(.batch(.init(.init(reference:reference,contextDigest:RecoveryCodec.hash(context),first:b.first,count:b.count,commit:b.commit,skip:b.skip,bytes:b.bytes))),ticket:ticket)
+        try gate();return bytes
     }
     public func replay() throws -> [Data] {
         guard let reference else { throw AdapterError.unavailable }

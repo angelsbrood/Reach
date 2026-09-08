@@ -103,3 +103,7 @@ security boundary. Original deadlines do not renew on recovery. Backup exclusion
 is requested and reported where supported; there is no physical-erasure,
 filesystem anti-rollback, exhaustive descendant or hard GPU-call deadline claim.
 The command stops at returned native/persistence boundaries and closes its owners.
+
+The separate [`durable-transport` command](durable-client-host-transport.md) adds
+an explicit same-boot loopback mTLS route with role-specific ownership. It uses
+new confirmed roots; existing `durable-local` roots and behavior are unchanged.

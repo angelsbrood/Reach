@@ -877,3 +877,10 @@ loads the original selected authority and encrypted inbox; stdout is only a view
 and no tool effect executes. Shipping network dispatch/offers `[1,0]`, normal
 `serve`, SDK behavior and default Gemma selection remain unchanged. See
 [local runtime usage and limits](durable-local-runtime.md).
+
+S94 adds explicit network dispatch only under `reachd durable-transport`: pinned
+mTLS on literal loopback, an explicit `[2]` Hello, the selected tiny Llama model,
+one demand-read stream, and one batch per exact nonterminal receipt. Terminal
+content remains retained for replay; terminal-retirement receipts are refused.
+Default daemon/SDK offers remain `[1,0]`, with no discovery or volatile fallback
+added to this route. See [transport ownership and limits](durable-client-host-transport.md).

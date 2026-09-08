@@ -59,3 +59,46 @@ extension DurableSessionLifecycle {
         try wirePublish(ticket,authorization,d,c,frozen,{});return a.bytes
     }
 }
+
+
+extension DurableSessionLifecycle {
+    /// Host-local retirement under an already-acquired lifecycle/key owner. The
+    /// transport never exposes this operation to a peer. Its caller supplies the
+    /// key-confirmed local reservation; no client journal or replacement ticket
+    /// is used to recover authority. The existing retirement/ending rules apply.
+    public func wireCancelLocalReservation(namespace: String, generation: String, requestDigest: String,
+                                           authorization: LifecycleAuthorization) throws -> LifecycleStatus? {
+        try lcID(generation); try authorization.caller.validate()
+        guard authorization.allowed, lcUUID(namespace), requestDigest.utf8.count == 64 else { throw LifecycleError.unauthorized }
+        let document = try catalog.load()
+        guard let record = document.records.first(where: { $0.identity?.namespace == namespace && $0.identity?.generation == generation }),
+              let identity = record.identity, try lcEncode(identity.caller) == lcEncode(authorization.caller) else { return nil }
+        if record.work != nil {
+            let request = try catalog.request(record)
+            guard lcHash(Data(request.provider.requestID.utf8)) == requestDigest, try lcHash(lcEncode(request)) == identity.requestDigest else { throw LifecycleError.nonResumable }
+        }
+        try retire(record.id, disposition: "cancelled")
+        let final = try catalog.load()
+        guard let retained = final.records.first(where: { $0.id == record.id }) else { return nil }
+        return status(retained)
+    }
+}
+
+extension DurableSessionLifecycle {
+    /// Non-content observation of the currently committed native checkpoint.
+    /// This uses the already-owned store and authenticates again before publish;
+    /// it cannot attach, restore a model, or manufacture checkpoint state.
+    public func wireNativeCheckpointPhase(ticket: SessionTicket, authorization: LifecycleAuthorization,
+                                          attachment: LifecycleAttachment) throws -> String? {
+        let (document, claims, frozen) = try wireContext(ticket, authorization)
+        let i = try index(attachment, claims: claims, document: document)
+        let record = document.records[i]
+        guard record.work != nil, !record.nonResumable else { throw LifecycleError.nonResumable }
+        let candidate = try child(record).store.snapshot().candidate
+        struct Projection: Decodable { let phase: String }
+        let phase = try candidate.map { try JSONDecoder().decode(Projection.self, from: $0.checkpointBytes).phase }
+        _ = try publishedStatus(record, observed: document.lastObserved, ticket: ticket, authorization: authorization)
+        try wirePublish(ticket, authorization, document, claims, frozen, {})
+        return phase
+    }
+}

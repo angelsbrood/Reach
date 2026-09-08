@@ -247,7 +247,8 @@ let reachdTargets: [Target] = [
     ),
 
     reachHostTestsTarget,
-    .testTarget(name:"ReachDurableRuntimeTests",dependencies:[
+    .testTarget(name:"ReachDurableRuntimeTests",dependencies:["ReachDaemon",
+        .product(name:"ReachTransport",package:"ReachKit"),.product(name:"ReachIdentity",package:"ReachKit"),
         .product(name:"ReachDurableRuntime",package:"ReachDurability"),
         .product(name:"ReachWire",package:"ReachKit"),
         .product(name:"MLXLLM",package:"mlx-swift-lm"),
