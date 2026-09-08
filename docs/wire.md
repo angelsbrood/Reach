@@ -867,3 +867,13 @@ Fresh original preparation/template/request tokenization/issue/begin stay zero;
 grammar/repair encodes and later new-pass prefills are separately observed. This adds
 no shipping wire layout, coordinator, native engine, production loading or tool effect;
 offers remain [1,0] and opt-in/readiness off.
+
+
+S93 integrates these accepted components into the normal macOS daemon graph via
+the explicit, default-off `reachd durable-local` command. It uses actual selected
+Llama artifacts, scoped file-Keychain roots, current local ownership/system clocks
+and the same encoded durable frames for in-process host/client exchange. Recovery
+loads the original selected authority and encrypted inbox; stdout is only a view,
+and no tool effect executes. Shipping network dispatch/offers `[1,0]`, normal
+`serve`, SDK behavior and default Gemma selection remain unchanged. See
+[local runtime usage and limits](durable-local-runtime.md).

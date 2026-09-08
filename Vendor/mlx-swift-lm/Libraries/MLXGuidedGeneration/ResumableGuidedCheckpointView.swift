@@ -1,0 +1,42 @@
+import Foundation
+import MLXLMCommon
+
+/// Read-only projection of a checkpoint belonging to an already validated native
+/// operation. This is not standalone acceptance: restore the exact child first.
+public struct ResumableGuidedCheckpointView: Equatable, Sendable {
+    public let promptTokens: Int
+    public let sampledTokens: Int
+    public let forcedTokens: Int
+    public let interceptedEndings: Int
+    public let consumedTokens: Int
+    public let acceptedTokens: Int
+    public let terminalReason: ResumableGuidedEnd?
+    public let cumulativeEmittedBytes: Data
+    public var pendingTokens: Int { acceptedTokens - consumedTokens }
+    public var outputTokens: Int { sampledTokens + forcedTokens }
+
+    public init(checkpoint: ResumableGuidedCheckpoint,
+                validatedOperation: ResumableGuidedGeneration,
+                tokenizer: any Tokenizer) throws {
+        guard try validatedOperation.capture() == checkpoint else {
+            throw ResumableTokenError.incompatible
+        }
+        let s = try checkpoint.document().guided
+        guard (0...65_536).contains(s.grammar.accepts.count),
+              (0...s.grammar.accepts.count).contains(s.consumed) else {
+            throw ResumableTokenError.invalid("inspection frontier")
+        }
+        var text = ResumableGuidedTextValue(), whole = Data()
+        for entry in s.grammar.accepts.prefix(s.consumed) where entry.origin != .ending {
+            if let delta = try text.append(entry.token, tokenizer: tokenizer) {
+                guard delta.count <= 256 * 1024 - whole.count else { throw ResumableTokenError.oversized }
+                whole.append(delta)
+            }
+        }
+        guard text == s.text.value else { throw ResumableTokenError.invalid("inspection text history") }
+        promptTokens = s.promptCount; sampledTokens = s.sampled; forcedTokens = s.forced
+        interceptedEndings = s.intercepted; consumedTokens = s.consumed
+        acceptedTokens = s.grammar.accepts.count; terminalReason = s.terminal
+        cumulativeEmittedBytes = whole
+    }
+}

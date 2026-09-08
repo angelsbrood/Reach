@@ -190,6 +190,7 @@ let reachdTargets: [Target] = [
         name: "reachd",
         dependencies: [
             "ReachDaemon",
+            .product(name: "ReachDurableRuntime", package: "ReachDurability"),
             .product(name: "ArgumentParser", package: "swift-argument-parser"),
             .product(name: "ReachKit", package: "ReachKit"),
         ]
@@ -246,7 +247,20 @@ let reachdTargets: [Target] = [
     ),
 
     reachHostTestsTarget,
+    .testTarget(name:"ReachDurableRuntimeTests",dependencies:[
+        .product(name:"ReachDurableRuntime",package:"ReachDurability"),
+        .product(name:"ReachWire",package:"ReachKit"),
+        .product(name:"MLXLLM",package:"mlx-swift-lm"),
+        .product(name:"MLXLMCommon",package:"mlx-swift-lm"),
+        .product(name:"MLXGuidedGeneration",package:"mlx-swift-lm")
+    ]),
 ]
+#endif
+
+#if os(Linux)
+let durabilityDependencies: [Package.Dependency] = []
+#else
+let durabilityDependencies: [Package.Dependency] = [.package(path: "../ReachDurability")]
 #endif
 
 let package = Package(
@@ -255,24 +269,12 @@ let package = Package(
     products: reachdProducts,
     dependencies: [
         .package(path: "../ReachKit"),
-        // Pinned to a revision, not a version: Gemma 4 landed on main after the
-        // last tag (3.31.4), so `from:` cannot reach it. The commit is the one
-        // the take was shot on — a filing artifact, so it names itself.
-        .package(
-            url: "https://github.com/ml-explore/mlx-swift-lm.git",
-            revision: "83f3ef6dc5bc24daeea33cfd9e18ab1383bb0bc8",
-            // reachd uses MLX's container loader, LLM, and guided-generation
-            // products directly. The package's default-on Foundation Models
-            // adapter is a separate, unused surface whose SDK signatures can
-            // move between Xcode seeds; do not compile or link it into the
-            // daemon merely because the dependency enables it by default.
-            traits: []
-        ),
+        .package(path: "../Vendor/mlx-swift-lm", traits: []),
         .package(url: "https://github.com/huggingface/swift-transformers.git", from: "1.3.0"),
         .package(url: "https://github.com/huggingface/swift-huggingface.git", from: "0.9.0"),
         .package(url: "https://github.com/apple/swift-certificates.git", from: "1.5.0"),
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.5.0"),
         .package(url: "https://github.com/apple/swift-crypto.git", from: "4.0.0"),
-    ],
+    ] + durabilityDependencies,
     targets: reachdTargets
 )
