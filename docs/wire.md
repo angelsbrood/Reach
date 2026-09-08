@@ -884,3 +884,5 @@ one demand-read stream, and one batch per exact nonterminal receipt. Terminal
 content remains retained for replay; terminal-retirement receipts are refused.
 Default daemon/SDK offers remain `[1,0]`, with no discovery or volatile fallback
 added to this route. See [transport ownership and limits](durable-client-host-transport.md).
+
+The explicit [independent durable bootstrap](independent-durable-bootstrap.md) route selects `reach-durable-independent-v1` on dialect 2 and ALPN `reach/0`. Both endpoints require the locally selected profile before original work; the legacy durable profile and default `[1,0]` offers remain unchanged.

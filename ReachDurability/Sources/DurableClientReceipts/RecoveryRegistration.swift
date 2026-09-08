@@ -9,7 +9,8 @@ public struct RecoveredHostJoin {
 extension DurableClientReceipts {
     func checkRecoveryTicket(_ ticket:Data, authority:ClientAuthority, binding:RecoveryBinding) throws {
         let claims=try RecoveryTicketClaims.parse(ticket), c=authority.context
-        guard claims.incarnation==binding.host, claims.boot==binding.boot, crEqual(claims.policy,binding.hostPolicy),
+        guard claims.incarnation==binding.host, claims.boot==(authority.retention?.hostBoot ?? binding.boot), crEqual(claims.policy,authority.retention?.hostPolicy ?? binding.hostPolicy),
+              !binding.independent || (authority.retention?.ticket == crHash(ticket) && authority.retention?.pair == binding.pair),
               crEqual(claims.namespace,c.namespace), claims.issued==c.issued, claims.expires==c.expires,
               try crEncode(claims.caller)==crEncode(c.caller) else { throw RecoveryError.invalid }
     }

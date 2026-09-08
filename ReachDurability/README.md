@@ -29,3 +29,5 @@ host and client owners, pins both mTLS peers, and paces durable batches by exact
 nonterminal receipts. Its client uses only a portable descriptor and client-owned
 state; model loading and native work remain host-only. See its
 [normal-executable runner](../Tools/DurableClientHostTransport/README.md).
+
+The adjacent explicit independent role route is documented in [independent durable bootstrap](../docs/independent-durable-bootstrap.md). It adds role-local roots and retention while preserving legacy bootstrap and record encodings.

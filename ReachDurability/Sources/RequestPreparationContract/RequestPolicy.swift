@@ -15,7 +15,7 @@ public struct RequestPolicy: AdapterRequestPolicy {
     public func validate(_ c:AdapterConfiguration) throws {
         try descriptor.validate()
         guard c.optIn && c.ready else { throw AdapterError.disabled }
-        guard c.dialect==2,c.model==descriptor.model,c.profile==DurableWire.profile else { throw AdapterError.incompatible }
+        guard c.dialect==2,c.model==descriptor.model,[DurableWire.profile, DurableWire.independentProfile].contains(c.profile) else { throw AdapterError.incompatible }
     }
     public func route(_ request:WireGenerationRequest) throws -> String {
         try RequestBounds.check(request,revision:descriptor.revision)

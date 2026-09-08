@@ -6,10 +6,11 @@ import ReachDurableRuntime
 /// Initialization-only issuer. No default Keychain materializer or identity
 /// installation is involved; each worker later imports its own archive in memory.
 enum DurableTransportIdentity {
-    static func provision(_ root: String) throws -> TransportTLSProvision {
+    static func provision(_ root: String) throws -> TransportTLSProvision { try provision(root, application: TransportContract.application) }
+    static func provision(_ root: String, application: String) throws -> TransportTLSProvision {
         let ca = try ClusterCA.create(commonName: "Reach disposable loopback")
         let host = try ca.issueServer(commonName: "Reach loopback host", dnsNames: [], ipAddresses: [[127, 0, 0, 1]], days: 1)
-        let client = try ca.issueClient(commonName: "Reach loopback client", uri: TransportContract.application, days: 1)
+        let client = try ca.issueClient(commonName: "Reach loopback client", uri: application, days: 1)
         try archive(host, directory: root + "/host")
         try archive(client, directory: root + "/client")
         return try .init(caDER: ca.certificateDER(), hostDER: host.certificateDER(), clientDER: client.certificateDER())

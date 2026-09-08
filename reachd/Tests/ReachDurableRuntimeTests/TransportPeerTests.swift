@@ -11,6 +11,13 @@ import RequestPreparationContract
 /// or provider and is never a production fault option.
 final class TransportPeerTests: XCTestCase, @unchecked Sendable {
     private func selected() throws -> TransportIdentity {
+        if let root=ProcessInfo.processInfo.environment["S95_PEER_ROOT"] {
+            guard root.hasPrefix("/private/tmp/reach-s95."),root.contains("/roots/") else { throw TransportRuntimeError.invalid }
+            let selection=try JSONDecoder().decode(TransportSelectionBinding.self,from:LocalFiles.read(root+"/client/selection.json",maximum:65536))
+            try selection.validate(role:.client)
+            guard selection.revision==IndependentContract.revision else { throw TransportRuntimeError.invalid }
+            return try TransportIdentity(root:root,selection:selection,audit:TransportRoleAudit(.client))
+        }
         guard let root = ProcessInfo.processInfo.environment["S94_PEER_ROOT"] else { throw XCTSkip("requires owned normal-host fixture") }
         guard root.hasPrefix("/private/tmp/reach-s94."), root.contains("/roots/") else { throw TransportRuntimeError.invalid }
         let selection = try JSONDecoder().decode(TransportSelection.self, from: LocalFiles.read(root + "/client/selection.json", maximum: 65536))
@@ -30,7 +37,7 @@ final class TransportPeerTests: XCTestCase, @unchecked Sendable {
     }
     func testOldDialectAndPreHelloDurableFramesRefuse() async throws {
         let identity = try selected()
-        let preHello = try DurableMessage.open(.init(.init(requestID: "premature", modelID: TransportContract.model, profile: DurableWire.profile, durable: true))).encode(version: 2)
+        let preHello = try DurableMessage.open(.init(.init(requestID: "premature", modelID: TransportContract.model, profile: identity.selection.profile, durable: true))).encode(version: 2)
         for bytes in [try FrameCodec.encode(Hello(versions: [1,0], client: "old")), preHello] {
             let stream = try await open(identity)
             do {
@@ -41,12 +48,22 @@ final class TransportPeerTests: XCTestCase, @unchecked Sendable {
             await stream.cancelAndWait()
         }
     }
+    func testConfiguredProfileMismatchBeforeOriginalIssue() async throws {
+        let identity=try selected(),stream=try await open(identity)
+        do {
+            try await handshake(stream)
+            let other=identity.selection.profile == DurableWire.profile ? DurableWire.independentProfile : DurableWire.profile
+            try await TransportConnection.send(DurableMessage.open(.init(.init(requestID:"wrong-profile",modelID:TransportContract.model,profile:other,durable:true))).encode(version:2),on:stream)
+            guard case .refused = try DurableMessage.decode(await TransportConnection.read(stream),version:2) else { throw TransportRuntimeError.invalid }
+            await stream.cancelAndWait()
+        } catch { await stream.cancelAndWait();throw error }
+    }
     func testUnsolicitedTerminalReceiptRefuses() async throws {
         let identity = try selected(), stream = try await open(identity)
         do {
             try await handshake(stream)
             let digest = String(repeating: "0", count: 64)
-            let reference = DurableGenerationReference(session: .init(modelID: TransportContract.model, profile: DurableWire.profile, sessionID: UUID().uuidString.lowercased()), generationID: "generation", operationID: "operation")
+            let reference = DurableGenerationReference(session: .init(modelID: TransportContract.model, profile: identity.selection.profile, sessionID: UUID().uuidString.lowercased()), generationID: "generation", operationID: "operation")
             let witness = DurableWitness(context: digest, clientRoot: UUID().uuidString.lowercased(), revision: 1, high: 1, terminal: true, prefix: digest, registrations: 0, calls: digest)
             let receipt = try DurableMessage.receipt(.init(.init(requestID: "unsolicited-terminal", reference: reference, witness: witness))).encode(version: 2)
             try await TransportConnection.send(receipt, on: stream)
@@ -62,7 +79,7 @@ final class TransportPeerTests: XCTestCase, @unchecked Sendable {
         do {
             try await handshake(stream)
             let request = try ArtifactFixtures.request("ordinary")
-            try await TransportConnection.send(DurableMessage.open(.init(.init(requestID: "peer-open", modelID: TransportContract.model, profile: DurableWire.profile, durable: true))).encode(version: 2), on: stream)
+            try await TransportConnection.send(DurableMessage.open(.init(.init(requestID: "peer-open", modelID: TransportContract.model, profile: identity.selection.profile, durable: true))).encode(version: 2), on: stream)
             guard case .opened(let opened) = try DurableMessage.decode(await TransportConnection.read(stream), version: 2) else { throw TransportRuntimeError.protocolRefused }
             let id = request.id.uuidString.lowercased()
             let reference = DurableGenerationReference(session: opened.payload.session, generationID: "generation-" + id, operationID: "operation-" + id)

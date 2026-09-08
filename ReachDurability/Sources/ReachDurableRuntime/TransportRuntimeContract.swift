@@ -20,9 +20,10 @@ public enum TransportContract {
         guard getuid() == geteuid(), getgid() == getegid() else { throw TransportRuntimeError.invalid }
     }
     static func encode<T: Encodable>(_ value: T) throws -> Data { try PreparationEncoding.encode(value) }
-    static func write<T: Encodable>(_ value: T, to path: String?) throws {
+    static func write<T: Encodable>(_ value: T, to path: String?, beforePublication: () throws -> Void = {}) throws {
         let bytes = try encode(value)
         guard bytes.count <= 16 << 20 else { throw TransportRuntimeError.invalid }
+        try beforePublication()
         if let path { try LocalFiles.writeNew(bytes, to: path) }
         else { try FileHandle.standardOutput.write(contentsOf: bytes + Data([10])) }
     }
@@ -47,9 +48,13 @@ struct TransportPins: Codable, Equatable {
 struct TransportSelectionBinding: Codable {
     let revision: String, role: TransportRole, bootstrap: String, profileDigest: String, archiveDigest: String
     let executable: FrozenWorker, descriptor: RequestPreparationContract.ModelDescriptor, pins: TransportPins, port: UInt16
+    var profile: String { revision == IndependentContract.revision ? DurableWire.independentProfile : DurableWire.profile }
+    var application: String { revision == IndependentContract.revision ? IndependentContract.application : TransportContract.application }
+    var hostAuthorization: LifecycleAuthorization { .init(caller:.init(principal:pins.caDigest,device:pins.clientLeaf,app:application),allowed:true) }
+    var clientAuthorization: ClientAuthorization { .init(caller:.init(principal:pins.caDigest,device:pins.clientLeaf,app:application),allowed:true) }
     func validate(role: TransportRole) throws {
         try descriptor.validate(); try pins.validate()
-        guard revision == TransportContract.revision, self.role == role, descriptor.model == TransportContract.model,
+        guard [TransportContract.revision, IndependentContract.revision].contains(revision), self.role == role, descriptor.model == TransportContract.model,
               descriptor.revision == RequestPreparationContract.ModelDescriptor.schemaToolRevision,
               [bootstrap, profileDigest, archiveDigest].allSatisfy(PreparationEncoding.isDigest), (49152...65535).contains(port) else { throw TransportRuntimeError.invalid }
     }
@@ -86,6 +91,7 @@ public struct TransportHostReport: Encodable {
     let traces: [NativeObservation]
 }
 public struct TransportClientReport: Encodable {
+    public var retention: ClientLocalRetention? = nil
     public let stage: String, acquisition: TransportAcquisitionReport, peerDigests: [String], connections: Int, reconnects: Int, registered: Bool
     public let high: UInt64, terminal: Bool, inbox: [HandoffBatch], beforeRecovery: [[HandoffBatch]], accepted: DurableGenerationAcceptedPayload?
     public let hostKeys = 0, hostJournalOpens = 0, modelLoads = 0, nativeCalls = 0, requestPreparations = 0

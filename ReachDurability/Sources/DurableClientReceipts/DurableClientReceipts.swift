@@ -17,7 +17,7 @@ public final class DurableClientReceipts {
         do {
             var m: ClientManifest
             if create {
-                m = ClientManifest(root: environment.rootID, boot: environment.boot, policy: environment.policy,
+                m = ClientManifest(version: environment.authorityMode == .legacy ? 1 : 2, root: environment.rootID, boot: environment.boot, policy: environment.policy,
                     revision: 1, ownerEpoch: 1, observed: try clock.now())
                 m = try commit(m, old: nil)
             } else {
@@ -35,19 +35,19 @@ public final class DurableClientReceipts {
         observed = time; return time
     }
     func precheck(_ a: ClientAuthority, _ auth: ClientAuthorization) throws {
-        try fs.ensure(); let time = try clock.now()
+        try fs.ensure(); try environment.validate(clock); try environment.check(a.retention); let time = try clock.now()
         guard time >= observed else { throw ClientError.invalid("clock rollback") }
         try auth.check(a, now: time)
     }
     func publish(_ a: ClientAuthority, _ auth: ClientAuthorization, _ m: ClientManifest) throws {
         try hook(.beforePublication)
-        try auth.check(a, now: observe(m))
+        try environment.check(a.retention); try auth.check(a, now: observe(m))
     }
     func find(_ handle: ClientHandle, _ a: ClientAuthority, _ m: ClientManifest) throws -> Int {
         guard handle.ownerEpoch == ownerEpoch, m.ownerEpoch == ownerEpoch else { throw ClientError.stale }
         guard let i = m.records.firstIndex(where: { $0.id == handle.record }), let live = m.records[i].live else { throw ClientError.expired }
         guard live.identity == a.identity, live.namespace == a.namespace, live.anchor == a.anchor,
-              live.contextDigest == crHash(a.bytes), live.issued == a.context.issued, live.expires == a.context.expires else { throw ClientError.invalid("immutable context") }
+              live.retention == a.retention, live.contextDigest == crHash(a.bytes), live.issued == a.context.issued, live.expires == a.context.expires else { throw ClientError.invalid("immutable context") }
         return i
     }
     public func open(_ a: ClientAuthority, authorization auth: ClientAuthorization) throws -> ClientHandle {
@@ -65,7 +65,7 @@ public final class DurableClientReceipts {
         let placeholder = SnapshotReference(name: "s-"+id+".bin", digest: String(repeating: "0", count: 64), revision: m.revision, length: ClientCrypto.overhead)
         m.records.append(.init(id: id, live: .init(identity: a.identity, namespace: a.namespace, anchor: a.anchor,
             contextDigest: crHash(a.bytes), issued: a.context.issued, expires: a.context.expires, key: clientRandomKey(),
-            snapshot: placeholder, calls: 0, futureBytes: 8192), cleanup: nil))
+            snapshot: placeholder, calls: 0, futureBytes: 8192, retention: a.retention), cleanup: nil))
         m = try commit(m, old: old, replacement: (m.records.count-1, ClientSnapshot(context: a.bytes)))
         try publish(a, auth, m); return .init(record: id, ownerEpoch: ownerEpoch)
     }

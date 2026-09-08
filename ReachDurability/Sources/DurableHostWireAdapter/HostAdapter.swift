@@ -17,7 +17,7 @@ public final class DurableHostWireAdapter {
     public private(set) var status:LifecycleStatus?
     public private(set) var peerReports=0, issues=0, begins=0, recoveries=0
     public private(set) var clientHigh:UInt64=0
-    private let allowNew:Bool, frozenCaller:Data
+    private let allowNew:Bool, frozenCaller:Data, frozenProfile:String
     private let prepare:(WireGenerationRequest,DurableGenerationReference,AdapterConfiguration) throws -> ProviderBinding
     private let runtime:(ProviderBinding,AdapterConfiguration) throws -> ProviderRuntime
     private let validatePrepared:((ProviderBinding,AdapterConfiguration) throws -> Void)?
@@ -29,6 +29,7 @@ public final class DurableHostWireAdapter {
                 validatePrepared:((ProviderBinding,AdapterConfiguration) throws -> Void)? = nil) throws {
         try requestPolicy.validate(configuration)
         guard !requestPolicy.requiresPreparedValidation || validatePrepared != nil else { throw AdapterError.unavailable }
+        frozenProfile=configuration.profile
         self.requestPolicy=requestPolicy;self.validatePrepared=validatePrepared
         self.configuration=configuration;self.owner=owner;self.authorization=authorization;self.expectedClientRoot=expectedClientRoot
         self.allowNew=allowNew;self.prepare=prepare;self.runtime=runtime;frozenCaller=try AdapterContract.encode(authorization.caller)
@@ -36,6 +37,7 @@ public final class DurableHostWireAdapter {
     }
     private func gate() throws {
         try requestPolicy.validate(configuration)
+        guard configuration.profile==frozenProfile else { throw AdapterError.incompatible }
         guard authorization.allowed,try AdapterContract.encode(authorization.caller)==frozenCaller else { throw AdapterError.unauthorized }
     }
     private func session(_ r:DurableSessionReference,_ ticket:SessionTicket) throws {

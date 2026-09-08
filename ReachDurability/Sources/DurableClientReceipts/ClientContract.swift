@@ -25,13 +25,16 @@ public struct ClientEnvironment {
     public let boot: String
     public let policy: String
     public let quota: Int
-    public init(rootID: String = UUID().uuidString.lowercased(), clock: any ClientClock, quota: Int = ClientLimits.allocation) throws {
+    public let authorityMode: ClientAuthorityMode, pairDigest: String?, retentionCap: UInt64
+    public init(rootID: String = UUID().uuidString.lowercased(), clock: any ClientClock, quota: Int = ClientLimits.allocation, authorityMode: ClientAuthorityMode = .legacy, pairDigest: String? = nil, retentionCap: UInt64 = ClientLimits.session) throws {
+        self.authorityMode = authorityMode; self.pairDigest = pairDigest; self.retentionCap = retentionCap
         self.rootID = rootID; self.boot = try Self.bootIdentity(); self.policy = clock.policy; self.quota = quota
         try validate(clock)
     }
     func validate(_ clock: any ClientClock) throws {
         guard crUUID(rootID), boot == (try Self.bootIdentity()), crEqual(policy, clock.policy),
-              policy == "system-monotonic-raw-ns-v1" || policy.hasPrefix("fixture-ns-v1:"),
+              (authorityMode == .independent ? clientRolePolicy(policy) : (policy == "system-monotonic-raw-ns-v1" || policy.hasPrefix("fixture-ns-v1:"))),
+              (authorityMode == .independent ? (pairDigest.map(crDigest) == true && retentionCap > 0 && retentionCap <= ClientLimits.session) : pairDigest == nil),
               (ClientLimits.metadataReserve...ClientLimits.allocation).contains(quota) else { throw ClientError.invalid("environment") }
         try crID(policy)
     }
@@ -75,7 +78,9 @@ public final class ClientAuthority {
     public let context: ClientContext
     public let bytes: Data
     let identity: String, namespace: String, anchor: String
-    public init(_ context: ClientContext) throws {
+    public let retention: ClientLocalRetention?
+    public init(_ context: ClientContext, retention: ClientLocalRetention? = nil) throws {
+        try retention?.check(context); self.retention = retention
         try context.validate(); self.context = context; bytes = try crEncode(context)
         namespace = crDomain("namespace", [Data(context.namespace.utf8)])
         identity = crDomain("generation", [Data(context.namespace.utf8), Data(context.generation.utf8)])
@@ -90,7 +95,7 @@ public final class ClientAuthorization {
     func check(_ authority: ClientAuthority, now: UInt64) throws {
         try caller.validate()
         guard allowed, try crEncode(caller) == crEncode(authority.context.caller) else { throw ClientError.unauthorized }
-        guard now >= authority.context.issued, now < authority.context.expires else { throw ClientError.expired }
+        guard now >= authority.localIssued, now < authority.localExpires else { throw ClientError.expired }
     }
 }
 public struct ClientHandle { public let record: String; public let ownerEpoch: UInt64 }

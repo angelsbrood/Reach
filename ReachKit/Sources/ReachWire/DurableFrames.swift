@@ -3,6 +3,7 @@ import Foundation
 /// Inactive-v2 codec vocabulary. Validation here never admits a caller or verifies stored history.
 public enum DurableWire {
     public static let version: UInt8 = 2
+    public static let independentProfile = "reach-durable-independent-v1"
     public static let profile = "reach-durable-session-v1"
     public static let controlLimit = 2<<20, bulkLimit = 14<<20, contextLimit = 1<<20
     public static func bodyLimit(_ type: FrameType) -> Int { type == .durableBatch || type == .durableToolKnowledge ? bulkLimit : controlLimit }

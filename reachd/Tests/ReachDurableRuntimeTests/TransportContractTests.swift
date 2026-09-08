@@ -51,12 +51,12 @@ final class TransportContractTests: XCTestCase {
         let requestBinding = try profile.preparer.policy.requestBinding(ArtifactFixtures.request("ordinary"), configuration: .init(dialect: 2, model: TransportContract.model, optIn: true, ready: true), route: "ordinary")
         XCTAssertFalse(PreparationEncoding.isDigest(requestBinding))
         let requestDigest = PreparationEncoding.hash(Data(requestBinding.utf8))
-        let admission = try TransportHostAdmission(root: root, selection: selection, core: core, key: key)
+        let admission = try TransportHostAdmission(root: root, selection: selection, reference: core.reference(.hostCatalog), key: key)
         try admission.reserve(reference, requestDigest: requestDigest)
-        let reopened = try TransportHostAdmission(root: root, selection: selection, core: core, key: key)
+        let reopened = try TransportHostAdmission(root: root, selection: selection, reference: core.reference(.hostCatalog), key: key)
         XCTAssertEqual(reopened.reservation?.requestDigest, requestDigest)
         XCTAssertThrowsError(try reopened.reserve(reference, requestDigest: requestDigest))
-        XCTAssertThrowsError(try TransportHostAdmission(root: root, selection: selection, core: core, key: RootKeyMaterial(Data(repeating: 8, count: 32))))
+        XCTAssertThrowsError(try TransportHostAdmission(root: root, selection: selection, reference: core.reference(.hostCatalog), key: RootKeyMaterial(Data(repeating: 8, count: 32))))
     } }
     func testEnvelopePreservesExactBytesAndRejectsOversizeControl() throws {
         let original = try FrameCodec.encode(Hello(versions: [2], client: "loopback"), for: 2)

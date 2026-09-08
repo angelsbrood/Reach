@@ -12,7 +12,7 @@ import RequestPreparationContract
 /// or selects a script/case to produce model output.
 enum ArtifactFixtures {
     static func base() throws -> String {
-        guard let path=ProcessInfo.processInfo.environment["S93_TEST_ROOT"],(path.hasPrefix("/private/tmp/reach-s93.") || path.hasPrefix("/private/tmp/reach-s94.")),path.hasSuffix("/fixtures") else { throw LocalRuntimeError.invalid }
+        guard let path=ProcessInfo.processInfo.environment["S93_TEST_ROOT"],(path.hasPrefix("/private/tmp/reach-s93.") || path.hasPrefix("/private/tmp/reach-s94.") || path.hasPrefix("/private/tmp/reach-s95.")),path.hasSuffix("/fixtures") else { throw LocalRuntimeError.invalid }
         try LocalFiles.directory(path);return path
     }
     static func encode<T:Encodable>(_ value:T) throws -> Data { let e=JSONEncoder();e.outputFormatting=[.sortedKeys,.withoutEscapingSlashes];return try e.encode(value) }
@@ -38,6 +38,8 @@ enum ArtifactFixtures {
         var hashes:[String:String]=[:]
         for name in SelectedArtifactProfile.fileNames { hashes[name]=PreparationEncoding.hash(try LocalFiles.read(path+"/"+name,maximum:128<<20)) }
         try LocalFiles.writeNew(encode(ArtifactManifest(version:1,profile:SelectedArtifactProfile.name,artifacts:hashes)),to:path+"/profile.json")
+        let selected = try SelectedArtifactProfile(at: path)
+        try LocalFiles.writeNew(encode(IndependentPublicModel(descriptor:selected.preparer.policy.descriptor,artifactDigest:selected.manifestDigest)),to:base()+"/public-model.json")
         return path
     }
     static func request(_ route:String,maximum:Int?=nil) throws -> WireGenerationRequest {

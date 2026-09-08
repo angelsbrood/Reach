@@ -36,7 +36,7 @@ public struct LifecycleIdentity {
     }
     func validate(_ clock: any LifecycleClock) throws {
         guard lcUUID(incarnation), boot == (try StoreEnvironment.bootIdentity()), clock.policy == clockPolicy,
-              clockPolicy == "system-monotonic-raw-ns-v1" || clockPolicy.hasPrefix("fixture-ns-v1:"),
+              clockPolicy == "system-monotonic-raw-ns-v1" || clockPolicy.hasPrefix("fixture-ns-v1:") || (clockPolicy.hasPrefix("role-monotonic-ns-v1:") && lcUUID(String(clockPolicy.dropFirst(21)))),
               (LifecycleLimits.metadataReserve...LifecycleLimits.allocation).contains(quota) else { throw LifecycleError.invalid("root/boot/clock/quota") }
         try lcID(clockPolicy)
     }

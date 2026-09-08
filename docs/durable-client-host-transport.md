@@ -132,3 +132,5 @@ Each journal quota is 1 GiB. The selected native allocator ceiling is 128 MiB.
 Use only disposable owned fixtures for crash tests; the initializer is never the
 crash subject. Cross-machine bootstrap, clocks, consent, identity rotation and
 terminal-receipt recovery after retirement remain outside this route.
+
+The adjacent [independent durable bootstrap](independent-durable-bootstrap.md) route supplies separate role roots and clock domains to this delivery state machine. This original paired route keeps its profile and bootstrap semantics.

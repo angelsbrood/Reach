@@ -24,7 +24,7 @@ public struct AdapterConfiguration: Codable {
     }
     public func validate() throws {
         guard optIn && ready else { throw AdapterError.disabled }
-        guard dialect == 2, !model.isEmpty && model.utf8.count<=256, profile == DurableWire.profile else { throw AdapterError.incompatible }
+        guard dialect == 2, !model.isEmpty && model.utf8.count<=256, [DurableWire.profile, DurableWire.independentProfile].contains(profile) else { throw AdapterError.incompatible }
     }
 }
 public enum AdapterContract {

@@ -6,7 +6,7 @@ extension DurableClientReceipts {
         let old = try refresh(); let now = try observe(old)
         var m = old, changed = false
         for i in m.records.indices {
-            if let live = m.records[i].live, now >= live.expires {
+            if let live = m.records[i].live, now >= live.localExpires {
                 m.records[i].cleanup = live.snapshot; m.records[i].live = nil; changed = true
             }
         }

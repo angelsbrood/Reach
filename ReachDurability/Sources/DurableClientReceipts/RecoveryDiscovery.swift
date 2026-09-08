@@ -7,6 +7,7 @@ public struct RecoveredClient {
 extension DurableClientReceipts {
     func recoveryBinding(_ binding: RecoveryBinding) throws {
         try fs.ensure(); try environment.validate(clock); try binding.validate()
+        guard (environment.authorityMode == .independent) == binding.independent, binding.pair == environment.pairDigest else { throw RecoveryError.invalid }
         guard crEqual(binding.clientRoot,environment.rootID), crEqual(binding.boot,environment.boot),
               crEqual(binding.clientPolicy,environment.policy) else { throw RecoveryError.invalid }
     }
@@ -15,7 +16,7 @@ extension DurableClientReceipts {
         guard auth.allowed, frozen == nil || frozen == bytes else { throw RecoveryError.unauthorized }; return bytes
     }
     func recoveryTime(_ live: LiveClientRecord, _ m: ClientManifest) throws {
-        let now=try observe(m); guard now>=live.issued, now<live.expires else { throw RecoveryError.expired }
+        let now=try observe(m); guard now>=live.localIssued, now<live.localExpires else { throw RecoveryError.expired }
     }
     func recoveryManifest(_ auth: ClientAuthorization, frozen: Data, hook: RecoveryHook) throws -> ClientManifest {
         let m=try readManifest(); guard m.ownerEpoch==ownerEpoch else { throw RecoveryError.stale }
@@ -27,7 +28,7 @@ extension DurableClientReceipts {
         try hook(.beforeSnapshot); _=try recoveryCaller(auth,frozen:frozen); try recoveryTime(live,m)
         let s=try snapshot(r) // Never called for expired or cleanup-only records.
         try hook(.afterSnapshot); _=try recoveryCaller(auth,frozen:frozen); try recoveryTime(live,m)
-        let a=try ClientAuthority(JSONDecoder().decode(ClientContext.self,from:s.context))
+        let a=try ClientAuthority(JSONDecoder().decode(ClientContext.self,from:s.context), retention: live.retention)
         guard a.bytes==s.context, crEqual(a.context.host,binding.host), crEqual(a.context.store,binding.host),
               a.context.revision=="s84-host-client-v1" else { throw RecoveryError.invalid }
         return (a,s)
@@ -42,11 +43,11 @@ extension DurableClientReceipts {
         var result:[RecoverySummary]=[], published:[LiveClientRecord]=[]
         for r in m.records {
             guard let live=r.live else { continue }
-            let now=try observe(m); if now<live.issued || now>=live.expires { continue }
+            let now=try observe(m); if now<live.localIssued || now>=live.localExpires { continue }
             let (a,s)=try recoveryAuthority(r,m,binding:binding,auth:auth,frozen:frozen,hook:hook)
             guard try crEncode(a.context.caller)==frozen else { continue }
             result.append(.init(record:r.id,contextDigest:live.contextDigest,ownerEpoch:ownerEpoch,snapshotRevision:live.snapshot.revision,
-                issued:live.issued,expires:live.expires,high:s.high,terminal:s.terminal,calls:s.calls.count)); published.append(live)
+                issued:live.localIssued,expires:live.localExpires,high:s.high,terminal:s.terminal,calls:s.calls.count)); published.append(live)
         }
         guard result.count<=RecoveryLimits.records else { throw RecoveryError.full }
         _=try RecoveryCodec.encode(result,maximum:RecoveryLimits.summaries)
@@ -58,7 +59,7 @@ extension DurableClientReceipts {
         let m=try recoveryManifest(auth,frozen:frozen,hook:hook)
         guard selection.ownerEpoch==ownerEpoch, let r=m.records.first(where:{$0.id==selection.record}), let live=r.live,
               selection.contextDigest==live.contextDigest, selection.snapshotRevision==live.snapshot.revision,
-              selection.issued==live.issued, selection.expires==live.expires else { throw RecoveryError.stale }
+              selection.issued==live.localIssued, selection.expires==live.localExpires else { throw RecoveryError.stale }
         try recoveryTime(live,m)
         let (a,s)=try recoveryAuthority(r,m,binding:binding,auth:auth,frozen:frozen,hook:hook)
         guard try crEncode(a.context.caller)==frozen else { throw RecoveryError.unauthorized }

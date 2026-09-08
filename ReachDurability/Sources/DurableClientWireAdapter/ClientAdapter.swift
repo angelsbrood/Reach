@@ -10,28 +10,36 @@ import WireAdapterContract
 /// is a configuration prerequisite; decoding does not authenticate a remote peer.
 public final class DurableClientWireAdapter {
     public var configuration:AdapterConfiguration
-    public let owner:DurableClientReceipts,authorization:ClientAuthorization,core:BootstrapCore
+    public let owner:DurableClientReceipts,authorization:ClientAuthorization,core:BootstrapCore?
     public let requestPolicy:any AdapterRequestPolicy
     public var publicationHook:() throws -> Void = {}
     public private(set) var negotiation:DurableNegotiation
     public private(set) var peerReports=0,recoveryEntries=0
     private var frames=AdapterFrames(),ticket:Data?,reference:DurableGenerationReference?,authority:ClientAuthority?,handle:ClientHandle?
-    private var beginRequestBinding:String?
+    private var beginRequestBinding:String?, originalLocalAnchor:UInt64?
     private let parent:String,binding:RecoveryBinding,allowNew:Bool,frozenCaller:Data
-    public init(configuration:AdapterConfiguration,owner:DurableClientReceipts,authorization:ClientAuthorization,core:BootstrapCore,parent:String,allowNew:Bool,requestPolicy:any AdapterRequestPolicy) throws {
-        try requestPolicy.validate(configuration);self.requestPolicy=requestPolicy
-        self.configuration=configuration;self.owner=owner;self.authorization=authorization;self.core=core;self.parent=parent;self.allowNew=allowNew
-        binding=try BootstrapRecoveryBinding.make(core);frozenCaller=try AdapterContract.encode(authorization.caller)
-        negotiation=try .init(selectedDialect:configuration.dialect,modelID:configuration.model,localOptIn:configuration.optIn)
+    public convenience init(configuration:AdapterConfiguration,owner:DurableClientReceipts,authorization:ClientAuthorization,core:BootstrapCore,parent:String,allowNew:Bool,requestPolicy:any AdapterRequestPolicy) throws {
+        guard configuration.profile == DurableWire.profile, owner.authorityMode == .legacy else { throw AdapterError.incompatible }
+        try self.init(configuration:configuration,owner:owner,authorization:authorization,binding:BootstrapRecoveryBinding.make(core),parent:parent,allowNew:allowNew,requestPolicy:requestPolicy,legacyCore:core)
+    }
+    public init(configuration:AdapterConfiguration,owner:DurableClientReceipts,authorization:ClientAuthorization,binding:RecoveryBinding,parent:String,allowNew:Bool,requestPolicy:any AdapterRequestPolicy,legacyCore:BootstrapCore?=nil) throws {
+        try requestPolicy.validate(configuration); try binding.validate(); self.requestPolicy=requestPolicy
+        guard binding.independent == (owner.authorityMode == .independent),
+              configuration.profile == (binding.independent ? DurableWire.independentProfile : DurableWire.profile),
+              binding.independent ? legacyCore == nil : legacyCore != nil else { throw AdapterError.incompatible }
+        self.configuration=configuration;self.owner=owner;self.authorization=authorization;core=legacyCore;self.parent=parent;self.allowNew=allowNew
+        self.binding=binding;frozenCaller=try AdapterContract.encode(authorization.caller)
+        negotiation=try .init(selectedDialect:configuration.dialect,modelID:configuration.model,localOptIn:configuration.optIn,expectedProfile:configuration.profile)
         try gate()
     }
     private func gate() throws {
         try requestPolicy.validate(configuration)
+        guard configuration.profile == negotiation.expectedProfile else { throw AdapterError.incompatible }
         guard authorization.allowed,try AdapterContract.encode(authorization.caller)==frozenCaller else { throw AdapterError.unauthorized }
     }
     private func check(_ a:ClientAuthority,_ r:DurableGenerationReference) throws {
         try gate();_=try AdapterContract.context(a.bytes,reference:r,configuration:configuration,policy:requestPolicy)
-        try AdapterContract.require(a.context.host==core.hostID && a.context.store==core.hostID && AdapterContract.encode(a.context.caller)==frozenCaller)
+        try AdapterContract.require(a.context.host==binding.host && a.context.store==binding.host && AdapterContract.encode(a.context.caller)==frozenCaller)
     }
     private func current() throws -> (ClientAuthority,ClientHandle,DurableGenerationReference) {
         try gate();guard let authority,let handle,let reference else { throw AdapterError.unavailable }
@@ -43,7 +51,10 @@ public final class DurableClientWireAdapter {
     }
     public func open(requestID:String) throws -> Data {
         try gate();guard allowNew else { throw AdapterError.unavailable }
-        return try negotiation.send(.open(.init(.init(requestID:requestID,modelID:configuration.model,profile:configuration.profile,durable:true))))
+        guard originalLocalAnchor == nil else { throw AdapterError.unavailable }
+        let bytes = try negotiation.send(.open(.init(.init(requestID:requestID,modelID:configuration.model,profile:configuration.profile,durable:true))))
+        originalLocalAnchor = try owner.originalAnchor()
+        return bytes
     }
     public func begin(requestID:String,generation:String,operation:String,request:WireGenerationRequest) throws -> Data {
         try gate();guard allowNew,let ticket,let selected=reference?.session else { throw AdapterError.unavailable }
@@ -62,7 +73,12 @@ public final class DurableClientWireAdapter {
             case .opened(let f):
                 guard allowNew else { throw AdapterError.unavailable }
                 let p=f.payload,claims=try RecoveryTicketClaims.parse(p.ticket)
-                try AdapterContract.require(claims.incarnation==core.hostID && claims.boot==core.policy.boot && claims.policy==core.policy.hostClock && claims.namespace==p.session.sessionID && AdapterContract.encode(claims.caller)==frozenCaller)
+                try AdapterContract.require(claims.incarnation==binding.host && (binding.independent || (claims.boot==binding.boot && claims.policy==binding.hostPolicy)) && claims.namespace==p.session.sessionID && AdapterContract.encode(claims.caller)==frozenCaller)
+                if binding.independent {
+                    let prefix="role-monotonic-ns-v1:"
+                    guard RecoveryCodec.uuid(claims.boot),claims.policy.hasPrefix(prefix),RecoveryCodec.uuid(String(claims.policy.dropFirst(prefix.count))),
+                          claims.policy != binding.clientPolicy,claims.expires-claims.issued <= ClientLimits.session else { throw AdapterError.invalid }
+                }
                 ticket=p.ticket
                 reference = .init(session:p.session,generationID:"pending",operationID:"pending")
             case .accepted(let f):
@@ -73,11 +89,12 @@ public final class DurableClientWireAdapter {
                     // Correlate the complete locally sent request/configuration,
                     // not a different supported mapping selected by the reply.
                     guard let beginRequestBinding,a.context.request==beginRequestBinding else { throw AdapterError.invalid }
-                    let h=try owner.open(a,authorization:authorization)
+                    let original = try owner.originalAuthority(a.context,ticket:ticket,anchor:originalLocalAnchor)
+                    let h=try owner.open(original,authorization:authorization)
                     try owner.enrollRecovery(in:parent,binding:binding)
                     guard let selection=try owner.discover(binding:binding,authorization:authorization).first(where:{$0.contextDigest==p.contextDigest}) else { throw AdapterError.unavailable }
                     try owner.registerRecoveryTicket(ticket,selection:selection,in:parent,binding:binding,authorization:authorization)
-                    authority=a;handle=h;reference=p.reference
+                    authority=original;handle=h;reference=p.reference
                 } else {
                     guard let authority,let reference,try AdapterContract.same(reference,p.reference),authority.bytes==p.context else { throw AdapterError.invalid }
                 }
@@ -115,7 +132,7 @@ public final class DurableClientWireAdapter {
         try check(join.client.authority,r)
         var next=negotiation
         let bytes=try next.send(.recover(.init(.init(requestID:requestID,reference:r,ticket:join.ticket,context:join.client.authority.bytes,
-            contextDigest:RecoveryCodec.hash(join.client.authority.bytes),clientRoot:core.clientID,witness:AdapterContract.witness(join.witness)))))
+            contextDigest:RecoveryCodec.hash(join.client.authority.bytes),clientRoot:binding.clientRoot,witness:AdapterContract.witness(join.witness)))))
         authority=join.client.authority;handle=join.client.handle;reference=r;ticket=join.ticket
         try publishCheck();negotiation=next;recoveryEntries+=1;return bytes
     }

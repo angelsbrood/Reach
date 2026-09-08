@@ -1,4 +1,5 @@
 import Foundation
+import RecoveryContract
 import ReachWire
 import DurableClientReceipts
 import DurableClientWireAdapter
@@ -11,54 +12,62 @@ import RequestPreparationContract
 /// loader, or MLX call. Its portable descriptor comes from its own confirmation.
 final class TransportClientRuntime {
     let selection: TransportSelectionBinding, identity: TransportIdentity
-    private let acquired: AcquiredTransportRoot, owner: DurableClientReceipts, root: String, policy: RequestPolicy
-    private var adapter: DurableClientWireAdapter?, token: UUID?, closed = false
+    private let acquired: TransportResources, owner: DurableClientReceipts, root: String, policy: RequestPolicy
+    private var adapter: DurableClientWireAdapter?, token: UUID?, closed = false, established = false
     private var peers: [String] = [], connections = 0, before: [[HandoffBatch]] = []
     private(set) var accepted: DurableGenerationAcceptedPayload?, reconnects = 0
-    init(root: String) throws {
-        let acquired = try AcquiredTransportRoot(root, role: .client)
+    init(root: String, independent: Bool = false) throws {
+        let acquired = try TransportResources(root: root, role: .client, independent: independent)
         self.root = root; self.acquired = acquired; selection = acquired.selection
         policy = try RequestPolicy(descriptor: acquired.selection.descriptor)
         try acquired.audit.journal(.client)
-        let clock = SystemClientClock()
-        let owner = try DurableClientReceipts(path: root + "/bootstrap/client", create: false, environment: .init(rootID: acquired.core.clientID, clock: clock, quota: acquired.core.policy.clientQuota), metadataKey: acquired.keys.key(.clientMetadata).use { $0 }, clock: clock)
+        let clock = acquired.clientClock
+        let owner = try DurableClientReceipts(path: root + "/bootstrap/client", create: false, environment: acquired.clientEnvironment(), metadataKey: acquired.keys.key(.clientMetadata).use { $0 }, clock: clock)
         self.owner = owner
         do { identity = try TransportIdentity(root: root, selection: acquired.selection, audit: acquired.audit) }
         catch { owner.close(); throw error }
     }
+    private func requiredBinding() throws -> RecoveryContract.RecoveryBinding {
+        guard let value = acquired.recovery else { throw TransportRuntimeError.invalid }; return value
+    }
     func requireEmpty() throws {
-        guard try owner.discover(binding: BootstrapRecoveryBinding.make(acquired.core), authorization: selection.pins.clientAuthorization).isEmpty else { throw TransportRuntimeError.reserved }
+        guard try owner.discover(binding: requiredBinding(), authorization: selection.clientAuthorization).isEmpty else { throw TransportRuntimeError.reserved }
     }
     /// Presence alone is insufficient: require a fully registered, authenticated
     /// recovery join including the original encrypted ticket sidecar.
     func registered() throws -> Bool {
-        let binding = try BootstrapRecoveryBinding.make(acquired.core)
-        let selections = try owner.discover(binding: binding, authorization: selection.pins.clientAuthorization)
-        if selections.isEmpty { return false }
+        let binding = try requiredBinding()
+        let selections = try owner.discover(binding: binding, authorization: selection.clientAuthorization)
+        if selections.isEmpty {
+            if established && acquired.agreement != nil { throw TransportRuntimeError.expired }
+            return false
+        }
         guard selections.count == 1 else { throw TransportRuntimeError.invalid }
-        _ = try owner.recoverHostJoin(selections[0], in: root, binding: binding, authorization: selection.pins.clientAuthorization)
+        _ = try owner.recoverHostJoin(selections[0], in: root, binding: binding, authorization: selection.clientAuthorization)
+        established = true
         return true
     }
     func remainingAuthority() throws -> Duration {
-        let binding = try BootstrapRecoveryBinding.make(acquired.core)
-        let selections = try owner.discover(binding: binding, authorization: selection.pins.clientAuthorization)
+        let binding = try requiredBinding()
+        let selections = try owner.discover(binding: binding, authorization: selection.clientAuthorization)
+        if selections.isEmpty && established && acquired.agreement != nil { throw TransportRuntimeError.expired }
         guard selections.count == 1 else { throw TransportRuntimeError.unavailable }
-        let join = try owner.recoverHostJoin(selections[0], in: root, binding: binding, authorization: selection.pins.clientAuthorization)
-        let now = try SystemClientClock().now(), expiry = join.client.authority.context.expires
+        let join = try owner.recoverHostJoin(selections[0], in: root, binding: binding, authorization: selection.clientAuthorization)
+        let now = try acquired.clientClock.now(), expiry = join.client.authority.localExpires
         guard now < expiry else { throw TransportRuntimeError.expired }
         return .nanoseconds(Int64(clamping: expiry - now))
     }
     private func inbox() throws -> [HandoffBatch] {
-        let binding = try BootstrapRecoveryBinding.make(acquired.core)
-        let selections = try owner.discover(binding: binding, authorization: selection.pins.clientAuthorization)
+        let binding = try requiredBinding()
+        let selections = try owner.discover(binding: binding, authorization: selection.clientAuthorization)
         guard !selections.isEmpty else { return [] }
         guard selections.count == 1 else { throw TransportRuntimeError.invalid }
-        let value = try owner.resolve(selections[0], binding: binding, authorization: selection.pins.clientAuthorization)
-        return try owner.hostInbox(value.handle, authority: value.authority, authorization: selection.pins.clientAuthorization)
+        let value = try owner.resolve(selections[0], binding: binding, authorization: selection.clientAuthorization)
+        return try owner.hostInbox(value.handle, authority: value.authority, authorization: selection.clientAuthorization)
     }
     func connect(_ token: UUID, peer: String, begin: Bool) throws {
         guard !closed, self.token == nil, peer == selection.pins.hostLeaf else { throw TransportRuntimeError.peer }
-        adapter = try .init(configuration: .init(dialect: 2, model: selection.descriptor.model, optIn: true, ready: true), owner: owner, authorization: selection.pins.clientAuthorization, core: acquired.core, parent: root, allowNew: begin, requestPolicy: policy)
+        adapter = try .init(configuration: .init(dialect: 2, model: selection.descriptor.model, profile: selection.profile, optIn: true, ready: true), owner: owner, authorization: selection.clientAuthorization, binding: requiredBinding(), parent: root, allowNew: begin, requestPolicy: policy, legacyCore: acquired.legacyCore)
         self.token = token; connections += 1
         if !peers.contains(peer) { peers.append(peer) }
     }
@@ -92,19 +101,44 @@ final class TransportClientRuntime {
     func witness(_ token: UUID) throws -> HandoffWitness { try current(token).witness() }
     func disconnect(_ token: UUID) { if self.token == token { adapter = nil; self.token = nil } }
     func retried() { reconnects += 1 }
-    func report(stage: String) throws -> TransportClientReport {
+    func publishReport(stage: String, to path: String?) throws {
+        try TransportClientReportPublication.write({ try self.report(stage: stage) }, to: path,
+            independent: acquired.agreement != nil, owner: owner, root: root,
+            binding: requiredBinding(), authorization: selection.clientAuthorization, clock: acquired.clientClock)
+    }
+    private func report(stage: String) throws -> TransportClientReport {
         let batches = try inbox()
         // Read the durable witness even after discarding protocol attachment.
-        let binding = try BootstrapRecoveryBinding.make(acquired.core)
-        let selections = try owner.discover(binding: binding, authorization: selection.pins.clientAuthorization)
+        let binding = try requiredBinding()
+        let selections = try owner.discover(binding: binding, authorization: selection.clientAuthorization)
         var high: UInt64 = 0, terminal = false
+        var retention: ClientLocalRetention?
         if let selected = selections.first {
-            let value = try owner.resolve(selected, binding: binding, authorization: selection.pins.clientAuthorization)
-            let witness = try owner.hostWitness(value.handle, authority: value.authority, authorization: selection.pins.clientAuthorization)
-            high = witness.high; terminal = witness.terminal
+            let value = try owner.resolve(selected, binding: binding, authorization: selection.clientAuthorization)
+            let witness = try owner.hostWitness(value.handle, authority: value.authority, authorization: selection.clientAuthorization)
+            high = witness.high; terminal = witness.terminal; retention = value.authority.retention
         }
-        return .init(stage: stage, acquisition: acquired.audit.snapshot, peerDigests: peers, connections: connections, reconnects: reconnects, registered: (try? registered()) ?? false, high: high, terminal: terminal, inbox: batches, beforeRecovery: before, accepted: accepted)
+        return .init(retention: retention, stage: stage, acquisition: acquired.audit.snapshot, peerDigests: peers, connections: connections, reconnects: reconnects, registered: (try? registered()) ?? false, high: high, terminal: terminal, inbox: batches, beforeRecovery: before, accepted: accepted)
     }
     func close() { if !closed { owner.close(); closed = true } }
     deinit { close() }
+}
+
+/// Cached recovery/acceptance bytes are content too. Revalidate authenticated
+/// local authority after assembly and encoding, immediately before the sink.
+/// Refusal leaves earlier reports alone and publishes no new report content.
+enum TransportClientReportPublication {
+    static func write(_ assemble: () throws -> TransportClientReport, to path: String?,
+                      independent: Bool, owner: DurableClientReceipts, root: String,
+                      binding: RecoveryContract.RecoveryBinding, authorization: ClientAuthorization,
+                      clock: any ClientClock) throws {
+        try TransportContract.write(assemble(), to: path, beforePublication: {
+            guard independent else { return }
+            let selections = try owner.discover(binding: binding, authorization: authorization)
+            guard selections.count == 1 else { throw TransportRuntimeError.expired }
+            let join = try owner.recoverHostJoin(selections[0], in: root, binding: binding, authorization: authorization)
+            let now = try clock.now(), authority = join.client.authority
+            guard now >= authority.localIssued, now < authority.localExpires else { throw TransportRuntimeError.expired }
+        })
+    }
 }

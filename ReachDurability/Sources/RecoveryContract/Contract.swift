@@ -14,13 +14,21 @@ public enum RecoveryFault: String {
 public typealias RecoveryHook = (RecoveryFault) throws -> Void
 /// Constructed from authenticated S85 identity; never obtained from an envelope.
 public struct RecoveryBinding: Codable {
+    public let mode: String?, pair: String?
+    public var independent: Bool { mode == "independent-v1" }
     public let bootstrap: String, core: String, clientRoot: String, host: String, boot: String, hostPolicy: String, clientPolicy: String
     public init(bootstrap: String, core: String, clientRoot: String, host: String, boot: String, hostPolicy: String, clientPolicy: String) {
+        mode=nil; pair=nil
         self.bootstrap=bootstrap; self.core=core; self.clientRoot=clientRoot; self.host=host; self.boot=boot; self.hostPolicy=hostPolicy; self.clientPolicy=clientPolicy
     }
+    public init(bootstrap: String, core: String, clientRoot: String, host: String, localBoot: String, localPolicy: String, pair: String) {
+        self.bootstrap=bootstrap; self.core=core; self.clientRoot=clientRoot; self.host=host
+        boot=localBoot; clientPolicy=localPolicy; hostPolicy=""; mode="independent-v1"; self.pair=pair
+    }
     public func validate() throws {
-        guard [bootstrap,clientRoot,host,boot].allSatisfy(RecoveryCodec.uuid), RecoveryCodec.digest(core),
-              !hostPolicy.isEmpty, !clientPolicy.isEmpty, hostPolicy.utf8.count<=256, clientPolicy.utf8.count<=256 else { throw RecoveryError.invalid }
+        guard (mode == nil && pair == nil && !hostPolicy.isEmpty) || (independent && pair.map(RecoveryCodec.digest) == true && hostPolicy.isEmpty),
+              [bootstrap,clientRoot,host,boot].allSatisfy(RecoveryCodec.uuid), RecoveryCodec.digest(core),
+              !clientPolicy.isEmpty, hostPolicy.utf8.count<=256, clientPolicy.utf8.count<=256 else { throw RecoveryError.invalid }
     }
 }
 /// A selection from one owner/selected snapshot, not authority or a context index.

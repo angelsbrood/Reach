@@ -7,8 +7,8 @@ import ReachTransport
 public final class TransportHostEndpoint {
     private let worker = TransportHostWorker()
     public init() {}
-    public func run(root: String, report: String?, progress: Bool) async throws {
-        try await worker.open(root: root)
+    public func run(root: String, report: String?, progress: Bool, independent: Bool = false) async throws {
+        try await worker.open(root: root, independent: independent)
         do {
             let identity = try await worker.call { $0.identity }
             let listener = try BoundedQUICListener(port: identity.selection.port, parameters: identity.parameters())
@@ -25,7 +25,7 @@ public final class TransportHostEndpoint {
                             _ = try identity.requirePeer(stream)
                             let hello = try await TransportConnection.read(stream).decode(Hello.self)
                             guard hello.versions == [2], hello.client.utf8.count <= 256 else { throw TransportRuntimeError.protocolRefused }
-                            let ack = HelloAck(version: 2, cluster: TransportContract.application, models: [.init(id: TransportContract.model, displayName: "Local Llama", capabilities: ["durable"] )])
+                            let ack = HelloAck(version: 2, cluster: identity.selection.application, models: [.init(id: TransportContract.model, displayName: "Local Llama", capabilities: ["durable"] )])
                             try await TransportConnection.send(FrameCodec.encode(ack, for: 2), on: stream)
                         }
                         let peer = try identity.requirePeer(stream)
@@ -87,8 +87,8 @@ public final class TransportHostEndpoint {
             await worker.close(); throw error
         }
     }
-    public func cancelLocal(root: String, report: String?) async throws {
-        try await worker.open(root: root)
+    public func cancelLocal(root: String, report: String?, independent: Bool = false) async throws {
+        try await worker.open(root: root, independent: independent)
         do {
             let state = try await worker.call { runtime in try runtime.cancelLocal(); return runtime.report(stage: "cancelled") }
             try TransportContract.write(state, to: report); await worker.close()

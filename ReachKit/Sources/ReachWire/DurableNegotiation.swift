@@ -69,6 +69,7 @@ public struct DurableNegotiation: Sendable {
     public enum Phase: Sendable, Equatable { case volatile, declared, opening, selected, beginning, recovering, accepted, refused }
     public let selectedDialect: UInt8
     public let modelID: String
+    public let expectedProfile: String
     public let localOptIn: Bool
     public private(set) var phase: Phase = .volatile
     public private(set) var refusal: DurableRefusalReason?
@@ -94,8 +95,10 @@ public struct DurableNegotiation: Sendable {
         var originalTicket: Data?
     }
 
-    public init(selectedDialect: UInt8 = Wire.baselineVersion, modelID: String, localOptIn: Bool = false) throws {
+    public init(selectedDialect: UInt8 = Wire.baselineVersion, modelID: String, localOptIn: Bool = false, expectedProfile: String = DurableWire.profile) throws {
         try DurableWire.identifier(modelID)
+        guard [DurableWire.profile, DurableWire.independentProfile].contains(expectedProfile) else { throw DurableWireError.incompatible }
+        self.expectedProfile = expectedProfile
         self.selectedDialect = selectedDialect
         self.modelID = modelID
         self.localOptIn = localOptIn
@@ -149,14 +152,14 @@ public struct DurableNegotiation: Sendable {
         case .open(let frame):
             guard !incoming, session == nil, opening == nil, pending == nil else { throw DurableWireError.correlation }
             guard localOptIn else { throw DurableWireError.localOptOut }
-            guard DurableWire.exact(frame.payload.modelID, modelID), frame.payload.profile == DurableWire.profile else { throw DurableWireError.incompatible }
-            guard profiles?.contains(DurableWire.profile) == true else { throw DurableWireError.unavailable }
+            guard DurableWire.exact(frame.payload.modelID, modelID), frame.payload.profile == expectedProfile else { throw DurableWireError.incompatible }
+            guard profiles?.contains(expectedProfile) == true else { throw DurableWireError.unavailable }
             opening = frame.payload
             phase = .opening
         case .opened(let frame):
             let p = frame.payload
             guard incoming, localOptIn, phase == .opening, let opening,
-                  profiles?.contains(DurableWire.profile) == true,
+                  profiles?.contains(expectedProfile) == true,
                   DurableWire.exact(p.requestID, opening.requestID),
                   DurableWire.exact(p.session.modelID, opening.modelID),
                   DurableWire.exact(p.session.profile, opening.profile) else { throw DurableWireError.correlation }
@@ -174,8 +177,8 @@ public struct DurableNegotiation: Sendable {
                 // Selected disk state supplies original credentials. This is only
                 // a pending request; no replacement open or synthetic acceptance.
                 guard localOptIn else { throw DurableWireError.localOptOut }
-                guard DurableWire.exact(p.reference.session.modelID, modelID), p.reference.session.profile == DurableWire.profile else { throw DurableWireError.incompatible }
-                guard profiles?.contains(DurableWire.profile) == true else { throw DurableWireError.unavailable }
+                guard DurableWire.exact(p.reference.session.modelID, modelID), p.reference.session.profile == expectedProfile else { throw DurableWireError.incompatible }
+                guard profiles?.contains(expectedProfile) == true else { throw DurableWireError.unavailable }
             } else { try requireSelection(p.reference, ticket: p.ticket) }
             if let generation {
                 try requireGeneration(p.reference, context: p.contextDigest)

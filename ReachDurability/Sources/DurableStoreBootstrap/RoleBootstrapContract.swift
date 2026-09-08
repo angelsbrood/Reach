@@ -1,0 +1,45 @@
+import Foundation
+import DurableRootKeys
+
+/// One local transaction and exactly its own key selectors. No paired S85 core.
+public struct RoleBootstrapCore: Codable, Equatable {
+    public let version: Int, role: BootstrapRole
+    public let identifier: String, localID: String, root: String, container: String
+    public let agreement: String, selection: String, boot: String, epoch: String
+    public let origin: UInt64, quota: Int
+    public let keys: [RootKeyReference]
+    public var policy: String { "role-monotonic-ns-v1:" + epoch }
+    public init(role: BootstrapRole, localID: String, root: String, agreement: String, selection: String,
+                origin: UInt64, epoch: String, boot: String, quota: Int) {
+        version=1; self.role=role; self.localID=localID; self.root=root
+        let id=UUID().uuidString.lowercased(); identifier=id; container=root+"/keys/role.keychain-db"
+        self.agreement=agreement; self.selection=selection; self.origin=origin
+        self.epoch=epoch; self.boot=boot; self.quota=quota
+        keys=(role == .host ? [RootKeyRole.hostCatalog,.hostTicket] : [.clientMetadata]).map { .init(bootstrap:id,role:$0) }
+    }
+    public func validate(role: BootstrapRole, root: String) throws {
+        try RootKeyCodec.require(version==1 && self.role==role && self.root==root && container==root+"/keys/role.keychain-db" &&
+            [identifier,localID,boot,epoch].allSatisfy(RootKeyCodec.uuid) && identifier != localID && origin>0 &&
+            RootKeyCodec.digest(agreement) && RootKeyCodec.digest(selection) && boot==RootKeyCodec.boot() &&
+            (BootstrapLimits.minimumQuota...(1<<30)).contains(quota))
+        try RootKeyCodec.directory(root); _=try RootKeyCodec.parent(container)
+        let roles: [RootKeyRole] = role == .host ? [.hostCatalog,.hostTicket] : [.clientMetadata]
+        try RootKeyCodec.require(keys.map(\.role)==roles && Set(keys.map(\.identifier)).count==roles.count)
+        for reference in keys { try reference.validate(); try RootKeyCodec.require(reference.bootstrap==identifier) }
+        _=try RootKeyCodec.encode(self,limit:BootstrapLimits.record)
+    }
+    public func binding() throws -> String { RootKeyCodec.hash(Data("S95/role-bootstrap/v1\0".utf8)+Data(try RootKeyCodec.encode(self,limit:BootstrapLimits.record))) }
+    public func reference(_ role: RootKeyRole) throws -> RootKeyReference {
+        guard let key=keys.first(where:{$0.role==role}) else { throw BootstrapError.invalid }; return key
+    }
+}
+public struct RoleBootstrapReady: Codable {
+    public let state: String, core: RoleBootstrapCore, confirmations: [Data]
+    func validate(role: BootstrapRole, root: String) throws {
+        try core.validate(role:role,root:root)
+        try RootKeyCodec.require(state=="ready" && confirmations.count==core.keys.count && confirmations.allSatisfy{$0.count==32})
+    }
+}
+public struct RoleBootstrapAcquisition {
+    public let ready: RoleBootstrapReady, keys: BootstrapKeys, journal: String
+}

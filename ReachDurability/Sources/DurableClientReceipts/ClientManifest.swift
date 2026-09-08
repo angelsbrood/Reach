@@ -12,6 +12,7 @@ struct LiveClientRecord: Codable {
     var key: Data
     var snapshot: SnapshotReference
     var calls: Int, futureBytes: Int
+    var retention: ClientLocalRetention? = nil
 }
 struct ClientRecord: Codable {
     var id: String
@@ -24,7 +25,7 @@ struct ClientManifest: Codable {
     var revision: UInt64, ownerEpoch: UInt64, observed: UInt64
     var records: [ClientRecord] = []
     func validate(_ e: ClientEnvironment) throws {
-        guard version == 1, crEqual(root, e.rootID), crEqual(boot, e.boot), crEqual(policy, e.policy),
+        guard version == (e.authorityMode == .legacy ? 1 : 2), crEqual(root, e.rootID), crEqual(boot, e.boot), crEqual(policy, e.policy),
               revision > 0, ownerEpoch > 0, observed > 0, records.count <= ClientLimits.records else { throw ClientError.unavailable }
         var ids = Set<String>(), identities = Set<String>(), roles = Set<String>(), calls = 0
         var anchors: [String: String] = [:]
@@ -32,6 +33,7 @@ struct ClientManifest: Codable {
             guard crUUID(r.id), ids.insert(r.id).inserted, (r.live != nil) != (r.cleanup != nil) else { throw ClientError.unavailable }
             let ref: SnapshotReference
             if let live = r.live {
+                try e.check(live.retention)
                 guard [live.identity, live.namespace, live.anchor, live.contextDigest].allSatisfy(crDigest),
                       identities.insert(live.identity).inserted, live.key.count == 32,
                       live.issued > 0, live.expires > live.issued, live.expires <= (try crAdd(live.issued, ClientLimits.session)),
@@ -69,7 +71,7 @@ struct ClientSnapshot: Codable {
               batches.count <= 4095, calls.count == live.calls, high <= 65536,
               receiptRevision <= live.snapshot.revision, calls.count <= 32 else { throw ClientError.unavailable }
         let decoded = try JSONDecoder().decode(ClientContext.self, from: context)
-        let authority = try ClientAuthority(decoded)
+        let authority = try ClientAuthority(decoded, retention: live.retention)
         guard authority.bytes == context, authority.identity == live.identity, authority.anchor == live.anchor,
               authority.namespace == live.namespace, decoded.issued == live.issued, decoded.expires == live.expires else { throw ClientError.unavailable }
         var rebuilt = ClientSnapshot(context: context)
@@ -117,7 +119,7 @@ extension DurableClientReceipts {
         // Expired content is never publishable. Its missing/corrupt bytes must not
         // prevent a later maintenance transaction from pruning identity and key.
         let required = Set(m.records.compactMap { r in
-            r.live.flatMap { observed < $0.expires ? $0.snapshot.name : nil }
+            r.live.flatMap { observed < $0.localExpires ? $0.snapshot.name : nil }
         })
         guard required.isSubset(of: Set(names)) else { throw ClientError.unavailable }
         var orphans: [String] = []
@@ -130,7 +132,7 @@ extension DurableClientReceipts {
                 orphans.append(name)
             } else {
                 let selected = m.records.first { ($0.live?.snapshot.name ?? $0.cleanup?.name) == name }
-                if let selected, selected.live == nil || observed >= selected.live!.expires {
+                if let selected, selected.live == nil || observed >= selected.live!.localExpires {
                     // Still a validated owned regular role. Authentication remains mandatory
                     // before deletion, which occurs only after keyless retirement is selected.
                     continue
@@ -154,6 +156,9 @@ extension DurableClientReceipts {
     }
     func snapshot(_ record: ClientRecord) throws -> ClientSnapshot {
         guard let live = record.live else { throw ClientError.expired }
+        try environment.check(live.retention)
+        let now = try clock.now()
+        guard now >= observed, now >= live.localIssued, now < live.localExpires else { throw ClientError.expired }
         let data = try fs.read(live.snapshot.name)
         guard data.count == live.snapshot.length, crHash(data) == live.snapshot.digest else { throw ClientError.unavailable }
         let (plain, f) = try ClientCrypto.open(data, role: "snapshot", environment: environment, key: SymmetricKey(data: live.key), rootKey: rootKey)

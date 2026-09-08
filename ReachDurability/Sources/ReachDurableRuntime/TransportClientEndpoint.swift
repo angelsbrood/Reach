@@ -5,7 +5,7 @@ import ReachTransport
 
 public final class TransportClientEndpoint {
     private let runtime: TransportClientRuntime
-    public init(root: String) throws { runtime = try TransportClientRuntime(root: root) }
+    public init(root: String, independent: Bool = false) throws { runtime = try TransportClientRuntime(root: root, independent: independent) }
     public func run(requestPath: String?, report: String?, progress: Bool) async throws {
         do {
             let request = try requestPath.map { try LocalDurableRuntime.request(from: $0) }
@@ -33,9 +33,9 @@ public final class TransportClientEndpoint {
                     let handshakeRemaining = allowance - attemptStarted.duration(to: clock.now)
                     guard handshakeRemaining > .zero else { throw BoundedTransportError.timeout }
                     let caps = try await TransportConnection.deadline(handshakeRemaining) {
-                        try await TransportConnection.send(FrameCodec.encode(Hello(versions: [2], client: TransportContract.application), for: 2), on: connection)
+                        try await TransportConnection.send(FrameCodec.encode(Hello(versions: [2], client: identity.selection.application), for: 2), on: connection)
                         let ack = try await TransportConnection.read(connection).decode(HelloAck.self)
-                        guard ack.version == 2, ack.cluster == TransportContract.application,
+                        guard ack.version == 2, ack.cluster == identity.selection.application,
                               ack.models.map(\.id) == [TransportContract.model], ack.addrs == nil, ack.port == nil, ack.roads == nil, ack.relayRoads == nil else { throw TransportRuntimeError.protocolRefused }
                         return try await TransportConnection.read(connection)
                     }
@@ -73,7 +73,7 @@ public final class TransportClientEndpoint {
                         try TransportConnection.progress(.init(role: "client", stage: "receipt-accepted", high: witness.high), enabled: progress)
                     }
                     await connection.cancelAndWait(); runtime.disconnect(token)
-                    try TransportContract.write(runtime.report(stage: "settled"), to: report)
+                    try runtime.publishReport(stage: "settled", to: report)
                     runtime.close(); return
                 } catch {
                     let detectedLoss = clock.now
@@ -97,12 +97,13 @@ public final class TransportClientEndpoint {
         } catch {
             let stage: String
             switch error {
+            case TransportRuntimeError.expired: stage = "local-expired"
             case TransportRuntimeError.unknownLost: stage = "unknown-lost"
             case TransportRuntimeError.reconnectExhausted: stage = "reconnect-exhausted"
             case is CancellationError: stage = "stopped"
             default: stage = "error"
             }
-            if let state = try? runtime.report(stage: stage) { try? TransportContract.write(state, to: report) }
+            try? runtime.publishReport(stage: stage, to: report)
             runtime.close(); throw error
         }
     }

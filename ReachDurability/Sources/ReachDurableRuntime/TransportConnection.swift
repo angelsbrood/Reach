@@ -42,8 +42,8 @@ enum TransportConnection {
 final class TransportHostWorker {
     private let queue = DispatchQueue(label: "reach.durable-transport.native")
     private var runtime: TransportHostRuntime?
-    func open(root: String) async throws {
-        try await perform { self.runtime = try TransportHostRuntime(root: root) }
+    func open(root: String, independent: Bool = false) async throws {
+        try await perform { self.runtime = try TransportHostRuntime(root: root, independent: independent) }
     }
     private func perform<T>(_ body: @escaping () throws -> T) async throws -> T {
         try await withCheckedThrowingContinuation { continuation in
