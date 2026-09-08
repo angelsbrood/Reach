@@ -58,6 +58,9 @@ public final class RequestPreparation {
                 tokenizerIdentity:d.tokenizerIdentity,eosTokenID:tokenizer.eosTokenId!,unknownTokenID:tokenizer.unknownTokenId,
                 fastForward:true,options:native.guidedOptions(maximum:resolved.maximum))
             binding = .init(operationID:reference.operationID,requestID:requestID,lane:.required(required,tokens:tokens))
+        } else if route=="allowed" {
+            let tools=try request.tools.map { RequiredToolDefinition(name:$0.name,schemaJSON:String(decoding:try PreparationEncoding.encode(PreparationEncoding.schemaValue($0.portableParameters)),as:UTF8.self)) }
+            binding = .init(operationID:reference.operationID,requestID:requestID,lane:.allowed(try allowed(requestID:requestID,operation:reference.operationID,tokens:tokens,tools:tools,maximum:resolved.maximum)))
         } else {
             guard let schema=request.portableSchema else { throw PreparationError.unsupported }
             let source=String(decoding:try PreparationEncoding.encode(PreparationEncoding.schemaValue(schema)),as:UTF8.self)
@@ -67,6 +70,18 @@ public final class RequestPreparation {
                 specification:specification,options:native.guidedOptions(maximum:resolved.maximum),entryID:ids.0,segmentID:ids.1)))
         }
         try validateStored(binding,configuration:configuration);return binding
+    }
+    private func allowed(requestID:String,operation:String,tokens:[Int],tools:[RequiredToolDefinition],maximum:Int) throws -> AllowedToolBinding {
+        let d=policy.descriptor
+        let entry="entry-" + (try PreparationEncoding.digest(["s91-entry-v1",requestID,operation]))
+        let namespace=String(try PreparationEncoding.digest(["s91-parser-namespace-v1",requestID,operation]).prefix(32))
+        let model=AllowedModelBinding(identity:try identity(tokens),cacheSpecs:native.caches,codecIdentity:native.codec)
+        let tokenizerSpec=ResumableGrammarSpecification(jsonSchema:"{}",vocabulary:d.vocabulary,vocabularyType:.byteFallback,
+            tokenizerIdentity:try d.tokenizerIdentity,eosTokenID:tokenizer.eosTokenId!,unknownTokenID:tokenizer.unknownTokenId,fastForward:true)
+        return try .init(requestIdentity:requestID,entryID:entry,namespace:namespace,tools:tools,responseSchema:nil,originalTokens:tokens,
+            probeModel:model,guidedModel:model,
+            probeOptions:.init(vocabularySize:d.vocabulary.count,maximumTokens:maximum,prefillStepSize:native.prefill,temperature:0,topP:1,topK:0,seed:0),
+            textOptions:native.text,format:.json,tokenizer:tokenizerSpec,guidedOptions:native.guidedOptions(maximum:maximum))
     }
     private func stableIDs(_ request:String,operation:String) throws -> (String,String) {
         let suffix=try PreparationEncoding.digest([request,operation]);return ("entry-"+suffix,"segment-call-"+suffix)
@@ -94,7 +109,7 @@ public final class RequestPreparation {
                 temperature:b.options.temperature,topP:b.options.topP,topK:b.options.topK,seed:b.options.seed)
             guard b.options==expected,b.options.temperature==0 || b.options.topP>0 else { throw PreparationError.identity }
         case .guided(let b):
-            guard d.revision==RequestPreparationContract.ModelDescriptor.schemaRevision,(0...512).contains(b.options.model.maximumTokens) else { throw PreparationError.identity }
+            guard [RequestPreparationContract.ModelDescriptor.schemaRevision,RequestPreparationContract.ModelDescriptor.allowedRevision].contains(d.revision),(0...512).contains(b.options.model.maximumTokens) else { throw PreparationError.identity }
             try checkTokens(b.tokens)
             let source=try RequestBounds.canonicalStoredSchema(b.specification.source)
             let specification=ResumableGrammarSpecification(jsonSchema:source,vocabulary:d.vocabulary,vocabularyType:.byteFallback,
@@ -110,7 +125,12 @@ public final class RequestPreparation {
                 tokenizerIdentity:d.tokenizerIdentity,eosTokenID:tokenizer.eosTokenId!,unknownTokenID:tokenizer.unknownTokenId,
                 fastForward:true,options:native.guidedOptions(maximum:b.options.model.maximumTokens))
             guard try PreparationEncoding.encode(b)==PreparationEncoding.encode(expected) else { throw PreparationError.identity }
-        default:throw PreparationError.unsupported
+        case .allowed(let b):
+            guard d.revision==RequestPreparationContract.ModelDescriptor.allowedRevision,(0...512).contains(b.probeOptions.maximumTokens) else { throw PreparationError.identity }
+            try checkTokens(b.originalTokens)
+            try RequestBounds.validateStoredTools(names:b.tools.map(\.name),schemas:b.tools.map(\.schemaJSON))
+            let expected=try allowed(requestID:binding.requestID,operation:binding.operationID,tokens:b.originalTokens,tools:b.tools,maximum:b.probeOptions.maximumTokens)
+            guard try PreparationEncoding.encode(b)==PreparationEncoding.encode(expected) else { throw PreparationError.identity }
         }
     }
 }

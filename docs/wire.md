@@ -824,3 +824,21 @@ insufficient budget and cancellation do not invent success usage. The additive
 `Tools/DurableSchemaPreparation` harness proves actual tiny-Llama selected-disk
 continuation with a visible checkpoint prefix and zero fresh request preparation.
 Wire layouts, shipping offers [1,0] and default opt-in/readiness are unchanged.
+
+S91 adds owner-selected `s91-public-chat-allowed-v1` on the same local preparer.
+With 1...8 unique offered tools, nil/allowed tool mode uses the existing allowed
+coordinator; required remains required and disallowed refuses. Tools plus response
+schema and context/reasoning controls remain excluded. Actual template tokens and
+canonical tool schemas, fixed JSON parser, deterministic entry/parser IDs and one
+selected model/cache/codec for both passes form the persisted allowed declaration.
+Selected validation runs before attach/acceptance; no raw request is reconstructed
+on recovery. Maximum 0...512/default512 applies independently to probe and guided
+passes, with nil/greedy sampling and nil/zero temperature; final usage sums passes.
+Repair-history/grammar encodes and later new-pass factories/prefills are legitimate
+recovery work, distinct from original request preparation. Empty zero-budget prose
+may complete with usage, while guided exhaustion remains non-success. Existing
+undeclared-name refusal, ordered settled calls, cancellation and final-ready-wins
+semantics remain; no tools execute here. S89/S90 revisions/defaults and all shipping
+wire layouts/offers/readiness remain unchanged. The additive offline harness proves
+Llama prose continuation and separately bound structural two-call integration;
+it does not claim newly executed Llama-guided tool selection or production adoption.

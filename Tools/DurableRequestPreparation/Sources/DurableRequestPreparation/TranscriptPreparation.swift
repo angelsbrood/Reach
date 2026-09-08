@@ -4,6 +4,7 @@ import MLXLMCommon
 import RequestPreparationContract
 
 public enum TranscriptPreparation {
+    // The selected revision changes admission; optional tools use this same mapping.
     public static func input(_ request:WireGenerationRequest,revision:String=RequestPreparationContract.ModelDescriptor.legacyRevision) throws -> UserInput {
         try RequestBounds.check(request,revision:revision)
         var chat:[Chat.Message]=[],pending:[String:String]=[:],seen=Set<String>()

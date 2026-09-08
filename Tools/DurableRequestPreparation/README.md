@@ -106,3 +106,25 @@ Compiler compatibility is checked by the existing native prepare/restore path,
 not portable admission or `assess`: it may fail after accepted begin and model
 factory evaluation but before prefill. See `../DurableSchemaPreparation/README.md`
 for the focused offline native continuation harness and its literal reuse scope.
+
+## Explicit allowed-tool revision (S91)
+
+`ModelDescriptor.allowedRevision` selects `s91-public-chat-allowed-v1` on the same
+preparer. With 1...8 unique offered tools, nil/allowed tool mode selects allowed;
+required stays required and disallowed refuses. No offered-tools/response-schema
+combination or context/reasoning controls are admitted. No-tool ordinary/guided
+rules and both old revisions retain their behavior and encoded identities.
+
+Actual text and tool definitions use the existing template and throwing shared
+bounds. The resulting AllowedToolBinding uses fixed `ToolCallFormat.json`, a
+placeholder `{}` tokenizer specification, same selected model/cache/codec for
+both passes, and domain-separated deterministic entry/parser IDs. Stored validation
+reconstructs the canonical selected declaration before attach/acceptance.
+Allowed sampling is nil/greedy, temperature nil/zero and maximum 0...512/default512
+for each pass independently. Total usage may exceed this per-pass maximum.
+
+Fresh recovery does not re-prepare the original request. Existing repair-history
+re-encodes and grammar encodes, and later new-pass factories/prefills, are separately
+observed legitimate work. `../DurableAllowedToolPreparation/README.md` describes
+the real Llama prose proof and distinct structural tool-path proof. No mixed-model
+product selection, new parser format, production loading or tool execution.
