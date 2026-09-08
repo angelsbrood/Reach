@@ -12,7 +12,7 @@ import RequestPreparationContract
 /// or selects a script/case to produce model output.
 enum ArtifactFixtures {
     static func base() throws -> String {
-        guard let path=ProcessInfo.processInfo.environment["S93_TEST_ROOT"],(path.hasPrefix("/private/tmp/reach-s93.") || path.hasPrefix("/private/tmp/reach-s94.") || path.hasPrefix("/private/tmp/reach-s95.")),path.hasSuffix("/fixtures") else { throw LocalRuntimeError.invalid }
+        guard let path=ProcessInfo.processInfo.environment["S93_TEST_ROOT"],(path.hasPrefix("/private/tmp/reach-s93.") || path.hasPrefix("/private/tmp/reach-s94.") || path.hasPrefix("/private/tmp/reach-s95.") || path.hasPrefix("/private/tmp/reach-s96.")),path.hasSuffix("/fixtures") else { throw LocalRuntimeError.invalid }
         try LocalFiles.directory(path);return path
     }
     static func encode<T:Encodable>(_ value:T) throws -> Data { let e=JSONEncoder();e.outputFormatting=[.sortedKeys,.withoutEscapingSlashes];return try e.encode(value) }

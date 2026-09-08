@@ -78,6 +78,12 @@ public struct KeychainMetadata: Equatable {
         return try .init(defaultPath: path, search: values.map(OwnedFileKeychain.path))
     }
     public func preserves(_ before: Self, owned: Set<String>) -> Bool { defaultPath == before.defaultPath && search.filter { !owned.contains($0) } == before.search }
+    /// Fresh retirement compares unrelated metadata at that operation, including
+    /// when the selected owned container is already in the current search list.
+    public func preservesUnrelated(_ before: Self, owned: Set<String>) -> Bool {
+        defaultPath == before.defaultPath && !owned.contains(defaultPath) &&
+            search.filter { !owned.contains($0) } == before.search.filter { !owned.contains($0) }
+    }
     public func excludes(_ owned: Set<String>) -> Bool { !search.contains { owned.contains($0) } && !owned.contains(defaultPath) }
 }
 private struct ProtectedRootRecord: Codable {

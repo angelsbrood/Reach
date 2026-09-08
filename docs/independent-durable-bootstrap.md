@@ -6,6 +6,10 @@ It uses dialect 2, ALPN `reach/0`, and profile `reach-durable-independent-v1`.
 Normal daemon and SDK offers remain `[1,0]`; `durable-transport` retains its
 original paired bootstrap and profile.
 
+For finite initialization and fresh-process explicit retirement, select the
+[durable role lifecycle](durable-role-lifecycle.md). The examples below retain
+the original foreground creator mode and version 1 roots.
+
 ## Provision and initialize
 
 The operator supplies the selected artifact directory, request, and a public
@@ -111,7 +115,7 @@ Stop and join workers first. Optional host-local cancellation is:
 reachd durable-independent cancel --root /private/owned/host-root
 ```
 
-Then signal the original client initializer and await `retired`, followed by the
+For roots initialized without `--finish`, signal the original client initializer and await `retired`, followed by the
 original host initializer. Reverse creation order preserves the scoped Keychain
 metadata checks. Each creator reacquires only its own journal before deleting its
 own container/root. A `cleanup-blocked` creator remains available for correction;

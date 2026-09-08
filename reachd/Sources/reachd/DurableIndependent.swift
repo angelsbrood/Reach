@@ -4,7 +4,7 @@ import Darwin
 import ReachDurableRuntime
 
 struct DurableIndependent: AsyncParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "durable-independent", abstract: "Independently initialized durable roles on pinned 127.0.0.1 mTLS QUIC.", subcommands: [Provision.self, Initialize.self, Host.self, Begin.self, Recover.self, Cancel.self])
+    static let configuration = CommandConfiguration(commandName: "durable-independent", abstract: "Independently initialized durable roles on pinned 127.0.0.1 mTLS QUIC.", subcommands: [Provision.self, Initialize.self, Host.self, Begin.self, Recover.self, Cancel.self, Retire.self])
     struct Provision: AsyncParsableCommand {
         static let configuration = CommandConfiguration(abstract: "Prepare public pair agreement and separate private TLS leaves; remove this staging before serving.")
         @Option(name: .long) var publicModel: String
@@ -19,23 +19,28 @@ struct DurableIndependent: AsyncParsableCommand {
         }
     }
     struct Initialize: AsyncParsableCommand {
-        static let configuration = CommandConfiguration(commandName: "init", abstract: "Initialize only this role; retain its original cleanup capability in the foreground.")
+        static let configuration = CommandConfiguration(commandName: "init", abstract: "Initialize this role; explicitly finish with a durable ownership receipt or retain foreground cleanup.")
         @Option(name: .long) var root: String
         @Option(name: .long) var role: String
         @Option(name: .long) var provisioned: String
         @Option(name: .long) var model: String?
+        @Flag(name: .long) var finish = false
+        @Option(name: .long) var ownerReceipt: String?
         func run() async throws {
             guard let selected = TransportRole(rawValue: role), (selected == .host) == (model != nil) else { throw ValidationError("Host requires a model; client accepts no model.") }
-            let stop = IndependentStop()
+            guard finish == (ownerReceipt != nil) else { throw ValidationError("--finish and --owner-receipt must be selected together.") }
+            let stop = finish ? nil : IndependentStop()
             do {
                 let owner: IndependentRootOwner
                 if selected == .host {
-                    owner = try LocalDurableRuntime.withCPU { try IndependentRootOwner(root: root, role: selected, provisioned: provisioned, modelSource: model) }
-                } else { owner = try IndependentRootOwner(root: root, role: selected, provisioned: provisioned) }
-                struct Ready: Encodable { let stage = "ready"; let role: String, epoch: String, boot: String; let origin: UInt64; let backupExcluded: Bool }
+                    owner = try LocalDurableRuntime.withCPU { try IndependentRootOwner(root: root, role: selected, provisioned: provisioned, modelSource: model, ownerReceipt: ownerReceipt) }
+                } else { owner = try IndependentRootOwner(root: root, role: selected, provisioned: provisioned, ownerReceipt: ownerReceipt) }
+                struct Ready: Encodable { let stage = "ready"; let role: String, epoch: String, boot: String; let origin: UInt64; let backupExcluded: Bool; let ownerReceiptDigest: String? }
                 let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-                let bytes = try encoder.encode(Ready(role: role, epoch: owner.ready.core.epoch, boot: owner.ready.core.boot, origin: owner.ready.core.origin, backupExcluded: owner.backupExcluded))
+                let bytes = try encoder.encode(Ready(role: role, epoch: owner.ready.core.epoch, boot: owner.ready.core.boot, origin: owner.ready.core.origin, backupExcluded: owner.backupExcluded, ownerReceiptDigest: owner.ownershipReceiptDigest))
                 try FileHandle.standardOutput.write(contentsOf: bytes + Data([10]))
+                if finish { return }
+                guard let stop else { throw ExitCode.failure }
                 for await _ in stop.signals {
                     do { try owner.retire(); print("{\"stage\":\"retired\"}"); fflush(stdout); return }
                     catch { independentDiagnostic(error); print("{\"stage\":\"cleanup-blocked\"}"); fflush(stdout) }
@@ -72,6 +77,24 @@ struct DurableIndependent: AsyncParsableCommand {
         func run() async throws {
             let root = root, report = report, progress = progress
             try await independentRun { try await TransportClientEndpoint(root: root, independent: true).run(requestPath: nil, report: report, progress: progress) }
+        }
+    }
+    struct Retire: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(abstract: "Retire one stopped role using its original ownership receipt and retained expected digest.")
+        @Option(name: .long) var ownerReceipt: String
+        @Option(name: .long) var expectedDigest: String
+        @Flag(name: .long) var progress = false
+        func run() async throws {
+            do {
+                let result = try IndependentRoleLifecycle.retire(receipt: ownerReceipt, expectedDigest: expectedDigest) { boundary in
+                    if progress {
+                        let stage = boundary == .authorized ? "retiring" : "keychain-deleted"
+                        print("{\"stage\":\"" + stage + "\"}"); fflush(stdout)
+                    }
+                }
+                let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+                try FileHandle.standardOutput.write(contentsOf: encoder.encode(result) + Data([10]))
+            } catch { independentDiagnostic(error); throw ExitCode.failure }
         }
     }
     struct Cancel: AsyncParsableCommand {

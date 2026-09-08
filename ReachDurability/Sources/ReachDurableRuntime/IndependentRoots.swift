@@ -10,9 +10,10 @@ import RequestPreparationContract
 public final class IndependentRootOwner {
     public let root: String, role: TransportRole, backupExcluded: Bool
     public let ready: RoleBootstrapReady
+    public let ownershipReceiptDigest: String?
     private let container: OwnedFileKeychain, keys: BootstrapKeys, metadata: KeychainMetadata, inode: UInt64
     private var retired=false, containerDeleted=false
-    public init(root: String, role: TransportRole, provisioned: String, modelSource: String? = nil) throws {
+    public init(root: String, role: TransportRole, provisioned: String, modelSource: String? = nil, ownerReceipt: String? = nil) throws {
         try TransportContract.currentUser()
         guard (role == .host) == (modelSource != nil) else { throw TransportRuntimeError.invalid }
         let executable=try LocalFiles.executable(), agreement=try IndependentPairAgreement.load(provisioned+"/agreement.json")
@@ -20,6 +21,7 @@ public final class IndependentRootOwner {
         try LocalFiles.createDirectory(root); self.root=root; self.role=role
         var info=stat(); guard lstat(root,&info)==0 else { throw TransportRuntimeError.invalid }; inode=UInt64(info.st_ino)
         var owned: OwnedFileKeychain?
+        var lifecycleLease: RoleLifecycleLease?
         do {
             for name in [role.rawValue,"keys"] { try LocalFiles.createDirectory(root+"/"+name) }
             try LocalFiles.writeNew(RootKeyCodec.encode(agreement,limit:64<<10),to:root+"/agreement.json")
@@ -39,9 +41,11 @@ public final class IndependentRootOwner {
             }
             backupExcluded=LocalFiles.excludeBackup(root)
             metadata=try KeychainMetadata.read()
+            let lifecycle=try ownerReceipt.map { try RoleLifecycleIdentity(root:root,receipt:$0,executable:executable) }
             let core=try RoleBootstrapCore(role:role == .host ? .host : .client,localID:role == .host ? agreement.hostID : agreement.clientID,
                 root:root,agreement:agreement.digest,selection:PreparationEncoding.digest(selection),
-                origin:clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW),epoch:UUID().uuidString.lowercased(),boot:RootKeyCodec.boot(),quota:1<<30)
+                origin:clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW),epoch:UUID().uuidString.lowercased(),boot:RootKeyCodec.boot(),quota:1<<30,lifecycle:lifecycle)
+            if lifecycle != nil { lifecycleLease=try RoleLifecycleLease.create(core:core) }
             let clock=try RoleMonotonicClock(origin:core.origin,epoch:core.epoch,boot:core.boot)
             let created=try OwnedFileKeychain.create(at:core.container,password:RootKeyCodec.random().map{String(format:"%02x",$0)}.joined())
             owned=created
@@ -61,14 +65,18 @@ public final class IndependentRootOwner {
                         metadataKey:material.key(.clientMetadata).use{$0},clock:clock)
                     client.close()
                 }
-            })
+            },lifecycle:lifecycleLease)
+            ownershipReceiptDigest=try lifecycleLease?.publish(ready)
+            lifecycleLease?.close()
             guard let retained else { throw TransportRuntimeError.invalid }; keys=retained; container=created
         } catch {
             if let owned { try owned.deleteOwned() }
-            try FileManager.default.removeItem(atPath:root); throw error
+            try FileManager.default.removeItem(atPath:root)
+            try lifecycleLease?.rollbackCreation(); throw error
         }
     }
     public func retire() throws {
+        guard ready.core.version == 1 else { throw TransportRuntimeError.invalid }
         if retired { return }
         try LocalFiles.directory(root)
         var info=stat(); guard lstat(root,&info)==0, UInt64(info.st_ino)==inode else { throw TransportRuntimeError.invalid }
@@ -101,9 +109,12 @@ private final class IndependentRoleProvider: RootKeyProvider {
     }
 }
 struct AcquiredIndependentRoot {
+    let lifecycle: RoleLifecycleLease?
     let agreement: IndependentPairAgreement, acquisition: RoleBootstrapAcquisition, selection: TransportSelectionBinding, audit: TransportRoleAudit
     init(root: String, role: TransportRole) throws {
         try TransportContract.currentUser(); try LocalFiles.directory(root)
+        let ready=try RoleBootstrapStore.inspect(at:root,role:role == .host ? .host : .client)
+        lifecycle=try ready.core.version == 2 ? RoleLifecycleLease.acquire(ready:ready) : nil
         let agreement=try IndependentPairAgreement.load(root+"/agreement.json"), audit=TransportRoleAudit(role)
         let selection=try RootKeyCodec.decode(TransportSelectionBinding.self,LocalFiles.read(root+"/"+role.rawValue+"/selection.json",maximum:64<<10),limit:64<<10)
         try selection.validate(role:role)
@@ -114,7 +125,7 @@ struct AcquiredIndependentRoot {
             guard core.localID==(role == .host ? agreement.hostID : agreement.clientID),core.agreement==(try agreement.digest),
                   core.selection==(try PreparationEncoding.digest(selection)) else { throw TransportRuntimeError.invalid }
             _=try RoleMonotonicClock(origin:core.origin,epoch:core.epoch,boot:core.boot)
-        },provider:{ core in IndependentRoleProvider(MacKeychainProvider(container:try .openExisting(at:core.container)),audit:audit) })
+        },provider:{ core in IndependentRoleProvider(MacKeychainProvider(container:try .openExisting(at:core.container)),audit:audit) },lifecycle:lifecycle)
         self.agreement=agreement; self.selection=selection; self.audit=audit
     }
 }
