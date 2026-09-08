@@ -12,6 +12,7 @@ import WireAdapterContract
 public final class DurableHostWireAdapter {
     public var configuration:AdapterConfiguration
     public let owner:DurableSessionLifecycle, authorization:LifecycleAuthorization, expectedClientRoot:String
+    public let requestPolicy:any AdapterRequestPolicy
     public var publicationHook:() throws -> Void = {}
     public private(set) var status:LifecycleStatus?
     public private(set) var peerReports=0, issues=0, begins=0, recoveries=0
@@ -19,17 +20,22 @@ public final class DurableHostWireAdapter {
     private let allowNew:Bool, frozenCaller:Data
     private let prepare:(WireGenerationRequest,DurableGenerationReference,AdapterConfiguration) throws -> ProviderBinding
     private let runtime:(ProviderBinding,AdapterConfiguration) throws -> ProviderRuntime
+    private let validatePrepared:((ProviderBinding,AdapterConfiguration) throws -> Void)?
     private var frames=AdapterFrames(),ticket:SessionTicket?,reference:DurableGenerationReference?,attachment:LifecycleAttachment?,context:Data?
     public init(configuration:AdapterConfiguration,owner:DurableSessionLifecycle,authorization:LifecycleAuthorization,expectedClientRoot:String,allowNew:Bool,
                 prepare:@escaping (WireGenerationRequest,DurableGenerationReference,AdapterConfiguration) throws -> ProviderBinding,
-                runtime:@escaping (ProviderBinding,AdapterConfiguration) throws -> ProviderRuntime) throws {
-        try configuration.validate()
+                runtime:@escaping (ProviderBinding,AdapterConfiguration) throws -> ProviderRuntime,
+                requestPolicy:any AdapterRequestPolicy = FixedAdapterRequestPolicy(),
+                validatePrepared:((ProviderBinding,AdapterConfiguration) throws -> Void)? = nil) throws {
+        try requestPolicy.validate(configuration)
+        guard !requestPolicy.requiresPreparedValidation || validatePrepared != nil else { throw AdapterError.unavailable }
+        self.requestPolicy=requestPolicy;self.validatePrepared=validatePrepared
         self.configuration=configuration;self.owner=owner;self.authorization=authorization;self.expectedClientRoot=expectedClientRoot
         self.allowNew=allowNew;self.prepare=prepare;self.runtime=runtime;frozenCaller=try AdapterContract.encode(authorization.caller)
         try gate()
     }
     private func gate() throws {
-        try configuration.validate()
+        try requestPolicy.validate(configuration)
         guard authorization.allowed,try AdapterContract.encode(authorization.caller)==frozenCaller else { throw AdapterError.unauthorized }
     }
     private func session(_ r:DurableSessionReference,_ ticket:SessionTicket) throws {
@@ -96,10 +102,11 @@ public final class DurableHostWireAdapter {
             guard allowNew,let ticket,ticket.data==p.ticket else { throw AdapterError.unavailable }
             try session(p.reference.session,ticket)
             if let reference { try AdapterContract.require(AdapterContract.same(reference,p.reference)) }
-            _=try AdapterContract.route(p.request) // Unknown mappings stop before fixture/native preparation.
+            _=try requestPolicy.route(p.request) // Admission precedes fixture/native preparation.
             let binding=try prepare(p.request,p.reference,configuration)
             try gate();try session(p.reference.session,ticket)
-            try AdapterContract.require(binding.operationID==p.reference.operationID && binding.requestID==AdapterContract.requestBinding(p.request,configuration:configuration,route:binding.lane.route.rawValue))
+            try AdapterContract.require(binding.operationID==p.reference.operationID && binding.requestID==requestPolicy.requestBinding(p.request,configuration:configuration,route:binding.lane.route.rawValue))
+            try validatePrepared?(binding,configuration)
             let state=try owner.begin(ticket:ticket,authorization:authorization,generation:p.reference.generationID,provider:binding)
             guard let attached=state.attachment else { throw AdapterError.unavailable }
             let bytes=try owner.exportClientContext(ticket:ticket,authorization:authorization,attachment:attached)
@@ -112,8 +119,9 @@ public final class DurableHostWireAdapter {
             try session(p.reference.session,incoming)
             try AdapterContract.require(p.clientRoot==expectedClientRoot && p.witness.clientRoot==expectedClientRoot)
             let stored=try owner.wireProviderBinding(ticket:incoming,authorization:authorization,generation:p.reference.generationID)
+            try validatePrepared?(stored,configuration) // Selected policy is checked before attach or acceptance.
             let original=try owner.wireOriginalClientContext(ticket:incoming,authorization:authorization,generation:p.reference.generationID)
-            let a=try AdapterContract.context(original,reference:p.reference,configuration:configuration)
+            let a=try AdapterContract.context(original,reference:p.reference,configuration:configuration,policy:requestPolicy)
             try AdapterContract.require(stored.operationID==p.reference.operationID && a.bytes==p.context && RecoveryCodec.hash(original)==p.contextDigest)
             let state=try owner.attachClient(ticket:incoming,authorization:authorization,generation:p.reference.generationID,
                 witness:AdapterContract.witness(p.witness),expectedClientRoot:expectedClientRoot)
@@ -135,7 +143,7 @@ public final class DurableHostWireAdapter {
         case .knowledge(let f):
             let p=f.payload,(ticket,attachment,bytes)=try live(p.reference)
             let batches=try owner.replayForClient(ticket:ticket,authorization:authorization,attachment:attachment,after:0)
-            let authority=try AdapterContract.context(bytes,reference:p.reference,configuration:configuration)
+            let authority=try AdapterContract.context(bytes,reference:p.reference,configuration:configuration,policy:requestPolicy)
             try AdapterContract.checkKnowledge(p,authority:authority,call:AdapterContract.call(batches.map(\.bytes)))
             _=try owner.exportClientContext(ticket:ticket,authorization:authorization,attachment:attachment,publicationHook:publicationHook)
             try gate()
@@ -147,6 +155,7 @@ public final class DurableHostWireAdapter {
         guard let reference else { throw AdapterError.unavailable }
         let (ticket,attachment,_)=try live(reference)
         let stored=try owner.wireProviderBinding(ticket:ticket,authorization:authorization,generation:reference.generationID)
+        try validatePrepared?(stored,configuration)
         let state=try owner.step(ticket:ticket,authorization:authorization,attachment:attachment) { try self.runtime(stored,self.configuration) }
         _=try owner.wireSessionID(ticket:ticket,authorization:authorization,publicationHook:publicationHook)
         try gate()

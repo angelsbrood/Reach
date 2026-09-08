@@ -791,3 +791,17 @@ an effect ran. The required-tool fixture keeps its counted local effect and trus
 completion oracle separate from wire reports. Client knowledge remains independently
 readable after host retirement. Remote transport adoption, cross-host clocks and
 real tool effects remain outside this candidate.
+
+S89 adds a trusted-local selected-request policy to these tool adapters while
+retaining the fixed S88 policy by default. The new `Tools/DurableRequestPreparation`
+candidate binds complete canonical requests and a locally selected immutable
+model/tokenizer/template/policy descriptor, then prepares bounded ordinary text
+or explicitly required tools through the public synchronous chat-template path.
+Its actual tokens, resolved options and stable IDs are persisted in the existing
+provider binding. First begin acceptance checks the client's exact locally sent
+binding before journal enrollment. Fresh recovery validates the selected policy
+and stored preparation before host attachment/acceptance, then restores without
+request preparation or replacement tokens/options/IDs/seed. No frame layout or
+shipping capability/dispatch changes. S89's offline tiny-Llama proof uses known
+non-secret disposable fixture keys; S88's Keychain/acquisition/crash evidence is
+reused for its unchanged scope.

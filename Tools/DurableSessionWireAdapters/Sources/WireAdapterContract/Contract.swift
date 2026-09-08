@@ -7,6 +7,28 @@ import DurableRootKeys
 import DurableStoreBootstrap
 
 public enum AdapterError: Error { case disabled, incompatible, invalid, unavailable, unauthorized, oversized }
+/// Trusted local selection. Peer frames cannot select a new request policy.
+/// Concrete portable policies must not depend on a native model runtime.
+public protocol AdapterRequestPolicy {
+    var requiresPreparedValidation:Bool { get }
+    func validate(_ configuration:AdapterConfiguration) throws
+    func route(_ request:WireGenerationRequest) throws -> String
+    func requestBinding(_ request:WireGenerationRequest,configuration:AdapterConfiguration,route:String) throws -> String
+    func validateContext(_ context:ClientContext,configuration:AdapterConfiguration) throws
+}
+public struct FixedAdapterRequestPolicy:AdapterRequestPolicy {
+    public init() {}
+    public var requiresPreparedValidation:Bool { false }
+    public func validate(_ configuration:AdapterConfiguration) throws { try configuration.validate() }
+    public func route(_ request:WireGenerationRequest) throws -> String { try AdapterContract.route(request) }
+    public func requestBinding(_ request:WireGenerationRequest,configuration:AdapterConfiguration,route:String) throws -> String {
+        try AdapterContract.requestBinding(request,configuration:configuration,route:route)
+    }
+    public func validateContext(_ context:ClientContext,configuration:AdapterConfiguration) throws {
+        let original=try AdapterContract.request(context.route)
+        try AdapterContract.require(context.request==AdapterContract.requestBinding(original,configuration:configuration,route:context.route))
+    }
+}
 public struct AdapterConfiguration: Codable {
     public let dialect: UInt8, model: String, profile: String
     public var optIn: Bool, ready: Bool
@@ -48,19 +70,18 @@ public enum AdapterContract {
         let bytes=try encode(Bound(model:configuration.model,profile:configuration.profile,route:route,revision:revision,request:request))
         return "s88:"+request.id.uuidString.lowercased()+":"+RecoveryCodec.hash(Data("S88/wire-request/v1\0".utf8)+bytes)
     }
-    public static func checkReference(_ r:DurableGenerationReference, configuration:AdapterConfiguration) throws {
-        try configuration.validate(); try r.validate()
+    public static func checkReference(_ r:DurableGenerationReference, configuration:AdapterConfiguration,policy:any AdapterRequestPolicy = FixedAdapterRequestPolicy()) throws {
+        try policy.validate(configuration); try r.validate()
         try require(r.session.modelID==configuration.model && r.session.profile==configuration.profile)
     }
     public static func witness(_ w:HandoffWitness) throws -> DurableWitness { try JSONDecoder().decode(DurableWitness.self,from:encode(w)) }
     public static func witness(_ w:DurableWitness) throws -> HandoffWitness { try w.validate(); return try JSONDecoder().decode(HandoffWitness.self,from:encode(w)) }
     public static func batch(_ b:DurableBatchPayload) -> HandoffBatch { .init(first:b.first,count:b.count,commit:b.commit,bytes:b.bytes,skip:b.skip) }
-    public static func context(_ bytes:Data, reference:DurableGenerationReference, configuration:AdapterConfiguration) throws -> ClientAuthority {
-        try checkReference(reference,configuration:configuration)
+    public static func context(_ bytes:Data, reference:DurableGenerationReference, configuration:AdapterConfiguration,policy:any AdapterRequestPolicy = FixedAdapterRequestPolicy()) throws -> ClientAuthority {
+        try checkReference(reference,configuration:configuration,policy:policy)
         let a=try ClientAuthority(HandoffContract.decode(ClientContext.self,bytes,maximum:HandoffContract.context)),c=a.context
         try require(a.bytes==bytes && c.namespace==reference.session.sessionID && c.generation==reference.generationID && c.operation==reference.operationID && c.revision==HandoffContract.revision)
-        let original=try request(c.route)
-        try require(c.request==requestBinding(original,configuration:configuration,route:c.route))
+        try policy.validateContext(c,configuration:configuration)
         return a
     }
     public static func call(_ batches:[Data]) throws -> ToolBinding {

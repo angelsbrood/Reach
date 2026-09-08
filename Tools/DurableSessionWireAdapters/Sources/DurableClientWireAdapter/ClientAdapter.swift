@@ -11,25 +11,26 @@ import WireAdapterContract
 public final class DurableClientWireAdapter {
     public var configuration:AdapterConfiguration
     public let owner:DurableClientReceipts,authorization:ClientAuthorization,core:BootstrapCore
+    public let requestPolicy:any AdapterRequestPolicy
     public var publicationHook:() throws -> Void = {}
     public private(set) var negotiation:DurableNegotiation
     public private(set) var peerReports=0,recoveryEntries=0
     private var frames=AdapterFrames(),ticket:Data?,reference:DurableGenerationReference?,authority:ClientAuthority?,handle:ClientHandle?
     private var beginRequestBinding:String?
     private let parent:String,binding:RecoveryBinding,allowNew:Bool,frozenCaller:Data
-    public init(configuration:AdapterConfiguration,owner:DurableClientReceipts,authorization:ClientAuthorization,core:BootstrapCore,parent:String,allowNew:Bool) throws {
-        try configuration.validate()
+    public init(configuration:AdapterConfiguration,owner:DurableClientReceipts,authorization:ClientAuthorization,core:BootstrapCore,parent:String,allowNew:Bool,requestPolicy:any AdapterRequestPolicy = FixedAdapterRequestPolicy()) throws {
+        try requestPolicy.validate(configuration);self.requestPolicy=requestPolicy
         self.configuration=configuration;self.owner=owner;self.authorization=authorization;self.core=core;self.parent=parent;self.allowNew=allowNew
         binding=try WireFixture.binding(core);frozenCaller=try AdapterContract.encode(authorization.caller)
         negotiation=try .init(selectedDialect:configuration.dialect,modelID:configuration.model,localOptIn:configuration.optIn)
         try gate()
     }
     private func gate() throws {
-        try configuration.validate()
+        try requestPolicy.validate(configuration)
         guard authorization.allowed,try AdapterContract.encode(authorization.caller)==frozenCaller else { throw AdapterError.unauthorized }
     }
     private func check(_ a:ClientAuthority,_ r:DurableGenerationReference) throws {
-        try gate();_=try AdapterContract.context(a.bytes,reference:r,configuration:configuration)
+        try gate();_=try AdapterContract.context(a.bytes,reference:r,configuration:configuration,policy:requestPolicy)
         try AdapterContract.require(a.context.host==core.hostID && a.context.store==core.hostID && AdapterContract.encode(a.context.caller)==frozenCaller)
     }
     private func current() throws -> (ClientAuthority,ClientHandle,DurableGenerationReference) {
@@ -46,8 +47,8 @@ public final class DurableClientWireAdapter {
     }
     public func begin(requestID:String,generation:String,operation:String,request:WireGenerationRequest) throws -> Data {
         try gate();guard allowNew,let ticket,let selected=reference?.session else { throw AdapterError.unavailable }
-        let route=try AdapterContract.route(request)
-        let expected=try AdapterContract.requestBinding(request,configuration:configuration,route:route)
+        let route=try requestPolicy.route(request)
+        let expected=try requestPolicy.requestBinding(request,configuration:configuration,route:route)
         let r=DurableGenerationReference(session:selected,generationID:generation,operationID:operation)
         let bytes=try negotiation.send(.begin(.init(.init(requestID:requestID,reference:r,ticket:ticket,request:request))))
         reference=r;beginRequestBinding=expected;return bytes
@@ -65,7 +66,7 @@ public final class DurableClientWireAdapter {
                 ticket=p.ticket
                 reference = .init(session:p.session,generationID:"pending",operationID:"pending")
             case .accepted(let f):
-                let p=f.payload,a=try AdapterContract.context(p.context,reference:p.reference,configuration:configuration)
+                let p=f.payload,a=try AdapterContract.context(p.context,reference:p.reference,configuration:configuration,policy:requestPolicy)
                 try check(a,p.reference);try AdapterContract.require(p.contextDigest==RecoveryCodec.hash(a.bytes))
                 if p.kind == .begin {
                     guard allowNew,let ticket else { throw AdapterError.unavailable }

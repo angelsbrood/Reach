@@ -5,7 +5,7 @@ remain `[1,0]`; no production transport, capability, consent or general request
 preparer is adopted. Separate host/client adapters use the real ReachWire binary
 codec and accepted S82–S86 lifecycle, encrypted journals and bootstrap/recovery.
 
-The only request mappings are deterministic `ordinary` and `required` tiny-native
+The default policy's only request mappings are deterministic `ordinary` and `required` tiny-native
 fixtures. Complete canonical request, original request UUID, configured model,
 profile, route and adapter revision bind the stored ProviderBinding request ID;
 operation ID remains explicit. Ticket namespace is issuer-verified, not a new
@@ -49,3 +49,15 @@ unlock. Cleanup retains original created references and preserves unrelated
 metadata. Logs/results distinguish executed proof, historical reuse and failures.
 Only explicit owned commands and sampled allocation/cleanup boundaries are claimed;
 there is no continuous RSS, exhaustive descendant, remote-clock or exactly-once proof.
+
+S89 adds an explicit trusted-local `AdapterRequestPolicy` seam. Its default is
+`FixedAdapterRequestPolicy`, preserving the S88 configuration/request checks.
+`Tools/DurableRequestPreparation` supplies the separate portable selected-model
+policy and actual public chat-template preparer. The client remembers the selected
+policy's exact complete request binding before begin, and checks it before first
+journal enrollment. The host requires a stored-preparation validator for that
+policy, runs it before begin and before recovery attachment/accepted publication,
+and checks it again before a native step. Peer model/request fields cannot install
+or select a policy. All original final-publication authorization/readiness gates
+remain in place. S89's runner uses non-secret disposable fixture keys and does
+not execute this runner's Keychain or effect campaign.
