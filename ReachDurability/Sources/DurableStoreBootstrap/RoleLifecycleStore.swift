@@ -14,7 +14,7 @@ public final class RoleLifecycleLease {
     private var stateName: String { receiptName + ".state.json" }
     private var nextName: String { receiptName + ".next" }
     private init(core: RoleBootstrapCore, create: Bool) throws {
-        guard core.version == 2, let lifecycle = core.lifecycle else { throw BootstrapError.invalid }
+        guard (2...3).contains(core.version), let lifecycle = core.lifecycle else { throw BootstrapError.invalid }
         try core.validateDescription(role: core.role, root: core.root)
         self.core = core; created = create
         parent = try RootKeyCodec.parent(lifecycle.receipt)

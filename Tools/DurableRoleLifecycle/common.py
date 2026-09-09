@@ -9,13 +9,13 @@ def parser(description):
  p.add_argument('--label',required=True)
  return p
 class Child:
- def __init__(self,campaign,label,arguments,denied=(),program=None,network=True):
+ def __init__(self,campaign,label,arguments,denied=(),program=None,network=True,descriptors=()):
   self.c=campaign;self.label=label;self.events=[];self.buffer=b'';self.joined=False;self.stopped=False
   profile=NETWORK if network else '(version 1)(allow default)(deny network*)'
   for path in denied:profile+=' (deny file-read* file-write* (subpath '+json.dumps(str(path))+'))'
   command=['/usr/bin/sandbox-exec','-p',profile,str(program or campaign.exe),*map(str,arguments)]
   self.out=(campaign.run/'logs'/(label+'.stdout')).open('xb');self.err=(campaign.run/'logs'/(label+'.stderr')).open('xb')
-  self.p=subprocess.Popen(command,stdout=subprocess.PIPE,stderr=self.err,start_new_session=True);os.set_blocking(self.p.stdout.fileno(),False)
+  self.p=subprocess.Popen(command,stdout=subprocess.PIPE,stderr=self.err,start_new_session=True,pass_fds=tuple(descriptors));os.set_blocking(self.p.stdout.fileno(),False)
   self.record={'label':label,'pid':self.p.pid,'command':command,'joined':False};campaign.children.append(self);campaign.e['processes'].append(self.record);campaign.save()
  def drain(self):
   if self.joined:return

@@ -4,7 +4,7 @@ import Darwin
 import ReachDurableRuntime
 
 struct DurableIndependent: AsyncParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "durable-independent", abstract: "Independently initialized durable roles on pinned 127.0.0.1 mTLS QUIC.", subcommands: [Provision.self, Initialize.self, Host.self, Begin.self, Recover.self, Cancel.self, Retire.self])
+    static let configuration = CommandConfiguration(commandName: "durable-independent", abstract: "Independently initialized durable roles on pinned 127.0.0.1 mTLS QUIC.", subcommands: [Provision.self, Initialize.self, Host.self, Begin.self, Recover.self, Cancel.self, Retire.self, Unlock.self])
     struct Provision: AsyncParsableCommand {
         static let configuration = CommandConfiguration(abstract: "Prepare public pair agreement and separate private TLS leaves; remove this staging before serving.")
         @Option(name: .long) var publicModel: String
@@ -26,15 +26,17 @@ struct DurableIndependent: AsyncParsableCommand {
         @Option(name: .long) var model: String?
         @Flag(name: .long) var finish = false
         @Option(name: .long) var ownerReceipt: String?
+        @Option(name: .long) var unlockSecretFd: Int32?
         func run() async throws {
             guard let selected = TransportRole(rawValue: role), (selected == .host) == (model != nil) else { throw ValidationError("Host requires a model; client accepts no model.") }
             guard finish == (ownerReceipt != nil) else { throw ValidationError("--finish and --owner-receipt must be selected together.") }
+            guard unlockSecretFd == nil || finish else { throw ValidationError("--unlock-secret-fd requires finite initialization.") }
             let stop = finish ? nil : IndependentStop()
             do {
                 let owner: IndependentRootOwner
                 if selected == .host {
-                    owner = try LocalDurableRuntime.withCPU { try IndependentRootOwner(root: root, role: selected, provisioned: provisioned, modelSource: model, ownerReceipt: ownerReceipt) }
-                } else { owner = try IndependentRootOwner(root: root, role: selected, provisioned: provisioned, ownerReceipt: ownerReceipt) }
+                    owner = try LocalDurableRuntime.withCPU { try IndependentRootOwner(root: root, role: selected, provisioned: provisioned, modelSource: model, ownerReceipt: ownerReceipt, unlockSecretDescriptor: unlockSecretFd) }
+                } else { owner = try IndependentRootOwner(root: root, role: selected, provisioned: provisioned, ownerReceipt: ownerReceipt, unlockSecretDescriptor: unlockSecretFd) }
                 struct Ready: Encodable { let stage = "ready"; let role: String, epoch: String, boot: String; let origin: UInt64; let backupExcluded: Bool; let ownerReceiptDigest: String? }
                 let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
                 let bytes = try encoder.encode(Ready(role: role, epoch: owner.ready.core.epoch, boot: owner.ready.core.boot, origin: owner.ready.core.origin, backupExcluded: owner.backupExcluded, ownerReceiptDigest: owner.ownershipReceiptDigest))
@@ -94,6 +96,25 @@ struct DurableIndependent: AsyncParsableCommand {
                 }
                 let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
                 try FileHandle.standardOutput.write(contentsOf: encoder.encode(result) + Data([10]))
+            } catch { independentDiagnostic(error); throw ExitCode.failure }
+        }
+    }
+    struct Unlock: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(abstract: "Explicitly unlock an owned role using its original receipt and private inherited descriptor.")
+        @Option(name: .long) var ownerReceipt: String
+        @Option(name: .long) var expectedDigest: String
+        @Option(name: .long) var unlockSecretFd: Int32
+        func run() async throws {
+            do {
+                let result = try IndependentRoleUnlock.unlock(receipt:ownerReceipt,expectedDigest:expectedDigest,secretDescriptor:unlockSecretFd)
+                let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys,.withoutEscapingSlashes]
+                try FileHandle.standardOutput.write(contentsOf:encoder.encode(result)+Data([10]))
+            } catch IndependentUnlockError.verificationRefusedLocked {
+                fputs("durable-independent unlock stopped (verification-refused-locked).\n",stderr)
+                throw ExitCode.failure
+            } catch IndependentUnlockError.relockUnconfirmed {
+                fputs("durable-independent unlock stopped (relock-unconfirmed).\n",stderr)
+                throw ExitCode.failure
             } catch { independentDiagnostic(error); throw ExitCode.failure }
         }
     }

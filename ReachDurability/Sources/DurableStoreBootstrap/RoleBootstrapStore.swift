@@ -16,7 +16,7 @@ public enum RoleBootstrapStore {
     public static func create(core: RoleBootstrapCore, provider: () throws -> any RootKeyProvider,
         initializeStore: (BootstrapKeys) throws -> Void, lifecycle: RoleLifecycleLease? = nil, hook: BootstrapHook = { _ in }) throws -> RoleBootstrapReady {
         try core.validate(role:core.role,root:core.root)
-        if core.version == 2 { guard let lifecycle else { throw BootstrapError.incomplete }; try lifecycle.confirmCreating(core) }
+        if core.version != 1 { guard let lifecycle else { throw BootstrapError.incomplete }; try lifecycle.confirmCreating(core) }
         let fs=try RoleBootstrapFileSystem(path:core.root+"/bootstrap",fresh:true,role:core.role); defer { fs.close() }
         try hook(.beforeIntentWrite)
         try fs.write("intent.json",bytes:RootKeyCodec.encode(RoleIntent(state:"creating",core:core),limit:BootstrapLimits.record),hook:hook)
@@ -44,7 +44,7 @@ public enum RoleBootstrapStore {
         let intent=try RootKeyCodec.decode(RoleIntent.self,fs.read("intent.json"),limit:BootstrapLimits.record)
         guard intent.state=="creating", intent.core==ready.core else { throw BootstrapError.invalid }
         try ready.validate(role:role,root:root)
-        if ready.core.version == 2 { guard let lifecycle else { throw BootstrapError.incomplete }; try lifecycle.confirmReady(ready) }
+        if ready.core.version != 1 { guard let lifecycle else { throw BootstrapError.incomplete }; try lifecycle.confirmReady(ready) }
         try validate(ready.core)
         let journal=try fs.journal(role), store=try provider(ready.core), binding=try ready.core.binding()
         var values:[RootKeyRole:RootKeyMaterial]=[:]

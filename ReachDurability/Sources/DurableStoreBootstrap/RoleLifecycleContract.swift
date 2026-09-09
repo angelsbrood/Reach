@@ -19,7 +19,7 @@ public struct RoleLifecycleIdentity: Codable, Equatable {
 public struct RoleOwnershipReceipt: Codable {
     public let version: Int, ready: RoleBootstrapReady, container: OwnedContainerSelection
     public init(ready: RoleBootstrapReady) throws {
-        guard let lifecycle = ready.core.lifecycle, ready.core.version == 2 else { throw BootstrapError.invalid }
+        guard let lifecycle = ready.core.lifecycle, (2...3).contains(ready.core.version) else { throw BootstrapError.invalid }
         version = 1; self.ready = ready
         container = .init(identity: lifecycle.identity, boot: ready.core.boot, executable: lifecycle.executable,
             binding: try ready.core.binding(), references: ready.core.keys, confirmations: ready.confirmations)
@@ -29,7 +29,7 @@ public struct RoleOwnershipReceipt: Codable {
         let core = ready.core
         guard let lifecycle = core.lifecycle else { throw BootstrapError.invalid }
         try core.validateDescription(role: core.role, root: core.root)
-        try RootKeyCodec.require(version == 1 && core.version == 2 && ready.state == "ready" &&
+        try RootKeyCodec.require(version == 1 && (2...3).contains(core.version) && ready.state == "ready" &&
             container == OwnedContainerSelection(identity: lifecycle.identity, boot: core.boot, executable: lifecycle.executable,
                 binding: try core.binding(), references: core.keys, confirmations: ready.confirmations))
         try container.validate(); _ = try RootKeyCodec.encode(self, limit: BootstrapLimits.record)

@@ -9,7 +9,9 @@ This opt-in lifecycle uses local role core version 2. Initialization without the
 two new options retains the foreground creator and version 1 behavior described
 in [independent durable bootstrap](independent-durable-bootstrap.md). Existing
 roots are not migrated. Generation, wire, retention and report publication
-semantics are unchanged.
+semantics are unchanged. Newly created roles can further select
+[explicit caller unlock](durable-role-unlock.md), which uses local core version 3
+and a private inherited descriptor. Existing v1/v2 roots keep their prior policy.
 
 ## Initialize and retain the selection
 
@@ -88,7 +90,9 @@ or symlink at that path refuses.
 Retirement does not load a model, read/decrypt the journal, recover generation,
 publish expired content or fabricate an ending. It works after local retention
 expires. A locked or missing original key before the authorized transition
-refuses; no unlock command or shared/default Keychain fallback is provided.
+refuses. New v3 roles can first use their explicit caller unlock operation;
+existing v2 roles have no caller unlock policy. There is no shared/default
+Keychain fallback.
 
 The external control directory retains these bounded records:
 

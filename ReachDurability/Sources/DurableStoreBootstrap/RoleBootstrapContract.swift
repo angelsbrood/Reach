@@ -9,10 +9,11 @@ public struct RoleBootstrapCore: Codable, Equatable {
     public let origin: UInt64, quota: Int
     public let keys: [RootKeyReference]
     public let lifecycle: RoleLifecycleIdentity?
+    public let unlockPolicy: String?
     public var policy: String { "role-monotonic-ns-v1:" + epoch }
     public init(role: BootstrapRole, localID: String, root: String, agreement: String, selection: String,
-                origin: UInt64, epoch: String, boot: String, quota: Int, lifecycle: RoleLifecycleIdentity? = nil) {
-        version=lifecycle == nil ? 1 : 2; self.lifecycle=lifecycle; self.role=role; self.localID=localID; self.root=root
+                origin: UInt64, epoch: String, boot: String, quota: Int, lifecycle: RoleLifecycleIdentity? = nil, unlockPolicy: String? = nil) {
+        version=unlockPolicy != nil ? 3 : lifecycle == nil ? 1 : 2; self.unlockPolicy=unlockPolicy; self.lifecycle=lifecycle; self.role=role; self.localID=localID; self.root=root
         let id=UUID().uuidString.lowercased(); identifier=id; container=root+"/keys/role.keychain-db"
         self.agreement=agreement; self.selection=selection; self.origin=origin
         self.epoch=epoch; self.boot=boot; self.quota=quota
@@ -24,7 +25,7 @@ public struct RoleBootstrapCore: Codable, Equatable {
         if let lifecycle { try RootKeyCodec.require(lifecycle.identity.present()) }
     }
     public func validateDescription(role: BootstrapRole, root: String) throws {
-        try RootKeyCodec.require((version==1 && lifecycle==nil || version==2 && lifecycle != nil) && self.role==role && self.root==root && container==root+"/keys/role.keychain-db" &&
+        try RootKeyCodec.require((version==1 && lifecycle==nil && unlockPolicy==nil || version==2 && lifecycle != nil && unlockPolicy==nil || version==3 && lifecycle != nil && unlockPolicy==UnlockCredential.policy) && self.role==role && self.root==root && container==root+"/keys/role.keychain-db" &&
             [identifier,localID,boot,epoch].allSatisfy(RootKeyCodec.uuid) && identifier != localID && origin>0 &&
             RootKeyCodec.digest(agreement) && RootKeyCodec.digest(selection) && boot==RootKeyCodec.boot() &&
             (BootstrapLimits.minimumQuota...(1<<30)).contains(quota))
@@ -34,7 +35,16 @@ public struct RoleBootstrapCore: Codable, Equatable {
         for reference in keys { try reference.validate(); try RootKeyCodec.require(reference.bootstrap==identifier) }
         _=try RootKeyCodec.encode(self,limit:BootstrapLimits.record)
     }
-    public func binding() throws -> String { RootKeyCodec.hash(Data((version == 1 ? "S95/role-bootstrap/v1\0" : "S96/role-bootstrap/v2\0").utf8)+Data(try RootKeyCodec.encode(self,limit:BootstrapLimits.record))) }
+    public func binding() throws -> String {
+        let domain: String
+        switch version {
+        case 1: domain="S95/role-bootstrap/v1\0"
+        case 2: domain="S96/role-bootstrap/v2\0"
+        case 3: domain="S97/role-bootstrap/v3\0"
+        default: throw BootstrapError.invalid
+        }
+        return RootKeyCodec.hash(Data(domain.utf8)+Data(try RootKeyCodec.encode(self,limit:BootstrapLimits.record)))
+    }
     public func reference(_ role: RootKeyRole) throws -> RootKeyReference {
         guard let key=keys.first(where:{$0.role==role}) else { throw BootstrapError.invalid }; return key
     }

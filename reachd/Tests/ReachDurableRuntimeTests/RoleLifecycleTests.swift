@@ -5,7 +5,7 @@ import DurableRootKeys
 import DurableStoreBootstrap
 @testable import ReachDurableRuntime
 
-private final class LifecycleMemoryKeys: RootKeyProvider {
+final class LifecycleMemoryKeys: RootKeyProvider {
     var values: [String:(String,RootKeyMaterial)] = [:], creates = 0, loads = 0
     func create(_ reference: RootKeyReference, binding: String) throws -> RootKeyMaterial {
         guard values[reference.identifier] == nil else { throw RootKeyError.duplicate }
@@ -18,11 +18,11 @@ private final class LifecycleMemoryKeys: RootKeyProvider {
         return value.1
     }
 }
-private final class LifecycleFixture {
+final class LifecycleFixture {
     let base: String, root: String, receipt: String, worker: FrozenWorker
     let core: RoleBootstrapCore, provider = LifecycleMemoryKeys(), ready: RoleBootstrapReady
     let digest: String?
-    init(publish: Bool = true, role: BootstrapRole = .client) throws {
+    init(publish: Bool = true, role: BootstrapRole = .client, unlock: Bool = false) throws {
         base = try ArtifactFixtures.base() + "/life-" + UUID().uuidString.lowercased()
         root = base + "/root"; receipt = base + "/control/owner.json"
         for path in [base,root,root+"/keys",base+"/control"] { try LocalFiles.createDirectory(path) }
@@ -30,7 +30,7 @@ private final class LifecycleFixture {
         try LocalFiles.writeNew(bytes,to:path); XCTAssertEqual(chmod(path,0o700),0)
         worker = .init(path:path,sha256:RootKeyCodec.hash(bytes))
         let lifecycle = try RoleLifecycleIdentity(root:root,receipt:receipt,executable:worker)
-        core = try .init(role:role,localID:UUID().uuidString.lowercased(),root:root,agreement:String(repeating:"a",count:64),selection:String(repeating:"b",count:64),origin:1,epoch:UUID().uuidString.lowercased(),boot:RootKeyCodec.boot(),quota:1<<30,lifecycle:lifecycle)
+        core = try .init(role:role,localID:UUID().uuidString.lowercased(),root:root,agreement:String(repeating:"a",count:64),selection:String(repeating:"b",count:64),origin:1,epoch:UUID().uuidString.lowercased(),boot:RootKeyCodec.boot(),quota:1<<30,lifecycle:lifecycle,unlockPolicy:unlock ? UnlockCredential.policy : nil)
         let lease = try RoleLifecycleLease.create(core:core); defer { lease.close() }
         let store = provider, rootPath = root
         ready = try RoleBootstrapStore.create(core:core,provider:{ store },initializeStore:{ _ in

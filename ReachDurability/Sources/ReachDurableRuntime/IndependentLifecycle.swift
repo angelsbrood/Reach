@@ -55,7 +55,7 @@ public enum IndependentRoleLifecycle {
         try lease.finishRetirement(receipt:receipt)
         return result("retired")
     }
-    private static func validateSelection(_ core: RoleBootstrapCore) throws {
+    static func validateSelection(_ core: RoleBootstrapCore) throws {
         let role: TransportRole=core.role == .host ? .host : .client
         let agreement=try IndependentPairAgreement.load(core.root+"/agreement.json")
         let selection=try RootKeyCodec.decode(TransportSelectionBinding.self,LocalFiles.read(core.root+"/"+role.rawValue+"/selection.json",maximum:64<<10),limit:64<<10)
