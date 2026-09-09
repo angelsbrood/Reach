@@ -13,6 +13,19 @@ public enum RoleBootstrapStore {
         guard intent.state == "creating", intent.core == ready.core else { throw BootstrapError.invalid }
         try ready.validate(role:role,root:root); return ready
     }
+    /// Public bootstrap metadata only, admitted solely for explicit old-boot cleanup.
+    public static func inspectForAfterBootRetirement(at root: String, role: BootstrapRole) throws -> RoleBootstrapReady {
+        let fs = try RoleBootstrapFileSystem(path:root+"/bootstrap",fresh:false,role:role); defer { fs.close() }
+        let names = try fs.scan()
+        guard names.contains("ready.json"), !names.contains("selection.tmp") else { throw BootstrapError.incomplete }
+        let ready = try RootKeyCodec.decode(RoleBootstrapReady.self,fs.read("ready.json"),limit:BootstrapLimits.record)
+        let intent = try RootKeyCodec.decode(RoleIntent.self,fs.read("intent.json"),limit:BootstrapLimits.record)
+        try ready.core.validateForAfterBootRetirement()
+        guard ready.core.root == root, ready.core.role == role, intent.state == "creating", intent.core == ready.core,
+              ready.state == "ready", ready.confirmations.count == ready.core.keys.count,
+              ready.confirmations.allSatisfy({ $0.count == 32 }) else { throw BootstrapError.invalid }
+        return ready
+    }
     public static func create(core: RoleBootstrapCore, provider: () throws -> any RootKeyProvider,
         initializeStore: (BootstrapKeys) throws -> Void, lifecycle: RoleLifecycleLease? = nil, hook: BootstrapHook = { _ in }) throws -> RoleBootstrapReady {
         try core.validate(role:core.role,root:core.root)

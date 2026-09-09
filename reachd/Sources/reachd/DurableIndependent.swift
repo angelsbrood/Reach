@@ -4,7 +4,7 @@ import Darwin
 import ReachDurableRuntime
 
 struct DurableIndependent: AsyncParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "durable-independent", abstract: "Independently initialized durable roles on pinned 127.0.0.1 mTLS QUIC.", subcommands: [Provision.self, Initialize.self, Host.self, Begin.self, Recover.self, Cancel.self, Retire.self, Unlock.self])
+    static let configuration = CommandConfiguration(commandName: "durable-independent", abstract: "Independently initialized durable roles on pinned 127.0.0.1 mTLS QUIC.", subcommands: [Provision.self, Initialize.self, Host.self, Begin.self, Recover.self, Cancel.self, Retire.self, Unlock.self, RetireAfterBoot.self])
     struct Provision: AsyncParsableCommand {
         static let configuration = CommandConfiguration(abstract: "Prepare public pair agreement and separate private TLS leaves; remove this staging before serving.")
         @Option(name: .long) var publicModel: String
@@ -115,6 +115,29 @@ struct DurableIndependent: AsyncParsableCommand {
             } catch IndependentUnlockError.relockUnconfirmed {
                 fputs("durable-independent unlock stopped (relock-unconfirmed).\n",stderr)
                 throw ExitCode.failure
+            } catch { independentDiagnostic(error); throw ExitCode.failure }
+        }
+    }
+    struct RetireAfterBoot: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(commandName:"retire-after-boot",abstract:"Explicitly retire an original v3 role from an earlier boot without resuming its generation.")
+        @Option(name: .long) var ownerReceipt: String
+        @Option(name: .long) var expectedDigest: String
+        @Option(name: .long) var unlockSecretFd: Int32?
+        @Flag(name: .long) var progress = false
+        func run() async throws {
+            do {
+                let result = try IndependentAfterBootRetirement.retire(receipt:ownerReceipt,expectedDigest:expectedDigest,secretDescriptor:unlockSecretFd) { boundary in
+                    if progress {
+                        let stage = boundary == .authorized ? "retiring" : "keychain-deleted"
+                        print("{\"stage\":\""+stage+"\"}"); fflush(stdout)
+                    }
+                }
+                let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys,.withoutEscapingSlashes]
+                try FileHandle.standardOutput.write(contentsOf:encoder.encode(result)+Data([10]))
+            } catch IndependentAfterBootRetirementError.refusedLocked {
+                fputs("durable-independent retire-after-boot stopped (refused-locked).\n",stderr); throw ExitCode.failure
+            } catch IndependentAfterBootRetirementError.relockUnconfirmed {
+                fputs("durable-independent retire-after-boot stopped (relock-unconfirmed).\n",stderr); throw ExitCode.failure
             } catch { independentDiagnostic(error); throw ExitCode.failure }
         }
     }

@@ -25,9 +25,18 @@ public struct RoleBootstrapCore: Codable, Equatable {
         if let lifecycle { try RootKeyCodec.require(lifecycle.identity.present()) }
     }
     public func validateDescription(role: BootstrapRole, root: String) throws {
+        try validateStructure(role:role,root:root)
+        try RootKeyCodec.require(boot == RootKeyCodec.boot())
+    }
+    /// Only the explicit cleanup path admits an original v3 role from another boot.
+    public func validateForAfterBootRetirement() throws {
+        try validateStructure(role:role,root:root)
+        try RootKeyCodec.require(version == 3 && unlockPolicy == UnlockCredential.policy && boot != RootKeyCodec.boot())
+    }
+    private func validateStructure(role: BootstrapRole, root: String) throws {
         try RootKeyCodec.require((version==1 && lifecycle==nil && unlockPolicy==nil || version==2 && lifecycle != nil && unlockPolicy==nil || version==3 && lifecycle != nil && unlockPolicy==UnlockCredential.policy) && self.role==role && self.root==root && container==root+"/keys/role.keychain-db" &&
             [identifier,localID,boot,epoch].allSatisfy(RootKeyCodec.uuid) && identifier != localID && origin>0 &&
-            RootKeyCodec.digest(agreement) && RootKeyCodec.digest(selection) && boot==RootKeyCodec.boot() &&
+            RootKeyCodec.digest(agreement) && RootKeyCodec.digest(selection) &&
             (BootstrapLimits.minimumQuota...(1<<30)).contains(quota))
         if let lifecycle { try lifecycle.validate(root:root) }
         let roles: [RootKeyRole] = role == .host ? [.hostCatalog,.hostTicket] : [.clientMetadata]

@@ -107,3 +107,8 @@ descriptor intake, fresh locked-state unlock/recovery, verification/relock,
 retiring and expired cleanup. Scope remains cooperating same-Mac/same-boot
 loopback with the existing tiny model and wire profile; no unattended credential
 store, cross-boot unlocking, malicious-same-UID isolation or deployment is claimed.
+
+For original v3 roles after a real reboot, the explicit
+[cross-boot retirement operation](cross-boot-role-lifecycle.md) can authenticate
+original ownership solely for content-free cleanup. Existing commands and
+generation admission remain same-boot.

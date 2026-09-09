@@ -66,17 +66,22 @@ public enum IndependentRoleLifecycle {
               core.localID==(role == .host ? agreement.hostID : agreement.clientID),core.agreement==(try agreement.digest),
               core.selection==(try PreparationEncoding.digest(selection)) else { throw TransportRuntimeError.invalid }
     }
-    private static func removeSelectedRoot(_ core: RoleBootstrapCore) throws {
+    static func removeSelectedRoot(_ core: RoleBootstrapCore, current: OwnedAfterBootRoot? = nil) throws {
         let identity=core.lifecycle!.identity
-        guard try identity.present() else { throw TransportRuntimeError.invalid }
+        func check() throws {
+            if let current { guard current.original == identity else { throw TransportRuntimeError.invalid }; try current.check() }
+            else { guard try identity.present() else { throw TransportRuntimeError.invalid } }
+        }
+        try check()
         let allowed=Set(["agreement.json",core.role.rawValue,"keys","bootstrap"])
             .union(core.role == .host ? ["model"] : ["tickets-"+core.identifier])
         let names=try FileManager.default.contentsOfDirectory(atPath:core.root)
         guard Set(names).isSubset(of:allowed) else { throw TransportRuntimeError.invalid }
-        var entries:[(String,Bool)]=[],allocated:UInt64=0
+        var entries:[(String,Bool,UInt64)]=[],allocated:UInt64=0
         func scan(_ path:String,depth:Int) throws {
             guard depth<=12,entries.count<65536 else { throw TransportRuntimeError.invalid }
             var info=stat();guard lstat(path,&info)==0,info.st_uid==getuid(),info.st_blocks>=0 else { throw TransportRuntimeError.invalid }
+            if let current { _ = try current.inspect(path) }
             let directory=info.st_mode&S_IFMT == S_IFDIR
             guard directory || info.st_mode&S_IFMT == S_IFREG && info.st_nlink==1 else { throw TransportRuntimeError.invalid }
             guard info.st_mode&0o7777 == (directory ? 0o700 : 0o600) else { throw TransportRuntimeError.invalid }
@@ -85,14 +90,16 @@ public enum IndependentRoleLifecycle {
                 for name in try FileManager.default.contentsOfDirectory(atPath:path) { try scan(path+"/"+name,depth:depth+1) }
             }
             guard entries.count<65536 else { throw TransportRuntimeError.invalid }
-            entries.append((path,directory))
+            entries.append((path,directory,UInt64(info.st_ino)))
         }
         for name in names { try scan(core.root+"/"+name,depth:0) }
-        for (path,directory) in entries {
-            guard try identity.present() else { throw TransportRuntimeError.invalid }
+        for (path,directory,inode) in entries {
+            try check()
+            if let current { guard UInt64(try current.inspect(path).st_ino) == inode else { throw TransportRuntimeError.invalid } }
             guard (directory ? rmdir(path) : unlink(path))==0 else { throw TransportRuntimeError.invalid }
         }
-        guard try identity.present(),rmdir(core.root)==0 else { throw TransportRuntimeError.invalid }
+        try check()
+        guard rmdir(core.root)==0 else { throw TransportRuntimeError.invalid }
         let parent=try RootKeyCodec.parent(core.root),fd=open(parent,O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC)
         guard fd>=0 else { throw TransportRuntimeError.invalid };defer { _=Darwin.close(fd) }
         guard fsync(fd)==0 else { throw TransportRuntimeError.invalid }

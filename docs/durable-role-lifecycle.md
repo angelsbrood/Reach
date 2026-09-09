@@ -124,3 +124,8 @@ This route remains literal `127.0.0.1` pinned mTLS QUIC with the existing profil
 and tiny local model policy. It establishes same-boot local operation, not
 cross-boot or unattended unlocking, anti-rollback, securityd isolation from a
 malicious process with the same UID, deployment or default SDK adoption.
+
+For original v3 roles after a real reboot, the explicit
+[cross-boot retirement operation](cross-boot-role-lifecycle.md) can authenticate
+original ownership solely for content-free cleanup. Existing commands and
+generation admission remain same-boot.
