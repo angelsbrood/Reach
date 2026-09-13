@@ -17,7 +17,7 @@ public final class DurableClientReceipts {
         do {
             var m: ClientManifest
             if create {
-                m = ClientManifest(version: environment.authorityMode == .legacy ? 1 : 2, root: environment.rootID, boot: environment.boot, policy: environment.policy,
+                m = ClientManifest(version: environment.authorityMode.storageVersion, root: environment.rootID, boot: environment.boot, policy: environment.policy,
                     revision: 1, ownerEpoch: 1, observed: try clock.now())
                 m = try commit(m, old: nil)
             } else {
@@ -35,6 +35,7 @@ public final class DurableClientReceipts {
         observed = time; return time
     }
     func precheck(_ a: ClientAuthority, _ auth: ClientAuthorization) throws {
+        guard a.context.authority == nil else { throw ClientError.unavailable }
         try fs.ensure(); try environment.validate(clock); try environment.check(a.retention); let time = try clock.now()
         guard time >= observed else { throw ClientError.invalid("clock rollback") }
         try auth.check(a, now: time)

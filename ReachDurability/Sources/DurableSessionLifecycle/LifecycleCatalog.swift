@@ -2,9 +2,12 @@ import Foundation
 import Darwin
 import CryptoKit
 import DurableHostStore
+import RecoveryAuthorityContract
 
 struct CatalogDocument: Codable {
     var version = 1
+    var authority: String? = nil
+    var admission: AuthorityIssued? = nil
     var incarnation: String
     var boot: String
     var clockPolicy: String
@@ -13,7 +16,7 @@ struct CatalogDocument: Codable {
     var lastObserved: UInt64
     var records: [LifecycleRecord] = []
     func validate(_ identity: LifecycleIdentity) throws {
-        guard version == 1, incarnation == identity.incarnation, boot == identity.boot, clockPolicy == identity.clockPolicy,
+        guard version == (identity.authority == nil ? 1 : 2), authority == (try identity.authority?.digest), identity.authority != nil || admission == nil, incarnation == identity.incarnation, boot == identity.boot, clockPolicy == identity.clockPolicy,
               quota == identity.quota, epoch > 0, lastObserved > 0, records.count <= LifecycleLimits.records,
               records.filter({ $0.phase.reservesExecution }).count <= 1, records.filter({ $0.phase == .queued }).count <= 3 else { throw LifecycleError.invalid("catalog declaration") }
         var ids = Set<String>(), operations = Set<String>(), generationKeys = Set<String>(), waiters = Set<String>(), locators = Set<String>()
@@ -32,8 +35,8 @@ struct CatalogDocument: Codable {
                 try w.keys.validate()
                 let t = w.times
                 guard t.admitted > 0, t.admitted <= t.lastContact, t.lastContact <= lastObserved, t.attachmentEpoch > 0,
-                      t.queueUntil == min(try lcAdd(t.admitted, LifecycleLimits.wait), id.ticketExpiry),
-                      t.absoluteUntil == min(try lcAdd(t.admitted, LifecycleLimits.inflight), id.ticketExpiry),
+                      t.queueUntil == (identity.authority != nil ? id.ticketExpiry : min(try lcAdd(t.admitted, LifecycleLimits.wait), id.ticketExpiry)),
+                      t.absoluteUntil == (identity.authority != nil ? id.ticketExpiry : min(try lcAdd(t.admitted, LifecycleLimits.inflight), id.ticketExpiry)),
                       t.admitted < id.ticketExpiry,
                       t.detachedUntil.map({ $0 >= t.lastContact && $0 <= id.ticketExpiry && $0 <= t.absoluteUntil }) ?? true,
                       t.transitionStartedAt.map({ $0 >= t.admitted && $0 <= lastObserved }) ?? true,
@@ -144,9 +147,14 @@ final class LifecycleCatalog {
         let bytes = try LifecycleCrypto.open(cipher, role: "request", record: work.request, identity: identity, key: SymmetricKey(data: work.keys.content))
         let request = try JSONDecoder().decode(LifecycleRequest.self, from: bytes)
         try request.validate()
-        guard lcHash(bytes) == id.requestDigest, try lcEncode(request) == bytes, request.namespace == id.namespace,
+        guard request.authority == (try identity.authority == nil ? nil : admissionScopeDigest(record)), lcHash(bytes) == id.requestDigest, try lcEncode(request) == bytes, request.namespace == id.namespace,
               request.generation == id.generation, request.caller == id.caller, lcHash(Data(request.provider.operationID.utf8)) == id.operationDigest else { throw LifecycleError.invalid("immutable request join") }
         return request
+    }
+    private func admissionScopeDigest(_ record: LifecycleRecord) throws -> String {
+        guard let issued=try load().admission else { throw AuthorityError.partial }
+        let admission=try AuthorityCodec.decode(AuthorityAdmission.self,issued.body)
+        return try admission.scope.digest
     }
     func cleanRequests(_ document: CatalogDocument) throws {
         // The authenticated catalog establishes references. Corrupt referenced

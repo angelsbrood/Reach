@@ -5,6 +5,7 @@ import Security
 import DurableHostStore
 import ResumableMLXProvider
 import ReachWire
+import RecoveryAuthorityContract
 
 public enum LifecycleError: Error, Equatable {
     case invalid(String), io(String, Int32), unauthorized, ticket, expired, stale, busy, closed, uncertain, full, queued, retired, nonResumable, cleanupBlocked
@@ -26,16 +27,21 @@ public struct SystemLifecycleClock: LifecycleClock {
     }
 }
 public struct LifecycleIdentity {
+    public let authority: AuthorityStorageIdentity?
     public let incarnation: String
     public let boot: String
     public let clockPolicy: String
     public let quota: Int
     public init(incarnation: String = UUID().uuidString.lowercased(), clock: any LifecycleClock, quota: Int = LifecycleLimits.allocation) throws {
-        self.incarnation = incarnation; boot = try StoreEnvironment.bootIdentity(); clockPolicy = clock.policy; self.quota = quota
+        authority=nil; self.incarnation = incarnation; boot = try StoreEnvironment.bootIdentity(); clockPolicy = clock.policy; self.quota = quota
         try validate(clock)
     }
+    public init(recoveryAuthority identity: AuthorityStorageIdentity) throws {
+        try identity.validate(); guard identity.root.role == "host" else { throw AuthorityError.scope }
+        authority=identity; incarnation=identity.root.localID; boot=identity.root.boot; clockPolicy=identity.policy; quota=identity.quota
+    }
     func validate(_ clock: any LifecycleClock) throws {
-        guard lcUUID(incarnation), boot == (try StoreEnvironment.bootIdentity()), clock.policy == clockPolicy,
+        guard authority == nil, lcUUID(incarnation), boot == (try StoreEnvironment.bootIdentity()), clock.policy == clockPolicy,
               clockPolicy == "system-monotonic-raw-ns-v1" || clockPolicy.hasPrefix("fixture-ns-v1:") || (clockPolicy.hasPrefix("role-monotonic-ns-v1:") && lcUUID(String(clockPolicy.dropFirst(21)))),
               (LifecycleLimits.metadataReserve...LifecycleLimits.allocation).contains(quota) else { throw LifecycleError.invalid("root/boot/clock/quota") }
         try lcID(clockPolicy)
@@ -95,12 +101,13 @@ struct GenerationSecrets: Codable {
 }
 struct LifecycleRequest: Codable {
     var version = 1
+    var authority: String? = nil
     var namespace: String
     var generation: String
     var caller: CallerIdentity
     var provider: ProviderBinding
     func validate() throws {
-        guard version == 1, lcUUID(namespace), case .supported = ResumableMLXProvider.assess(provider),
+        guard (version == 1 && authority == nil || version == 2 && authority.map(AuthorityCodec.isDigest) == true), lcUUID(namespace), case .supported = ResumableMLXProvider.assess(provider),
               try lcEncode(self).count <= LifecycleLimits.request else { throw LifecycleError.invalid("request binding") }
         try lcID(generation); try caller.validate()
     }

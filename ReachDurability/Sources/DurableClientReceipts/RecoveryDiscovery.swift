@@ -7,7 +7,7 @@ public struct RecoveredClient {
 extension DurableClientReceipts {
     func recoveryBinding(_ binding: RecoveryBinding) throws {
         try fs.ensure(); try environment.validate(clock); try binding.validate()
-        guard (environment.authorityMode == .independent) == binding.independent, binding.pair == environment.pairDigest else { throw RecoveryError.invalid }
+        guard !binding.authorityOnly, environment.authorityMode != .recoveryAuthority, (environment.authorityMode == .independent) == binding.independent, binding.pair == environment.pairDigest else { throw RecoveryError.invalid }
         guard crEqual(binding.clientRoot,environment.rootID), crEqual(binding.boot,environment.boot),
               crEqual(binding.clientPolicy,environment.policy) else { throw RecoveryError.invalid }
     }

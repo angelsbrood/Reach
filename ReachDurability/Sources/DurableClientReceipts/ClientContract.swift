@@ -1,6 +1,7 @@
 import Foundation
 import CryptoKit
 import Darwin
+import RecoveryAuthorityContract
 
 public enum ClientError: Error, Equatable {
     case invalid(String), io(String, Int32), unauthorized, expired, stale, busy, closed, full, unavailable
@@ -21,18 +22,25 @@ public struct SystemClientClock: ClientClock {
     }
 }
 public struct ClientEnvironment {
+    public let authority: AuthorityStorageIdentity?
     public let rootID: String
     public let boot: String
     public let policy: String
     public let quota: Int
     public let authorityMode: ClientAuthorityMode, pairDigest: String?, retentionCap: UInt64
     public init(rootID: String = UUID().uuidString.lowercased(), clock: any ClientClock, quota: Int = ClientLimits.allocation, authorityMode: ClientAuthorityMode = .legacy, pairDigest: String? = nil, retentionCap: UInt64 = ClientLimits.session) throws {
-        self.authorityMode = authorityMode; self.pairDigest = pairDigest; self.retentionCap = retentionCap
+        authority=nil; self.authorityMode = authorityMode; self.pairDigest = pairDigest; self.retentionCap = retentionCap
         self.rootID = rootID; self.boot = try Self.bootIdentity(); self.policy = clock.policy; self.quota = quota
         try validate(clock)
     }
+    public init(recoveryAuthority identity: AuthorityStorageIdentity) throws {
+        try identity.validate(); guard identity.root.role == "client" else { throw AuthorityError.scope }
+        authority=identity; authorityMode = .recoveryAuthority; rootID=identity.root.localID; boot=identity.root.boot
+        policy=identity.policy; quota=identity.quota; pairDigest=try identity.provision.digest
+        retentionCap=try identity.provision.originals.records().client.cap
+    }
     func validate(_ clock: any ClientClock) throws {
-        guard crUUID(rootID), boot == (try Self.bootIdentity()), crEqual(policy, clock.policy),
+        guard authority == nil, authorityMode != .recoveryAuthority, crUUID(rootID), boot == (try Self.bootIdentity()), crEqual(policy, clock.policy),
               (authorityMode == .independent ? clientRolePolicy(policy) : (policy == "system-monotonic-raw-ns-v1" || policy.hasPrefix("fixture-ns-v1:"))),
               (authorityMode == .independent ? (pairDigest.map(crDigest) == true && retentionCap > 0 && retentionCap <= ClientLimits.session) : pairDigest == nil),
               (ClientLimits.metadataReserve...ClientLimits.allocation).contains(quota) else { throw ClientError.invalid("environment") }
@@ -54,21 +62,22 @@ public struct ClientCaller: Codable {
 }
 public struct ClientContext: Codable {
     public let version: Int
+    public let authority: String?
     public let caller: ClientCaller
     public let host: String, store: String, namespace: String, generation: String, request: String, operation: String
     public let upstreamDigest: String, route: String, projection: String, revision: String
     public let issued: UInt64, expires: UInt64
     public init(caller: ClientCaller, host: String, store: String, namespace: String, generation: String,
                 request: String, operation: String, upstreamDigest: String, route: String,
-                projection: String = "s80-events-v1", revision: String, issued: UInt64, expires: UInt64) {
-        version = 1; self.caller = caller; self.host = host; self.store = store; self.namespace = namespace
+                projection: String = "s80-events-v1", revision: String, issued: UInt64, expires: UInt64, authority: String? = nil) {
+        self.authority=authority; version = authority == nil ? 1 : 2; self.caller = caller; self.host = host; self.store = store; self.namespace = namespace
         self.generation = generation; self.request = request; self.operation = operation; self.upstreamDigest = upstreamDigest
         self.route = route; self.projection = projection; self.revision = revision; self.issued = issued; self.expires = expires
     }
     func validate() throws {
         try caller.validate()
         for id in [host, store, namespace, generation, request, operation, route, revision] { try crID(id) }
-        guard version == 1, projection == "s80-events-v1", crDigest(upstreamDigest), issued > 0,
+        guard (version == 1 && authority == nil || version == 2 && authority.map(AuthorityCodec.isDigest) == true && revision == "s100-host-client-authority-v1"), projection == "s80-events-v1", crDigest(upstreamDigest), issued > 0,
               expires > issued, expires <= (try crAdd(issued, ClientLimits.session)),
               try crEncode(self).count <= ClientLimits.context else { throw ClientError.invalid("context") }
     }

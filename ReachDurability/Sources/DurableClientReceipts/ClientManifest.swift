@@ -21,11 +21,12 @@ struct ClientRecord: Codable {
 }
 struct ClientManifest: Codable {
     var version = 1
+    var authority: String? = nil
     var root: String, boot: String, policy: String
     var revision: UInt64, ownerEpoch: UInt64, observed: UInt64
     var records: [ClientRecord] = []
     func validate(_ e: ClientEnvironment) throws {
-        guard version == (e.authorityMode == .legacy ? 1 : 2), crEqual(root, e.rootID), crEqual(boot, e.boot), crEqual(policy, e.policy),
+        guard version == e.authorityMode.storageVersion, authority == (try e.authority?.digest), crEqual(root, e.rootID), crEqual(boot, e.boot), crEqual(policy, e.policy),
               revision > 0, ownerEpoch > 0, observed > 0, records.count <= ClientLimits.records else { throw ClientError.unavailable }
         var ids = Set<String>(), identities = Set<String>(), roles = Set<String>(), calls = 0
         var anchors: [String: String] = [:]
@@ -50,6 +51,7 @@ struct ClientManifest: Codable {
 }
 struct ClientSnapshot: Codable {
     var version = 1
+    var authority: String? = nil
     var context: Data
     var batches: [InboxBatch] = []
     var calls: [ClientCall] = []
@@ -67,7 +69,7 @@ struct ClientSnapshot: Codable {
         guard future <= ClientLimits.snapshot else { throw ClientError.full }; return future
     }
     func validate(_ live: LiveClientRecord) throws {
-        guard version == 1, context.count <= ClientLimits.context, crHash(context) == live.contextDigest,
+        guard version == (live.retention?.acceptance == nil ? 1 : 2), authority == (try live.retention?.acceptance?.admission().scope.digest), context.count <= ClientLimits.context, crHash(context) == live.contextDigest,
               batches.count <= 4095, calls.count == live.calls, high <= 65536,
               receiptRevision <= live.snapshot.revision, calls.count <= 32 else { throw ClientError.unavailable }
         let decoded = try JSONDecoder().decode(ClientContext.self, from: context)

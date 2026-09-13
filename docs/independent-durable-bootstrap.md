@@ -10,6 +10,10 @@ For finite initialization and fresh-process explicit retirement, select the
 [durable role lifecycle](durable-role-lifecycle.md). The examples below retain
 the original foreground creator mode and version 1 roots.
 
+The separate qualification-only [recovery-authority lane](cross-boot-recovery-authority.md)
+uses new versioned records for bounded authentication after receiver reboot. It
+does not upgrade this independent profile or its original boot-local clocks.
+
 ## Provision and initialize
 
 The operator supplies the selected artifact directory, request, and a public

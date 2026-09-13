@@ -9,6 +9,10 @@ import ReachDaemon
 enum ReachdMain {
     static func main() async {
         normalizeLaunchIdentity()
+        if CommandLine.arguments.dropFirst().first == "durable-recovery-authority" {
+            DurableRecoveryAuthority.main(Array(CommandLine.arguments.dropFirst(2)))
+            return
+        }
         await Reachd.main()
     }
 

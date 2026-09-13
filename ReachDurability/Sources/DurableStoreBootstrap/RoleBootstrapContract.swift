@@ -1,5 +1,6 @@
 import Foundation
 import DurableRootKeys
+import RecoveryAuthorityContract
 
 /// One local transaction and exactly its own key selectors. No paired S85 core.
 public struct RoleBootstrapCore: Codable, Equatable {
@@ -9,11 +10,12 @@ public struct RoleBootstrapCore: Codable, Equatable {
     public let origin: UInt64, quota: Int
     public let keys: [RootKeyReference]
     public let lifecycle: RoleLifecycleIdentity?
+    public let authority: AuthorityProvision?
     public let unlockPolicy: String?
-    public var policy: String { "role-monotonic-ns-v1:" + epoch }
+    public var policy: String { authority.map { role == .host ? $0.hostPolicy : $0.clientPolicy } ?? ("role-monotonic-ns-v1:" + epoch) }
     public init(role: BootstrapRole, localID: String, root: String, agreement: String, selection: String,
-                origin: UInt64, epoch: String, boot: String, quota: Int, lifecycle: RoleLifecycleIdentity? = nil, unlockPolicy: String? = nil) {
-        version=unlockPolicy != nil ? 3 : lifecycle == nil ? 1 : 2; self.unlockPolicy=unlockPolicy; self.lifecycle=lifecycle; self.role=role; self.localID=localID; self.root=root
+                origin: UInt64, epoch: String, boot: String, quota: Int, lifecycle: RoleLifecycleIdentity? = nil, unlockPolicy: String? = nil, authority: AuthorityProvision? = nil) {
+        self.authority=authority; version=authority != nil ? 4 : unlockPolicy != nil ? 3 : lifecycle == nil ? 1 : 2; self.unlockPolicy=unlockPolicy; self.lifecycle=lifecycle; self.role=role; self.localID=localID; self.root=root
         let id=UUID().uuidString.lowercased(); identifier=id; container=root+"/keys/role.keychain-db"
         self.agreement=agreement; self.selection=selection; self.origin=origin
         self.epoch=epoch; self.boot=boot; self.quota=quota
@@ -31,13 +33,24 @@ public struct RoleBootstrapCore: Codable, Equatable {
     /// Only the explicit cleanup path admits an original v3 role from another boot.
     public func validateForAfterBootRetirement() throws {
         try validateStructure(role:role,root:root)
-        try RootKeyCodec.require(version == 3 && unlockPolicy == UnlockCredential.policy && boot != RootKeyCodec.boot())
+        try RootKeyCodec.require((version == 3 || version == 4) && unlockPolicy == UnlockCredential.policy && boot != RootKeyCodec.boot())
+    }
+    /// Explicit qualification authentication; ordinary acquisition still refuses v4.
+    public func validateForRecoveryAuthority() throws {
+        try validateStructure(role:role,root:root)
+        try RootKeyCodec.require(version == 4)
     }
     private func validateStructure(role: BootstrapRole, root: String) throws {
-        try RootKeyCodec.require((version==1 && lifecycle==nil && unlockPolicy==nil || version==2 && lifecycle != nil && unlockPolicy==nil || version==3 && lifecycle != nil && unlockPolicy==UnlockCredential.policy) && self.role==role && self.root==root && container==root+"/keys/role.keychain-db" &&
+        try RootKeyCodec.require((version==1 && lifecycle==nil && unlockPolicy==nil && authority==nil || version==2 && lifecycle != nil && unlockPolicy==nil && authority==nil || version==3 && lifecycle != nil && unlockPolicy==UnlockCredential.policy && authority==nil || version==4 && lifecycle != nil && unlockPolicy==UnlockCredential.policy && authority != nil) && self.role==role && self.root==root && container==root+"/keys/role.keychain-db" &&
             [identifier,localID,boot,epoch].allSatisfy(RootKeyCodec.uuid) && identifier != localID && origin>0 &&
             RootKeyCodec.digest(agreement) && RootKeyCodec.digest(selection) &&
             (BootstrapLimits.minimumQuota...(1<<30)).contains(quota))
+        if let authority {
+            try authority.validate()
+            let records=try authority.originals.records()
+            try RootKeyCodec.require(agreement == authority.digest && localID == (role == .host ? authority.hostID : authority.clientID) &&
+                origin == (role == .host ? records.host.anchor : records.client.anchor) && epoch == authority.originals.pin.epoch)
+        }
         if let lifecycle { try lifecycle.validate(root:root) }
         let roles: [RootKeyRole] = role == .host ? [.hostCatalog,.hostTicket] : [.clientMetadata]
         try RootKeyCodec.require(keys.map(\.role)==roles && Set(keys.map(\.identifier)).count==roles.count)
@@ -50,6 +63,7 @@ public struct RoleBootstrapCore: Codable, Equatable {
         case 1: domain="S95/role-bootstrap/v1\0"
         case 2: domain="S96/role-bootstrap/v2\0"
         case 3: domain="S97/role-bootstrap/v3\0"
+        case 4: domain="S100/role-bootstrap/v4\0"
         default: throw BootstrapError.invalid
         }
         return RootKeyCodec.hash(Data(domain.utf8)+Data(try RootKeyCodec.encode(self,limit:BootstrapLimits.record)))

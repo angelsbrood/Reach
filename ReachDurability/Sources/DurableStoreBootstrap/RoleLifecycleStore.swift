@@ -6,7 +6,7 @@ import DurableRootKeys
 /// this same exclusion before keys/journals and through resource release.
 public final class RoleLifecycleLease {
     public let core: RoleBootstrapCore
-    private let afterBootRetirement: Bool
+    private let afterBootRetirement: Bool, authorityRead: Bool
     private let parent: String, receiptName: String, process = getpid(), created: Bool
     private var directory: Int32 = -1, lock: Int32 = -1, journal: Int32 = -1
     private var directoryInode: UInt64 = 0, lockInode: UInt64 = 0, device: Int32 = 0
@@ -14,12 +14,13 @@ public final class RoleLifecycleLease {
     private var lockName: String { receiptName + ".lock" }
     private var stateName: String { receiptName + ".state.json" }
     private var nextName: String { receiptName + ".next" }
-    private init(core: RoleBootstrapCore, create: Bool, afterBootRetirement: Bool = false) throws {
-        guard (2...3).contains(core.version), let lifecycle = core.lifecycle else { throw BootstrapError.invalid }
-        if afterBootRetirement {
+    private init(core: RoleBootstrapCore, create: Bool, afterBootRetirement: Bool = false, authorityRead: Bool = false) throws {
+        guard (2...4).contains(core.version), let lifecycle = core.lifecycle else { throw BootstrapError.invalid }
+        if authorityRead { try RootKeyCodec.require(!create); try core.validateForRecoveryAuthority() }
+        else if afterBootRetirement {
             try RootKeyCodec.require(!create); try core.validateForAfterBootRetirement()
         } else { try core.validateDescription(role: core.role, root: core.root) }
-        self.afterBootRetirement = afterBootRetirement
+        self.afterBootRetirement = afterBootRetirement; self.authorityRead=authorityRead
         self.core = core; created = create
         parent = try RootKeyCodec.parent(lifecycle.receipt)
         receiptName = URL(fileURLWithPath: lifecycle.receipt).lastPathComponent
@@ -43,7 +44,7 @@ public final class RoleLifecycleLease {
             try ensure()
             if create {
                 try RootKeyCodec.require(lifecycle.identity.present())
-                try writeNew(stateName, bytes: RootKeyCodec.encode(RoleLifecycleState(phase: .creating, core: core.binding(), receipt: nil), limit: BootstrapLimits.record))
+                try writeNew(stateName, bytes: RootKeyCodec.encode(RoleLifecycleState(phase: .creating, core: core.binding(), receipt: nil, version:core.version == 4 ? 2 : 1), limit: BootstrapLimits.record))
             }
         } catch {
             if create { try? rollbackCreation() }
@@ -52,6 +53,7 @@ public final class RoleLifecycleLease {
     }
     public static func create(core: RoleBootstrapCore) throws -> RoleLifecycleLease { try .init(core: core, create: true) }
     public static func acquire(ready: RoleBootstrapReady) throws -> RoleLifecycleLease {
+        guard ready.core.version <= 3 else { throw BootstrapError.invalid }
         let lease = try RoleLifecycleLease(core: ready.core, create: false)
         try lease.confirmReady(ready); return lease
     }
@@ -74,8 +76,24 @@ public final class RoleLifecycleLease {
         _ = try lease.phase(receipt:receipt)
         return (receipt,lease)
     }
+    public static func selectRecoveryAuthority(receipt path: String, expectedDigest: String) throws -> (RoleOwnershipReceipt, RoleLifecycleLease) {
+        _=try RootKeyCodec.parent(path); _=try RootKeyCodec.regular(path,maximum:BootstrapLimits.record,mode:0o600)
+        let receipt=try RootKeyCodec.decode(RoleOwnershipReceipt.self,Data(contentsOf:URL(fileURLWithPath:path)),limit:BootstrapLimits.record)
+        try RootKeyCodec.require(receipt.digestForRecoveryAuthority() == expectedDigest && receipt.ready.core.lifecycle?.receipt == path)
+        let lease=try RoleLifecycleLease(core:receipt.ready.core,create:false,authorityRead:true)
+        try lease.confirmRecoveryAuthorityReady(receipt.ready)
+        return (receipt,lease)
+    }
+    public func confirmRecoveryAuthorityReady(_ ready: RoleBootstrapReady) throws {
+        try ensure(); try RootKeyCodec.require(authorityRead && !afterBootRetirement && ready.core == core)
+        let receipt=try RoleOwnershipReceipt(recoveryAuthority:ready)
+        _=try selectedReceipt(expectedDigest:receipt.digestForRecoveryAuthority())
+        try RootKeyCodec.require(phase(receipt:receipt) == .ready)
+        var pending=stat()
+        try RootKeyCodec.require(fstatat(directory,nextName,&pending,AT_SYMLINK_NOFOLLOW) != 0 && errno == ENOENT)
+    }
     private func receiptDigest(_ receipt: RoleOwnershipReceipt) throws -> String {
-        try afterBootRetirement ? receipt.digestForAfterBootRetirement() : receipt.digest()
+        try authorityRead ? receipt.digestForRecoveryAuthority() : afterBootRetirement ? receipt.digestForAfterBootRetirement() : receipt.digest()
     }
     private func regular(_ fd: Int32, empty: Bool = false) throws -> stat {
         var value = stat()
@@ -125,7 +143,8 @@ public final class RoleLifecycleLease {
     }
     private func setPhase(_ phase: RoleLifecyclePhase, receipt: RoleOwnershipReceipt,
         recoveringAfterBootPending: Bool = false, afterPendingWrite: () throws -> Void = {}) throws {
-        let bytes = try RootKeyCodec.encode(RoleLifecycleState(phase: phase, core: core.binding(), receipt: receiptDigest(receipt)), limit: BootstrapLimits.record)
+        try RootKeyCodec.require(!authorityRead)
+        let bytes = try RootKeyCodec.encode(RoleLifecycleState(phase: phase, core: core.binding(), receipt: receiptDigest(receipt), version:core.version == 4 ? 2 : 1), limit: BootstrapLimits.record)
         var recovered = false
         if recoveringAfterBootPending {
             try RootKeyCodec.require(afterBootRetirement && journal >= 0 && phase == .retiring && self.phase(receipt:receipt) == .ready)
@@ -157,9 +176,9 @@ public final class RoleLifecycleLease {
         return receipt
     }
     public func confirmCreating(_ value: RoleBootstrapCore) throws {
-        try ensure(); try RootKeyCodec.require(!afterBootRetirement && created && value == core && core.lifecycle!.identity.present())
+        try ensure(); try RootKeyCodec.require(!afterBootRetirement && !authorityRead && created && value == core && core.lifecycle!.identity.present())
         let state = try RootKeyCodec.decode(RoleLifecycleState.self, read(stateName), limit: BootstrapLimits.record)
-        try RootKeyCodec.require(state.version == 1 && state.phase == .creating && state.core == core.binding() && state.receipt == nil)
+        try RootKeyCodec.require(state.version == (core.version == 4 ? 2 : 1) && state.phase == .creating && state.core == core.binding() && state.receipt == nil)
     }
     public func publish(_ ready: RoleBootstrapReady) throws -> String {
         try confirmCreating(ready.core)
@@ -169,7 +188,7 @@ public final class RoleLifecycleLease {
         return try receipt.digest()
     }
     public func confirmReady(_ ready: RoleBootstrapReady) throws {
-        try ensure(); try RootKeyCodec.require(!afterBootRetirement && ready.core == core && core.lifecycle!.identity.present())
+        try ensure(); try RootKeyCodec.require(!afterBootRetirement && !authorityRead && ready.core == core && core.lifecycle!.identity.present())
         let expected = try RoleOwnershipReceipt(ready: ready), receipt = try selectedReceipt(expectedDigest: expected.digest())
         try RootKeyCodec.require(phase(receipt: receipt) == .ready)
         var pending = stat()
@@ -178,7 +197,7 @@ public final class RoleLifecycleLease {
     public func phase(receipt: RoleOwnershipReceipt) throws -> RoleLifecyclePhase {
         try ensure(); try RootKeyCodec.require(receipt.ready.core == core)
         let state = try RootKeyCodec.decode(RoleLifecycleState.self, read(stateName), limit: BootstrapLimits.record)
-        try RootKeyCodec.require(state.version == 1 && state.core == core.binding() && state.receipt == receiptDigest(receipt) && state.phase != .creating)
+        try RootKeyCodec.require(state.version == (core.version == 4 ? 2 : 1) && state.core == core.binding() && state.receipt == receiptDigest(receipt) && state.phase != .creating)
         return state.phase
     }
     public func lockJournal() throws {

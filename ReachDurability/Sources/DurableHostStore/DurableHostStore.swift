@@ -50,7 +50,7 @@ public final class DurableHostStore {
         let encrypted = try files.read("current", maximum: StoreLimits.manifest+StoreCrypto.overhead)
         let plain = try StoreCrypto.open(encrypted, identity: identity, role: "manifest", epoch: nil, keys: keys)
         let m = try JSONDecoder().decode(StoreManifest.self, from: plain)
-        guard m.version == 1, m.storeID == identity.storeID, m.bootID == identity.bootID,
+        guard m.version == 1, m.authority == nil, m.storeID == identity.storeID, m.bootID == identity.bootID,
               m.bindingDigest == (try identity.bindingDigest), m.epoch > 0,
               m.high <= UInt64(StoreLimits.events), (0...StoreLimits.commits).contains(m.batches),
               try storeEncode(m) == plain else { throw StoreError.invalid("authenticated manifest declaration") }

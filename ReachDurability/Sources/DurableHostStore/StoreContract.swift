@@ -3,6 +3,7 @@ import Darwin
 import CryptoKit
 import ResumableMLXProvider
 import ReachWire
+import RecoveryAuthorityContract
 
 public enum StoreError: Error, Equatable { case invalid(String), io(String, Int32), busy, closed, stale, full, uncertain, replayRequired, noCommittedGeneration }
 public enum StoreLimits {
@@ -18,17 +19,22 @@ public enum StoreLimits {
     public static let reservation = candidate + replay + manifest + 64*1024
 }
 public struct StoreIdentity {
+    public let authority: String?
     public var storeID: String
     public var bootID: String
     public var provider: ProviderBinding
     public init(storeID: String = UUID().uuidString.lowercased(), provider: ProviderBinding) throws {
-        self.storeID = storeID; bootID = try StoreEnvironment.bootIdentity(); self.provider = provider
+        authority=nil; self.storeID = storeID; bootID = try StoreEnvironment.bootIdentity(); self.provider = provider
         try validate()
+    }
+    public init(authority scope: AuthorityScope, storeID: String, provider: ProviderBinding) throws {
+        try scope.validate(); authority=try scope.digest; self.storeID=storeID; bootID=scope.host.boot; self.provider=provider
+        guard storeUUID(storeID), case .supported = ResumableMLXProvider.assess(provider) else { throw StoreError.invalid("authority store identity") }
     }
     var bindingBytes: Data { get throws { try storeEncode(provider) } }
     var bindingDigest: String { get throws { try storeHash(bindingBytes) } }
     func validate() throws {
-        guard storeUUID(storeID), !bootID.isEmpty, bootID.utf8.count <= 256,
+        guard authority == nil, storeUUID(storeID), !bootID.isEmpty, bootID.utf8.count <= 256,
               bootID == (try StoreEnvironment.bootIdentity()) else { throw StoreError.invalid("store/boot identity") }
         guard case .supported = ResumableMLXProvider.assess(provider) else { throw StoreError.invalid("provider declaration") }
     }

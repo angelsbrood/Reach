@@ -4,7 +4,7 @@ import PackageDescription
 let package = Package(
     name: "CrossBootTimePolicy",
     platforms: [.macOS(.v14)],
-    products: [.executable(name: "clock-qualification", targets: ["ClockQualification"])],
+    products: [.library(name: "ClockPolicy", targets: ["ClockPolicy"]), .executable(name: "clock-qualification", targets: ["ClockQualification"])],
     targets: [
         .target(name: "ClockPolicy"),
         .executableTarget(name: "ClockQualification", dependencies: ["ClockPolicy"]),

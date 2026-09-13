@@ -1,5 +1,6 @@
 import Foundation
 import CryptoKit
+import RecoveryAuthorityContract
 
 public struct SessionTicket {
     public let data: Data
@@ -12,6 +13,7 @@ public struct SessionTicket {
 }
 struct TicketClaims: Codable {
     var version = 1
+    var authority: String? = nil
     var incarnation: String
     var boot: String
     var policy: String
@@ -38,11 +40,31 @@ enum TicketCodec {
         let body = Data(bytes[8..<bytes.count-32]), mac = Data(bytes.suffix(32))
         guard HMAC<SHA256>.isValidAuthenticationCode(mac, authenticating: body, using: keys.ticket) else { throw LifecycleError.ticket }
         let claims = try JSONDecoder().decode(TicketClaims.self, from: body)
-        guard claims.version == 1, claims.incarnation == identity.incarnation, claims.boot == identity.boot,
+        guard claims.version == 1, claims.authority == nil, claims.incarnation == identity.incarnation, claims.boot == identity.boot,
               claims.policy == identity.clockPolicy, claims.caller == auth.caller, lcUUID(claims.namespace),
               claims.issued > 0, claims.issued <= now, claims.expires > claims.issued,
               claims.expires <= (try lcAdd(claims.issued, LifecycleLimits.session)), try lcEncode(claims) == body else { throw LifecycleError.ticket }
         guard now < claims.expires else { throw LifecycleError.expired }
         return claims
+    }
+}
+
+extension TicketCodec {
+    static func authorityClaims(scope: AuthorityScope, caller: CallerIdentity) throws -> TicketClaims {
+        try scope.validate(); try caller.validate()
+        let original=try scope.provision.originals.records().host
+        return try TicketClaims(version:2,authority:scope.digest,incarnation:scope.host.localID,boot:scope.host.boot,
+            policy:scope.provision.hostPolicy,namespace:scope.namespace,caller:caller,issued:original.anchor,expires:original.deadline)
+    }
+    static func issueAuthority(scope: AuthorityScope, keys: LifecycleKeys, caller: CallerIdentity) throws -> SessionTicket {
+        let bytes=try lcEncode(authorityClaims(scope:scope,caller:caller))
+        let mac=Data(HMAC<SHA256>.authenticationCode(for:bytes,using:keys.ticket))
+        return try .init(data:lcUInt(UInt64(bytes.count))+bytes+mac)
+    }
+    static func verifyAuthority(_ data: Data, scope: AuthorityScope, keys: LifecycleKeys, caller: CallerIdentity) throws -> TicketClaims {
+        let expected=try issueAuthority(scope:scope,keys:keys,caller:caller)
+        // Exact deterministic original claims, namespace, MAC, anchors and deadline.
+        guard data == expected.data else { throw LifecycleError.ticket }
+        return try authorityClaims(scope:scope,caller:caller)
     }
 }

@@ -15,6 +15,7 @@ struct StoreBlobReference: Codable {
 }
 struct StoreManifest: Codable {
     var version = 1
+    var authority: String? = nil
     var storeID: String
     var bootID: String
     var bindingDigest: String

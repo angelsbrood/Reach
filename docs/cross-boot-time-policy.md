@@ -6,6 +6,11 @@ Reach runtime byte, versioned format and old-boot refusal unchanged. Its
 qualification does not accept deployed timekeeping, ownership fencing, native
 generation recovery or a later phase. Keeper remains Held.
 
+S100 uses this unchanged clock contract in the explicitly selected
+[recovery-authority lane](cross-boot-recovery-authority.md) for new original
+allocating/preparing records. Its authority guard remains separate from scalar
+runtime clocks and native continuation.
+
 ## Conditional contract
 
 The exact versioned qualification profile binds:
