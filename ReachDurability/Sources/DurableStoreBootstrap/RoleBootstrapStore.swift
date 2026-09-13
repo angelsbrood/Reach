@@ -98,3 +98,31 @@ extension RoleBootstrapStore {
         return BootstrapKeys(values)
     }
 }
+
+extension RoleBootstrapStore {
+    public static func inspectNativeRecovery(at root: String, role: BootstrapRole) throws -> RoleBootstrapReady {
+        let fs=try RoleBootstrapFileSystem(path:root+"/bootstrap",fresh:false,role:role); defer { fs.close() }
+        let names=try fs.scan()
+        guard names.contains("ready.json"), !names.contains("selection.tmp") else { throw BootstrapError.incomplete }
+        let ready=try RootKeyCodec.decode(RoleBootstrapReady.self,fs.read("ready.json"),limit:BootstrapLimits.record)
+        let intent=try RootKeyCodec.decode(RoleIntent.self,fs.read("intent.json"),limit:BootstrapLimits.record)
+        try ready.core.validateForNativeRecovery()
+        guard ready.core.root == root, ready.core.role == role, ready.state == "ready", intent.state == "creating", intent.core == ready.core,
+              ready.confirmations.count == ready.core.keys.count, ready.confirmations.allSatisfy({$0.count == 32}) else { throw BootstrapError.invalid }
+        return ready
+    }
+    public static func acquireNativeRecovery(ready: RoleBootstrapReady, lease: RoleLifecycleLease,
+        provider: any RootKeyProvider) throws -> BootstrapKeys {
+        let actual=try inspectNativeRecovery(at:ready.core.root,role:ready.core.role)
+        guard try RootKeyCodec.encode(actual,limit:BootstrapLimits.record) == RootKeyCodec.encode(ready,limit:BootstrapLimits.record) else { throw BootstrapError.invalid }
+        try lease.confirmNativeRecoveryReady(ready)
+        var values:[RootKeyRole:RootKeyMaterial]=[:]
+        let binding=try ready.core.binding()
+        for (reference,confirmation) in zip(ready.core.keys,ready.confirmations) {
+            let key=try provider.load(reference,binding:binding)
+            try key.confirm(confirmation,reference:reference,binding:binding); values[reference.role]=key
+        }
+        try lease.confirmNativeRecoveryReady(ready)
+        return BootstrapKeys(values)
+    }
+}

@@ -170,3 +170,5 @@ No wall-time translation can migrate historical v1/v2/v3 tickets, retention or
 root authority into this candidate. S99 specifies this later test; it does not
 execute a synthetic-clock substitute or count a witness demonstration as native
 generation recovery.
+
+The separate [S101 ordinary native qualification lane](cross-boot-native-recovery.md) binds original generation records to fresh witness actions across reboot.

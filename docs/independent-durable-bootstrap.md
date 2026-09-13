@@ -134,3 +134,5 @@ and boot differences. It establishes neither physical cross-machine operation
 nor cross-boot/unattended key reopening. Public endpoints, default model/SDK
 adoption, real effects, installed credentials/services and deployment remain
 outside this route.
+
+The separate [S101 ordinary native qualification lane](cross-boot-native-recovery.md) binds original generation records to fresh witness actions across reboot.

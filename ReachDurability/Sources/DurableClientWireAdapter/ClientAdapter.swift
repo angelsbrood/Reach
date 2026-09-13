@@ -24,7 +24,7 @@ public final class DurableClientWireAdapter {
     }
     public init(configuration:AdapterConfiguration,owner:DurableClientReceipts,authorization:ClientAuthorization,binding:RecoveryBinding,parent:String,allowNew:Bool,requestPolicy:any AdapterRequestPolicy,legacyCore:BootstrapCore?=nil) throws {
         try requestPolicy.validate(configuration); try binding.validate(); self.requestPolicy=requestPolicy
-        guard !binding.authorityOnly, owner.authorityMode != .recoveryAuthority, binding.independent == (owner.authorityMode == .independent),
+        guard !binding.authorityOnly, !binding.nativeRecovery, owner.authorityMode != .recoveryAuthority, binding.independent == (owner.authorityMode == .independent),
               configuration.profile == (binding.independent ? DurableWire.independentProfile : DurableWire.profile),
               binding.independent ? legacyCore == nil : legacyCore != nil else { throw AdapterError.incompatible }
         self.configuration=configuration;self.owner=owner;self.authorization=authorization;core=legacyCore;self.parent=parent;self.allowNew=allowNew

@@ -5,7 +5,7 @@ import RecoveryAuthorityContract
 
 extension DurableClientReceipts {
     public static func initializeRecoveryAuthority(at path: String, environment e: ClientEnvironment, metadataKey: Data) throws {
-        guard let original=e.authority, metadataKey.count == 32 else { throw AuthorityError.scope }
+        guard let original=e.authority, !original.provision.native, metadataKey.count == 32 else { throw AuthorityError.scope }
         try original.validate()
         let fs=try ClientFileSystem(path:path,create:true); defer { fs.close() }
         let m=try ClientManifest(version:3,authority:original.digest,root:e.rootID,boot:e.boot,policy:e.policy,
@@ -40,7 +40,7 @@ extension DurableClientReceipts {
         fault: RecoveryHook = { _ in }) throws {
         let a=try acceptance.admission(), scope=a.scope
         try action.check(scope:scope,operation:.acceptClient)
-        guard let original=e.authority, metadataKey.count == 32, scope.client.boot == (try ClientEnvironment.bootIdentity()) else { throw AuthorityError.scope }
+        guard let original=e.authority, !original.provision.native, metadataKey.count == 32, scope.client.boot == (try ClientEnvironment.bootIdentity()) else { throw AuthorityError.scope }
         try original.check(scope,role:"client")
         let fs=try ClientFileSystem(path:path,create:false); defer { fs.close() }; try action.check(scope:scope,operation:.acceptClient)
         let key=SymmetricKey(data:metadataKey), old=try readAuthorityManifest(fs,environment:e,key:key,action:action)

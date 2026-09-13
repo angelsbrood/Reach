@@ -3,11 +3,13 @@ import Darwin
 import CryptoKit
 import DurableHostStore
 import RecoveryAuthorityContract
+import HostClientContract
 
 struct CatalogDocument: Codable {
     var version = 1
     var authority: String? = nil
     var admission: AuthorityIssued? = nil
+    var nativeReceipt: HandoffWitness? = nil
     var incarnation: String
     var boot: String
     var clockPolicy: String
@@ -16,7 +18,7 @@ struct CatalogDocument: Codable {
     var lastObserved: UInt64
     var records: [LifecycleRecord] = []
     func validate(_ identity: LifecycleIdentity) throws {
-        guard version == (identity.authority == nil ? 1 : 2), authority == (try identity.authority?.digest), identity.authority != nil || admission == nil, incarnation == identity.incarnation, boot == identity.boot, clockPolicy == identity.clockPolicy,
+        guard version == (identity.authority?.provision.native == true ? 3 : identity.authority == nil ? 1 : 2), authority == (try identity.authority?.digest), identity.authority != nil || admission == nil, identity.authority?.provision.native == true || nativeReceipt == nil, incarnation == identity.incarnation, boot == identity.boot, clockPolicy == identity.clockPolicy,
               quota == identity.quota, epoch > 0, lastObserved > 0, records.count <= LifecycleLimits.records,
               records.filter({ $0.phase.reservesExecution }).count <= 1, records.filter({ $0.phase == .queued }).count <= 3 else { throw LifecycleError.invalid("catalog declaration") }
         var ids = Set<String>(), operations = Set<String>(), generationKeys = Set<String>(), waiters = Set<String>(), locators = Set<String>()
@@ -44,7 +46,7 @@ struct CatalogDocument: Codable {
                       t.attached ? t.detachedUntil == nil : t.detachedUntil != nil else { throw LifecycleError.invalid("persisted deadline/attachment") }
                 if r.phase == .terminal {
                     guard r.ending != nil, let start = t.transitionStartedAt,
-                          t.terminalUntil == min(try lcAdd(start, LifecycleLimits.terminal), t.absoluteUntil, id.ticketExpiry) else { throw LifecycleError.invalid("terminal time join") }
+                          t.terminalUntil == (identity.authority?.provision.native == true ? id.ticketExpiry : min(try lcAdd(start, LifecycleLimits.terminal), t.absoluteUntil, id.ticketExpiry)) else { throw LifecycleError.invalid("terminal time join") }
                 } else {
                     guard r.ending == nil, t.terminalUntil == nil else { throw LifecycleError.invalid("nonterminal time join") }
                 }

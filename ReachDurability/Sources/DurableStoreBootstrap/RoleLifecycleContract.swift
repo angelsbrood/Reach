@@ -19,8 +19,8 @@ public struct RoleLifecycleIdentity: Codable, Equatable {
 public struct RoleOwnershipReceipt: Codable {
     public let version: Int, ready: RoleBootstrapReady, container: OwnedContainerSelection
     public init(ready: RoleBootstrapReady) throws {
-        guard let lifecycle = ready.core.lifecycle, (2...4).contains(ready.core.version) else { throw BootstrapError.invalid }
-        version = ready.core.version == 4 ? 2 : 1; self.ready = ready
+        guard let lifecycle = ready.core.lifecycle, (2...5).contains(ready.core.version) else { throw BootstrapError.invalid }
+        version = ready.core.ownershipVersion; self.ready = ready
         container = .init(identity: lifecycle.identity, boot: ready.core.boot, executable: lifecycle.executable,
             binding: try ready.core.binding(), references: ready.core.keys, confirmations: ready.confirmations)
         try validate()
@@ -40,13 +40,23 @@ public struct RoleOwnershipReceipt: Codable {
         try validate(afterBootRetirement:false, authority:true)
     }
     public func digestForRecoveryAuthority() throws -> String { try validateForRecoveryAuthority(); return try encodedDigest() }
-    private func validate(afterBootRetirement: Bool, authority: Bool = false) throws {
+    public init(nativeRecovery ready: RoleBootstrapReady) throws {
+        try ready.core.validateForNativeRecovery()
+        guard let lifecycle=ready.core.lifecycle else { throw BootstrapError.invalid }
+        version=3; self.ready=ready
+        container = .init(identity:lifecycle.identity,boot:ready.core.boot,executable:lifecycle.executable,binding:try ready.core.binding(),references:ready.core.keys,confirmations:ready.confirmations)
+        try validateForNativeRecovery()
+    }
+    public func validateForNativeRecovery() throws { try validate(afterBootRetirement:false,native:true) }
+    public func digestForNativeRecovery() throws -> String { try validateForNativeRecovery(); return try encodedDigest() }
+    private func validate(afterBootRetirement: Bool, authority: Bool = false, native: Bool = false) throws {
         let core = ready.core
         guard let lifecycle = core.lifecycle else { throw BootstrapError.invalid }
-        if authority { try core.validateForRecoveryAuthority() }
+        if native { try core.validateForNativeRecovery() }
+        else if authority { try core.validateForRecoveryAuthority() }
         else if afterBootRetirement { try core.validateForAfterBootRetirement() }
         else { try core.validateDescription(role: core.role, root: core.root) }
-        try RootKeyCodec.require(version == (core.version == 4 ? 2 : 1) && (2...4).contains(core.version) && ready.state == "ready" &&
+        try RootKeyCodec.require(version == (core.ownershipVersion) && (2...5).contains(core.version) && ready.state == "ready" &&
             container == OwnedContainerSelection(identity: lifecycle.identity, boot: core.boot, executable: lifecycle.executable,
                 binding: try core.binding(), references: core.keys, confirmations: ready.confirmations))
         try container.validate(); _ = try RootKeyCodec.encode(self, limit: BootstrapLimits.record)
@@ -54,7 +64,7 @@ public struct RoleOwnershipReceipt: Codable {
     public func digest() throws -> String { try validate(); return try encodedDigest() }
     public func digestForAfterBootRetirement() throws -> String { try validateForAfterBootRetirement(); return try encodedDigest() }
     private func encodedDigest() throws -> String {
-        return RootKeyCodec.hash(Data((version == 2 ? "S100/role-ownership-receipt/v2\0" : "S96/role-ownership-receipt/v1\0").utf8) + (try RootKeyCodec.encode(self, limit: BootstrapLimits.record)))
+        return RootKeyCodec.hash(Data((version == 3 ? "S101/role-ownership-receipt/v3\0" : version == 2 ? "S100/role-ownership-receipt/v2\0" : "S96/role-ownership-receipt/v1\0").utf8) + (try RootKeyCodec.encode(self, limit: BootstrapLimits.record)))
     }
 }
 
@@ -73,7 +83,7 @@ struct RoleLifecycleCleanupObservation: Codable, Equatable {
     init(receipt: RoleOwnershipReceipt, current: OwnedAfterBootRoot) throws {
         try receipt.validateForAfterBootRetirement(); try current.check()
         try RootKeyCodec.require(current.original == receipt.container.identity)
-        version = receipt.ready.core.version == 4 ? 2 : 1; core = try receipt.ready.core.binding(); self.receipt = try receipt.digestForAfterBootRetirement()
+        version = receipt.ready.core.ownershipVersion; core = try receipt.ready.core.binding(); self.receipt = try receipt.digestForAfterBootRetirement()
         selection = try receipt.container.digest(); boot = try RootKeyCodec.boot()
         root = current.original.root; device = current.device; inode = current.inode
     }

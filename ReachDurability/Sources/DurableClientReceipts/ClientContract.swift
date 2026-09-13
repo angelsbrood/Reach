@@ -35,12 +35,12 @@ public struct ClientEnvironment {
     }
     public init(recoveryAuthority identity: AuthorityStorageIdentity) throws {
         try identity.validate(); guard identity.root.role == "client" else { throw AuthorityError.scope }
-        authority=identity; authorityMode = .recoveryAuthority; rootID=identity.root.localID; boot=identity.root.boot
+        authority=identity; authorityMode = identity.provision.native ? .nativeRecovery : .recoveryAuthority; rootID=identity.root.localID; boot=identity.root.boot
         policy=identity.policy; quota=identity.quota; pairDigest=try identity.provision.digest
         retentionCap=try identity.provision.originals.records().client.cap
     }
     func validate(_ clock: any ClientClock) throws {
-        guard authority == nil, authorityMode != .recoveryAuthority, crUUID(rootID), boot == (try Self.bootIdentity()), crEqual(policy, clock.policy),
+        guard authority == nil, (authorityMode == .legacy || authorityMode == .independent), crUUID(rootID), boot == (try Self.bootIdentity()), crEqual(policy, clock.policy),
               (authorityMode == .independent ? clientRolePolicy(policy) : (policy == "system-monotonic-raw-ns-v1" || policy.hasPrefix("fixture-ns-v1:"))),
               (authorityMode == .independent ? (pairDigest.map(crDigest) == true && retentionCap > 0 && retentionCap <= ClientLimits.session) : pairDigest == nil),
               (ClientLimits.metadataReserve...ClientLimits.allocation).contains(quota) else { throw ClientError.invalid("environment") }
@@ -70,14 +70,14 @@ public struct ClientContext: Codable {
     public init(caller: ClientCaller, host: String, store: String, namespace: String, generation: String,
                 request: String, operation: String, upstreamDigest: String, route: String,
                 projection: String = "s80-events-v1", revision: String, issued: UInt64, expires: UInt64, authority: String? = nil) {
-        self.authority=authority; version = authority == nil ? 1 : 2; self.caller = caller; self.host = host; self.store = store; self.namespace = namespace
+        self.authority=authority; version = authority == nil ? 1 : revision == "s101-host-client-native-v1" ? 3 : 2; self.caller = caller; self.host = host; self.store = store; self.namespace = namespace
         self.generation = generation; self.request = request; self.operation = operation; self.upstreamDigest = upstreamDigest
         self.route = route; self.projection = projection; self.revision = revision; self.issued = issued; self.expires = expires
     }
     func validate() throws {
         try caller.validate()
         for id in [host, store, namespace, generation, request, operation, route, revision] { try crID(id) }
-        guard (version == 1 && authority == nil || version == 2 && authority.map(AuthorityCodec.isDigest) == true && revision == "s100-host-client-authority-v1"), projection == "s80-events-v1", crDigest(upstreamDigest), issued > 0,
+        guard (version == 1 && authority == nil || version == 2 && authority.map(AuthorityCodec.isDigest) == true && revision == "s100-host-client-authority-v1" || version == 3 && authority.map(AuthorityCodec.isDigest) == true && revision == "s101-host-client-native-v1" && route == "ordinary"), projection == "s80-events-v1", crDigest(upstreamDigest), issued > 0,
               expires > issued, expires <= (try crAdd(issued, ClientLimits.session)),
               try crEncode(self).count <= ClientLimits.context else { throw ClientError.invalid("context") }
     }

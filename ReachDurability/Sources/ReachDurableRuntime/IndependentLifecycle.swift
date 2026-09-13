@@ -31,7 +31,7 @@ public enum IndependentRoleLifecycle {
         guard metadata.preservesUnrelated(metadata,owned:owned) else { throw TransportRuntimeError.invalid }
         if phase == .ready {
             try lease.confirmReady(receipt.ready)
-            let actual=try core.version == 4 ? RoleBootstrapStore.inspectRecoveryAuthority(at:core.root,role:core.role) : RoleBootstrapStore.inspect(at:core.root,role:core.role)
+            let actual=try core.version == 5 ? RoleBootstrapStore.inspectNativeRecovery(at:core.root,role:core.role) : core.version == 4 ? RoleBootstrapStore.inspectRecoveryAuthority(at:core.root,role:core.role) : RoleBootstrapStore.inspect(at:core.root,role:core.role)
             guard try RootKeyCodec.encode(actual,limit:64<<10) == RootKeyCodec.encode(receipt.ready,limit:64<<10) else { throw TransportRuntimeError.invalid }
             try validateSelection(core)
             try lease.lockJournal()
@@ -56,6 +56,7 @@ public enum IndependentRoleLifecycle {
         return result("retired")
     }
     static func validateSelection(_ core: RoleBootstrapCore) throws {
+        if core.version == 5 { _=try NativeRecoveryRoots.validateSelection(core); return }
         if core.version == 4 { _=try RecoveryAuthorityRoots.validateSelection(core); return }
         let role: TransportRole=core.role == .host ? .host : .client
         let agreement=try IndependentPairAgreement.load(core.root+"/agreement.json")

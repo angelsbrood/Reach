@@ -11,7 +11,7 @@ public final class RecoveryAuthorityAction {
     private let verifier: Verifier, process = getpid()
     private var admissionDigest: String?, finished = false
     public init(scope: AuthorityScope, operation: AuthorityOperation, clock: any PolicyClock) throws {
-        try scope.validate(); self.scope=scope; self.operation=operation
+        try scope.validate(); guard !scope.provision.native else { throw AuthorityError.scope }; self.scope=scope; self.operation=operation
         verifier=try Verifier(originals:scope.provision.originals,clock:clock)
         clockAction=try verifier.begin(purpose:.blocking)
     }

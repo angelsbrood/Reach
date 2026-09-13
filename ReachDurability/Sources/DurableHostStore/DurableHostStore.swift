@@ -1,5 +1,6 @@
 import Foundation
 import ResumableMLXProvider
+import RecoveryAuthorityContract
 
 public final class DurableHostStore {
     public let identity: StoreIdentity
@@ -10,7 +11,11 @@ public final class DurableHostStore {
     let files: StoreFileSystem
     let keys: StoreKeys
     public var fault: StoreFaultHook
-    private init(identity: StoreIdentity, keys: StoreKeys, files: StoreFileSystem, epoch: UInt64, fault: @escaping StoreFaultHook) {
+    var nativeAdmission: AuthorityAdmission?
+    var nativeAction: GenerationAuthorityAction?
+    let nativeAuthorityBinding: GenerationAuthorityBinding?
+    init(identity: StoreIdentity, keys: StoreKeys, files: StoreFileSystem, epoch: UInt64, fault: @escaping StoreFaultHook, nativeAuthorityBinding: GenerationAuthorityBinding? = nil) {
+        self.nativeAuthorityBinding=nativeAuthorityBinding
         self.identity = identity; self.keys = keys; self.files = files; ownerEpoch = epoch; self.fault = fault
     }
     public static func initialize(at path: String, identity: StoreIdentity, keys: StoreKeys, fault: @escaping StoreFaultHook = { _ in }) throws -> DurableHostStore {
@@ -38,10 +43,10 @@ public final class DurableHostStore {
     deinit { close() }
     public func close() { isClosed = true; files.close() }
     func load(allowUncertain: Bool = false) throws -> StoreLoaded {
-        guard !isClosed else { throw StoreError.closed }
+        try checkNative(); guard !isClosed else { throw StoreError.closed }
         guard allowUncertain || !uncertain else { throw StoreError.uncertain }
         try files.ensure()
-        let result = try Self.readAuthority(files: files, identity: identity, keys: keys)
+        let result = try Self.readAuthority(files: files, identity: identity, keys: keys); try checkNative()
         guard result.manifest.epoch == ownerEpoch else { throw StoreError.stale }
         return result
     }
@@ -50,7 +55,7 @@ public final class DurableHostStore {
         let encrypted = try files.read("current", maximum: StoreLimits.manifest+StoreCrypto.overhead)
         let plain = try StoreCrypto.open(encrypted, identity: identity, role: "manifest", epoch: nil, keys: keys)
         let m = try JSONDecoder().decode(StoreManifest.self, from: plain)
-        guard m.version == 1, m.authority == nil, m.storeID == identity.storeID, m.bootID == identity.bootID,
+        guard m.version == (identity.native ? 3 : 1), m.authority == (identity.native ? identity.authority : nil), m.storeID == identity.storeID, m.bootID == identity.bootID,
               m.bindingDigest == (try identity.bindingDigest), m.epoch > 0,
               m.high <= UInt64(StoreLimits.events), (0...StoreLimits.commits).contains(m.batches),
               try storeEncode(m) == plain else { throw StoreError.invalid("authenticated manifest declaration") }
@@ -78,28 +83,31 @@ public final class DurableHostStore {
         }
         return .init(manifest: m, candidate: candidate, replay: replay)
     }
-    public func snapshot() throws -> StoreSnapshot { try load().snapshot }
-    public func replay(after cursor: UInt64) throws -> [StoreReplayFrame] { try load().replay.frames(after: cursor) }
+    public func snapshot() throws -> StoreSnapshot { try checkNative(operations:[.reopen,.prepare,.advance,.delivery,.terminalReplay]); let result=try load().snapshot; try checkNative(); return result }
+    public func replay(after cursor: UInt64) throws -> [StoreReplayFrame] { try checkNative(operations:[.reopen,.prepare,.advance,.delivery,.terminalReplay]); let result=try load().replay.frames(after: cursor); try checkNative(); return result }
     /// Actual selected-root usage plus conservative full-next-set reservation.
     public func reserve() throws {
+        try checkNative(operations:[.reopen,.prepare,.advance])
         let current = try load(), usage = try files.scan()
         let allocated = usage.values.reduce(0) { $0 + $1.allocated }
         guard usage.count <= StoreLimits.files-3, allocated <= StoreLimits.allocation-StoreLimits.reservation,
               current.replay.high <= UInt64(StoreLimits.events-4096),
               current.replay.encodedSize <= StoreLimits.replay-ProviderCandidate.maximumControlBytes-StoreReplay.headerBytes else { throw StoreError.full }
+        try checkNative()
         if let candidate = current.candidate {
             let projection = try StoreCommitProjection(candidate, identity: identity)
             guard projection.ordinal < UInt64(StoreLimits.commits-1) else { throw StoreError.full }
         }
     }
     @discardableResult public func commit(_ candidate: ProviderCandidate) throws -> StoreSnapshot {
+        try checkNative(operations:[.reopen,.prepare,.advance])
         let current = try load(allowUncertain: true), projection = try StoreCommitProjection(candidate, identity: identity)
         if current.candidate?.commit == candidate.commit {
             guard current.candidate?.data == candidate.data else { throw StoreError.invalid("current retry bytes") }
-            try files.syncDirectory(); uncertain = false; try cleanup(current); return current.snapshot
+            try checkNative(); try files.syncDirectory(); try checkNative(); uncertain = false; try cleanup(current); try checkNative(); return current.snapshot
         }
         guard !uncertain else { throw StoreError.uncertain }
-        try reserve()
+        try reserve(); try checkNative()
         if let parent = current.candidate {
             let previous = try StoreCommitProjection(parent, identity: identity)
             guard current.manifest.terminal == nil, projection.ordinal == previous.ordinal+1,
@@ -109,12 +117,12 @@ public final class DurableHostStore {
         }
         let replay = try current.replay.appending(candidate, projection: projection)
         func prepareBlob(_ bytes: Data, role: String) throws -> StoreBlobReference {
-            let record = UUID().uuidString.lowercased()
+            try checkNative(); let record = UUID().uuidString.lowercased()
             let cipher = try StoreCrypto.seal(bytes, identity: identity, role: role, record: record, epoch: ownerEpoch, keys: keys)
             let reference = StoreBlobReference(record: record, epoch: ownerEpoch, cipherBytes: cipher.count, cipherDigest: storeHash(cipher))
-            try files.writeNew(reference.name, bytes: cipher)
+            try checkNative(); try files.writeNew(reference.name, bytes: cipher); try checkNative()
             let actual = try files.read(reference.name, maximum: cipher.count)
-            guard actual == cipher else { throw StoreError.invalid("prepared ciphertext verification") }
+            try checkNative(); guard actual == cipher else { throw StoreError.invalid("prepared ciphertext verification") }
             return reference
         }
         let candidateRef = try prepareBlob(candidate.data, role: "candidate"); try fault(.afterCandidateBlob)
@@ -126,30 +134,32 @@ public final class DurableHostStore {
         let authoritative = try load(); try cleanup(authoritative); return authoritative.snapshot
     }
     @discardableResult public func reconcile() throws -> StoreSnapshot {
+        try checkNative(operations:[.reopen])
         let authority = try load(allowUncertain: true)
-        try files.syncDirectory(); uncertain = false; try cleanup(authority); return authority.snapshot
+        try checkNative(); try files.syncDirectory(); try checkNative(); uncertain = false; try cleanup(authority); try checkNative(); return authority.snapshot
     }
-    private func replace(_ manifest: StoreManifest) throws {
-        let plain = try storeEncode(manifest)
+    func replace(_ manifest: StoreManifest) throws {
+        try checkNative(); let plain = try storeEncode(manifest)
         guard plain.count <= StoreLimits.manifest else { throw StoreError.full }
         let record = UUID().uuidString.lowercased(), temporary = "t-" + UUID().uuidString.lowercased() + ".bin"
         let cipher = try StoreCrypto.seal(plain, identity: identity, role: "manifest", record: record, epoch: nil, keys: keys)
-        try files.writeNew(temporary, bytes: cipher)
+        try checkNative(); try files.writeNew(temporary, bytes: cipher); try checkNative()
         guard try files.read(temporary, maximum: cipher.count) == cipher else { throw StoreError.invalid("prepared manifest bytes") }
-        try fault(.beforeManifestReplace)
+        try fault(.beforeManifestReplace); try checkNative()
         // Mark the whole rename attempt uncertain, including an error return.
         // Disk authority decides whether selection happened; a missing reply
         // cannot license the old parent or publication before reconciliation.
         uncertain = true
         try files.replaceCurrent(with: temporary)
         do {
-            try fault(.afterManifestReplace); try fault(.beforeDirectorySync); try files.syncDirectory(); uncertain = false
+            try fault(.afterManifestReplace); try fault(.beforeDirectorySync); try files.syncDirectory(); try checkNative(); uncertain = false
         } catch { throw error }
     }
-    private func cleanup(_ authority: StoreLoaded) throws {
+    func cleanup(_ authority: StoreLoaded) throws {
+        try checkNative()
         let referenced = Set(["current", "lock"] + [authority.manifest.candidate?.name, authority.manifest.replay?.name].compactMap { $0 })
         // Called only after full current authority validation, under the stable lock.
         let roles = try files.scan().keys.filter { !referenced.contains($0) }
-        try files.removeUnreferenced(Array(roles))
+        try checkNative(); try files.removeUnreferenced(Array(roles)); try checkNative()
     }
 }

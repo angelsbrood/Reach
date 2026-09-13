@@ -1,0 +1,234 @@
+import Foundation
+import Darwin
+import CryptoKit
+import ClockPolicy
+import MLX
+import ReachWire
+import DurableRootKeys
+import DurableStoreBootstrap
+import DurableSessionLifecycle
+import DurableHostStore
+import DurableClientReceipts
+import HostClientContract
+import ResumableMLXProvider
+import WireAdapterContract
+import RequestPreparationContract
+import RecoveryAuthorityContract
+
+extension RecoveryAuthorityChannel {
+    static func exchange(_ action: GenerationAuthorityAction) throws {
+        try write(AuthorityControl(stage:"challenge",challenge:action.request))
+        do {
+            let r=try AuthorityCodec.decode(AuthorityControl.self,read())
+            guard r.stage == "certificate", let certificate=r.certificate else { throw AuthorityError.ineligible }
+            try action.receive(certificate)
+        } catch { action.observeWitnessLoss(); throw error }
+    }
+    static func observe(_ action: GenerationAuthorityAction) throws {
+        try write(AuthorityControl(stage:"observe-witness"))
+        do {
+            let r=try AuthorityCodec.decode(AuthorityControl.self,read())
+            guard r.stage == "witness-observation", r.lost != true, let identity=r.identity else { throw AuthorityError.ineligible }
+            try action.observeWitnessIdentity(identity)
+        } catch { action.observeWitnessLoss(); throw error }
+    }
+}
+public enum NativeRecoveryRuntime {
+    static func validateFixture(_ provider: ProviderBinding) throws {
+        guard case .supported=ResumableMLXProvider.assess(provider), case .ordinary(let b)=provider.lane,
+              b.options.prefillStepSize == 256, b.tokens.count <= b.options.prefillStepSize, (1...20).contains(b.options.maximumTokens)
+        else { throw AuthorityError.state }
+    }
+    /// Independent fixture preparation is completed and compared before originals.
+    public static func prepareFixture(model: String, request: String, operation: String, output: String, publicModel: String) throws {
+        try LocalDurableRuntime.withCPU {
+            let p=try SelectedArtifactProfile(at:model,nativeRecovery:true), input=try LocalDurableRuntime.request(from:request)
+            let binding=try prepare(p,input:input,operation:operation)
+            let e=try AuthorityExecution(operation:operation,provider:AuthorityCodec.encode(binding))
+            try LocalFiles.writeNew(AuthorityCodec.encode(e),to:output)
+            try LocalFiles.writeNew(AuthorityCodec.encode(IndependentPublicModel(descriptor:p.preparer.policy.descriptor,artifactDigest:p.manifestDigest)),to:publicModel)
+        }
+    }
+    private static func prepare(_ p: SelectedArtifactProfile, input: WireGenerationRequest, operation: String) throws -> ProviderBinding {
+        guard try p.preparer.policy.route(input) == "ordinary" else { throw AuthorityError.state }
+        let config=AdapterConfiguration(dialect:2,model:p.preparer.policy.descriptor.model,optIn:true,ready:true)
+        let reference=DurableGenerationReference(session:.init(modelID:config.model,profile:config.profile,sessionID:"00000000-0000-0000-0000-000000000001"),generationID:"fixture-generation",operationID:operation)
+        let b=try p.preparer.prepare(input,reference:reference,configuration:config)
+        try validateFixture(b); guard p.observations.isEmpty else { throw AuthorityError.state }; return b
+    }
+    public static func admit(hostReceipt: String, hostDigest: String, clientReceipt: String, clientDigest: String,
+        secretDescriptor: Int32, request: String, export: String) throws {
+        let credential=try UnlockCredential(consumingDescriptor:secretDescriptor); defer { credential.close() }
+        let scope=try NativeRecoveryRoots.originalScope(hostReceipt:hostReceipt,hostDigest:hostDigest,clientReceipt:clientReceipt,clientDigest:clientDigest)
+        let root=try NativeRecoveryRootAccess(receipt:hostReceipt,expectedDigest:hostDigest)
+        guard root.core.role == .host, let execution=scope.provision.execution else { throw AuthorityError.scope }
+        let owner=try GenerationAuthorityOwner(scope:scope,clock:SystemClock(),validateOwnedRoots:{ try root.validateCurrent() }), action=try owner.begin(.admitHost)
+        try RecoveryAuthorityChannel.exchange(action)
+        let binding=try LocalDurableRuntime.withCPU { () -> ProviderBinding in
+            try action.check()
+            guard AuthorityCodec.hash(try LocalFiles.read(request,maximum:64<<10)) == scope.provision.requestInputDigest else { throw AuthorityError.scope }
+            let p=try SelectedArtifactProfile(at:root.configuration.artifactPath,nativeRecovery:true); try action.check()
+            guard p.manifestDigest == root.configuration.model.artifactDigest, p.preparer.policy.descriptor == root.configuration.model.descriptor else { throw AuthorityError.scope }
+            let b=try prepare(p,input:LocalDurableRuntime.request(from:request),operation:execution.operation)
+            try action.check(); guard try AuthorityCodec.encode(b) == execution.provider else { throw AuthorityError.scope }; return b
+        }
+        var issued: AuthorityIssued?, issuer: Data?
+        try root.withKeys(scope:scope,owner:owner,credential:credential,original:true) { keys in
+            let caller=CallerIdentity(principal:"uid:"+String(getuid()),device:"native-pair:"+scope.provision.pair,app:AuthorityCodec.nativeProfile)
+            issued=try DurableSessionLifecycle.admitNativeRecovery(at:root.core.root+"/bootstrap/host",identity:.init(recoveryAuthority:root.core.nativeStorage()),keys:LocalRuntimeOwner.hostKeys(keys),scope:scope,caller:caller,provider:binding,action:action)
+            issuer=try keys.key(.hostTicket).use { try AuthorityIssued.issuerKey(ticketKey:$0,native:true).publicKey.rawRepresentation }
+        }
+        guard let issued, let issuer else { throw AuthorityError.partial }
+        let a=try issued.verify(issuer:issuer,expectedDigest:AuthorityCodec.digest(issued))
+        try action.publication(a)
+        let bytes=try AuthorityCodec.encode(issued)
+        var info=stat()
+        if lstat(export,&info) == 0 { guard try LocalFiles.read(export,maximum:64<<10) == bytes else { throw AuthorityError.partial } }
+        else { guard errno == ENOENT else { throw AuthorityError.invalid }; try LocalFiles.writeNew(bytes,to:export) }
+        try action.publication(a)
+        struct Report: Encodable { let stage="original-admission"; let profile=AuthorityCodec.nativeProfile; let issuer:Data, exportDigest:String, admission:String, provider:String }
+        let result=try Report(issuer:issuer,exportDigest:AuthorityCodec.digest(issued),admission:a.digest,provider:AuthorityCodec.hash(bindingBytes(binding)))
+        let output=try AuthorityCodec.encode(result); try action.publication(a)
+        try FileHandle.standardOutput.write(contentsOf:output+Data([10])); try action.finish()
+    }
+    private static func bindingBytes(_ binding: ProviderBinding) throws -> Data { try AuthorityCodec.encode(binding) }
+    public static func accept(hostReceipt: String, hostDigest: String, clientReceipt: String, clientDigest: String,
+        secretDescriptor: Int32, export: String, originalIssuer: Data, successfulExportDigest: String) throws {
+        let credential=try UnlockCredential(consumingDescriptor:secretDescriptor); defer { credential.close() }
+        let scope=try NativeRecoveryRoots.originalScope(hostReceipt:hostReceipt,hostDigest:hostDigest,clientReceipt:clientReceipt,clientDigest:clientDigest)
+        let root=try NativeRecoveryRootAccess(receipt:clientReceipt,expectedDigest:clientDigest)
+        guard root.core.role == .client else { throw AuthorityError.scope }
+        let owner=try GenerationAuthorityOwner(scope:scope,clock:SystemClock(),validateOwnedRoots:{ try root.validateCurrent() }), action=try owner.begin(.acceptClient)
+        try RecoveryAuthorityChannel.exchange(action)
+        let issued=try AuthorityCodec.decode(AuthorityIssued.self,LocalFiles.read(export,maximum:64<<10))
+        let acceptance=try AuthorityAcceptance(issued:issued,originalIssuer:originalIssuer,originalSuccessfulExportDigest:successfulExportDigest)
+        let a=try acceptance.admission(); guard a.scope == scope else { throw AuthorityError.scope }
+        try root.withKeys(scope:scope,owner:owner,credential:credential,original:true) { keys in
+            try DurableClientReceipts.acceptNativeRecovery(at:root.core.root+"/bootstrap/client",parent:root.core.root,
+                environment:.init(recoveryAuthority:root.core.nativeStorage()),metadataKey:keys.key(.clientMetadata).use{$0},acceptance:acceptance,action:action)
+        }
+        struct Report: Encodable { let stage="original-acceptance"; let admission:String, hostDeadline:UInt64, clientDeadline:UInt64 }
+        let records=try scope.provision.originals.records()
+        let bytes=try AuthorityCodec.encode(Report(admission:a.digest,hostDeadline:records.host.deadline,clientDeadline:records.client.deadline))
+        try action.publication(a); try FileHandle.standardOutput.write(contentsOf:bytes+Data([10])); try action.finish()
+    }
+    public static func run(hostReceipt: String, hostDigest: String, clientReceipt: String, clientDigest: String,
+        hostSecret: Int32, clientSecret: Int32, original: Bool, stopAfterCalls: Int, leaveHostAhead: Bool,
+        report: String, fault: String) throws {
+        guard (0...20).contains(stopAfterCalls), ["none","before-native","after-native","after-commit","before-publication"].contains(fault) else { throw AuthorityError.invalid }
+        try LocalDurableRuntime.withCPU {
+            let h=try NativeRecoveryRootAccess(receipt:hostReceipt,expectedDigest:hostDigest), c=try NativeRecoveryRootAccess(receipt:clientReceipt,expectedDigest:clientDigest)
+            guard h.core.role == .host, c.core.role == .client else { throw AuthorityError.scope }
+            let scope=try h.scope(); guard try c.scope() == scope else { throw AuthorityError.scope }
+            if original { guard scope.host.boot == (try RootKeyCodec.boot()) else { throw AuthorityError.scope } }
+            let hs=try UnlockCredential(consumingDescriptor:hostSecret), cs=try UnlockCredential(consumingDescriptor:clientSecret)
+            defer { hs.close(); cs.close() }
+            let owner=try GenerationAuthorityOwner(scope:scope,clock:SystemClock(),validateOwnedRoots:{ try h.validateCurrent(); try c.validateCurrent() })
+            var action=try owner.begin(.reopen); try RecoveryAuthorityChannel.exchange(action)
+            var profile: SelectedArtifactProfile?, generation: GuardedNativeGeneration?, failureStage="reopen"
+            var before:[HandoffBatch]=[], replayedBeforeNative=0, faultUsed=false
+            var finalReport: NativeRecoveryReport?, finalAdmission: AuthorityAdmission?
+            var calls: Int { profile?.observations.reduce(0){$0+$1.calls} ?? 0 }
+            func renew(_ op: GenerationOperation) throws {
+                try action.finish(); action=try owner.begin(op); try RecoveryAuthorityChannel.exchange(action)
+            }
+            func boundary(_ point: String) throws {
+                guard point == fault, !faultUsed else { return }; faultUsed=true
+                struct Boundary: Encodable { let stage="boundary"; let point:String, nativeCalls:Int }
+                try RecoveryAuthorityChannel.write(Boundary(point:point,nativeCalls:calls))
+                let command=try AuthorityCodec.decode(AuthorityControl.self,RecoveryAuthorityChannel.read())
+                guard command.stage == "continue" || command.stage == "observe" else { throw AuthorityError.state }
+                if command.stage == "observe" { try RecoveryAuthorityChannel.observe(action) }
+                try action.check()
+            }
+            do {
+                try h.withKeys(scope:scope,owner:owner,credential:hs,original:false) { hostKeys in
+                    try c.withKeys(scope:scope,owner:owner,credential:cs,original:false) { clientKeys in
+                        let host=try NativeLifecycleOwner(path:h.core.root+"/bootstrap/host",identity:.init(recoveryAuthority:h.core.nativeStorage()),keys:LocalRuntimeOwner.hostKeys(hostKeys),scope:scope,action:action)
+                        defer { generation?.close(); host.close() }
+                        let client=try NativeClientOwner(path:c.core.root+"/bootstrap/client",parent:c.core.root,environment:.init(recoveryAuthority:c.core.nativeStorage()),metadataKey:clientKeys.key(.clientMetadata).use{$0},scope:scope,action:action)
+                        defer { client.close() }
+                        guard client.admission == host.admission else { throw AuthorityError.scope }
+                        host.store.fault={ p in
+                            if p == .afterNativeBeforeCommit { try boundary("after-native") }
+                            if p == .afterCommitBeforeAck { try boundary("after-commit") }
+                        }
+                        client.fault={ p in if p == .beforePublication { try boundary("before-publication") } }
+                        before=try client.inbox(action:action)
+                        func deliver() throws {
+                            try host.store.authorize(action)
+                            let w=try client.witness(action:action)
+                            for f in try host.store.replay(after:w.high) {
+                                try client.accept(.init(firstSequence:f.firstSequence,count:f.count,providerCommit:f.providerCommit,eventBytes:f.eventBytes,skipPrefix:f.skipPrefix),action:action)
+                                if calls == 0 { replayedBeforeNative += f.count-f.skipPrefix }
+                            }
+                            let accepted=try client.witness(action:action)
+                            try host.acceptReceipt(accepted,action:action)
+                            try generation?.acknowledgeDelivery(through:accepted.high,action:action)
+                        }
+                        // Durable replay is resolved before the artifact/model factory.
+                        try deliver()
+                        let selected=try host.store.snapshot()
+                        if original { guard selected.candidate == nil else { throw AuthorityError.state } }
+                        else { guard selected.candidate != nil else { throw AuthorityError.state } }
+                        if !selected.terminal {
+                            failureStage="model-restore"
+                            try action.check(); let p=try SelectedArtifactProfile(at:h.configuration.artifactPath,nativeRecovery:true); try action.check(); profile=p
+                            guard p.manifestDigest == h.configuration.model.artifactDigest, p.preparer.policy.descriptor == h.configuration.model.descriptor else { throw AuthorityError.scope }
+                            let config=AdapterConfiguration(dialect:2,model:p.preparer.policy.descriptor.model,optIn:true,ready:true)
+                            let factory={ try p.runtime(host.provider,configuration:config) }
+                            if original { try renew(.prepare); generation=try GuardedNativeGeneration.start(store:host.store,action:action,runtime:factory) }
+                            else { generation=try GuardedNativeGeneration.restore(store:host.store,action:action,runtime:factory) }
+                            try host.synchronize(action:action); try deliver()
+                        }
+                        while try !host.store.snapshot().terminal {
+                            failureStage="advance"; try renew(.advance); try host.store.authorize(action)
+                            try boundary("before-native"); try generation!.advance(action:action)
+                            try host.synchronize(action:action)
+                            if stopAfterCalls > 0 && calls >= stopAfterCalls && leaveHostAhead { break }
+                            try deliver()
+                            if stopAfterCalls > 0 && calls >= stopAfterCalls { break }
+                        }
+                        if selected.terminal { try renew(.terminalReplay); try host.store.authorize(action); try deliver() }
+                        failureStage="publication"
+                        let w=try client.witness(action:action), state=try host.store.snapshot()
+                        let records=try scope.provision.originals.records()
+                        let result=NativeRecoveryReport(stage:stopAfterCalls > 0 && !state.terminal ? "checkpoint" : "complete",profile:AuthorityCodec.nativeProfile,
+                            original:original,receiverBoot:try RootKeyCodec.boot(),originalBoot:scope.host.boot,admission:try host.admission.digest,
+                            provider:host.provider,hostDeadline:records.host.deadline,clientDeadline:records.client.deadline,
+                            hostHigh:state.high,client:w,nativeCalls:calls,modelLoads:profile == nil ? 0 : 1,
+                            modelPrepares:profile?.observations.reduce(0){$0+$1.prepares} ?? 0,
+                            requestPreparations:0,templateCalls:profile?.tokenizer.renders ?? 0,requestTokenizations:profile?.tokenizer.requestTokenizations ?? 0,
+                            issues:0,begins:0,recoveries:original ? 0 : 1,actions:owner.actionCount,replayedBeforeNative:replayedBeforeNative,
+                            beforeInbox:before,inbox:try client.inbox(action:action),traces:profile?.observations ?? [],nativePeak:Memory.peakMemory,
+                            timers:try host.timerBytes(action:action),evaluation:try action.publication(host.admission))
+                        finalReport=result; finalAdmission=host.admission
+
+                    }
+                }
+                guard var result=finalReport, let admission=finalAdmission else { throw AuthorityError.partial }
+                // Both original key transactions have relocked and rechecked their
+                // current root/selection before any output leaves the worker.
+                result.evaluation=try action.publication(admission)
+                let data=try AuthorityCodec.encode(result)
+                try action.publication(admission); try LocalFiles.writeNew(data,to:report); try action.publication(admission)
+                try FileHandle.standardOutput.write(contentsOf:data+Data([10])); try action.publication(admission)
+                if result.stage == "checkpoint" {
+                    _=try RecoveryAuthorityChannel.read(); throw AuthorityError.state
+                }
+                try action.finish()
+            } catch {
+                struct Failure: Encodable { let stage="native-refusal"; let boundary:String, nativeCalls:Int, modelLoads:Int, diskState="requires-authenticated-reconciliation" }
+                try? RecoveryAuthorityChannel.write(Failure(boundary:failureStage,nativeCalls:calls,modelLoads:profile == nil ? 0 : 1))
+                throw error
+            }
+        }
+    }
+}
+struct NativeRecoveryReport: Encodable {
+    let stage:String,profile:String,original:Bool,receiverBoot:String,originalBoot:String,admission:String,provider:ProviderBinding
+    let hostDeadline:UInt64,clientDeadline:UInt64,hostHigh:UInt64,client:HandoffWitness
+    let nativeCalls:Int,modelLoads:Int,modelPrepares:Int,requestPreparations:Int,templateCalls:Int,requestTokenizations:Int,issues:Int,begins:Int,recoveries:Int,actions:Int,replayedBeforeNative:Int
+    let beforeInbox:[HandoffBatch],inbox:[HandoffBatch],traces:[NativeObservation],nativePeak:Int,timers:Data
+    var evaluation:Evaluation
+}

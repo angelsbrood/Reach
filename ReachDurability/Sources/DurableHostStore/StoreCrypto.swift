@@ -11,7 +11,7 @@ public struct StoreKeys {
 }
 enum StoreCrypto {
     static let overhead = 116
-    static func magic(_ identity: StoreIdentity) -> Data { Data((identity.authority == nil ? "S81GCM01" : "S100HS02").utf8) }
+    static func magic(_ identity: StoreIdentity) -> Data { Data((identity.native ? "S101HS03" : identity.authority == nil ? "S81GCM01" : "S100HS02").utf8) }
     struct Context: Encodable {
         let version: Int
         let authority: String?
@@ -23,7 +23,7 @@ enum StoreCrypto {
     }
     static func seal(_ plain: Data, identity: StoreIdentity, role: String, record: String, epoch: UInt64?, keys: StoreKeys) throws -> Data {
         guard storeUUID(record), plain.count <= limit(role) else { throw StoreError.invalid("cipher input/record") }
-        let context = try Context(version:identity.authority == nil ? 1 : 2, authority:identity.authority, store: identity.storeID, record: record, role: role, binding: identity.bindingDigest, producingEpoch: epoch)
+        let context = try Context(version:identity.native ? 3 : identity.authority == nil ? 1 : 2, authority:identity.authority, store: identity.storeID, record: record, role: role, binding: identity.bindingDigest, producingEpoch: epoch)
         let key = role == "manifest" ? keys.metadata : keys.content
         let sealed = try AES.GCM.seal(plain, using: key, nonce: AES.GCM.Nonce(), authenticating: storeEncode(context))
         guard let combined = sealed.combined, combined.count == plain.count+28 else { throw StoreError.invalid("AES-GCM framing") }
@@ -36,7 +36,7 @@ enum StoreCrypto {
         var offset = 80
         let length = try storeReadUInt(bytes, &offset, UInt64.self)
         guard length == UInt64(bytes.count-offset), length <= UInt64(limit(role)+28) else { throw StoreError.invalid("cipher length") }
-        let context = try Context(version:identity.authority == nil ? 1 : 2, authority:identity.authority, store: store, record: record, role: role, binding: identity.bindingDigest, producingEpoch: epoch)
+        let context = try Context(version:identity.native ? 3 : identity.authority == nil ? 1 : 2, authority:identity.authority, store: store, record: record, role: role, binding: identity.bindingDigest, producingEpoch: epoch)
         do {
             let box = try AES.GCM.SealedBox(combined: bytes[offset...])
             return try AES.GCM.open(box, using: role == "manifest" ? keys.metadata : keys.content, authenticating: storeEncode(context))

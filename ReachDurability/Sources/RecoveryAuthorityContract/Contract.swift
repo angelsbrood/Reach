@@ -5,6 +5,7 @@ import ClockPolicy
 public enum AuthorityError: String, Error { case invalid, ineligible, scope, partial, state, issuer }
 public enum AuthorityCodec {
     public static let profile = "reach-recovery-authority-qualification-v1"
+    public static let nativeProfile = "reach-native-recovery-qualification-v1"
     public static func encode<T: Encodable>(_ value: T) throws -> Data { try ClockPolicy.Wire.encode(value) }
     public static func decode<T: Codable>(_ type: T.Type, _ data: Data) throws -> T { try ClockPolicy.Wire.decode(type, data) }
     public static func hash(_ data: Data) -> String { ClockPolicy.Wire.digest(data) }
@@ -21,9 +22,11 @@ public struct AuthorityProvision: Codable, Equatable {
     public let originals: Originals
     public let pair: String, hostID: String, clientID: String
     public let publicModelDigest: String, requestInputDigest: String
+    public let execution: AuthorityExecution?
+    public var native: Bool { version == 2 && profile == AuthorityCodec.nativeProfile && execution != nil }
     public init(originals: Originals, hostID: String, clientID: String,
-                publicModelDigest: String, requestInputDigest: String) throws {
-        version = 1; profile = AuthorityCodec.profile; self.originals = originals
+                publicModelDigest: String, requestInputDigest: String, execution: AuthorityExecution? = nil) throws {
+        self.execution=execution; version = execution == nil ? 1 : 2; profile = execution == nil ? AuthorityCodec.profile : AuthorityCodec.nativeProfile; self.originals = originals
         pair = try originals.records().host.subject
         self.hostID = hostID; self.clientID = clientID
         self.publicModelDigest = publicModelDigest; self.requestInputDigest = requestInputDigest
@@ -31,14 +34,15 @@ public struct AuthorityProvision: Codable, Equatable {
     }
     public func validate() throws {
         let r = try originals.records()
-        try AuthorityCodec.require(version == 1 && profile == AuthorityCodec.profile && pair == r.host.subject &&
+        try execution?.validate()
+        try AuthorityCodec.require((version == 1 && profile == AuthorityCodec.profile && execution == nil || native) && pair == r.host.subject &&
             [pair,hostID,clientID].allSatisfy(AuthorityCodec.uuid) && Set([pair,hostID,clientID]).count == 3 &&
             [publicModelDigest,requestInputDigest].allSatisfy(AuthorityCodec.isDigest) && r.host.anchor > 0 && r.client.anchor > 0)
         _ = try AuthorityCodec.encode(self)
     }
     public var digest: String { get throws { try validate(); return try AuthorityCodec.digest(self) } }
-    public var hostPolicy: String { AuthorityCodec.profile + ":host:" + pair }
-    public var clientPolicy: String { AuthorityCodec.profile + ":client:" + pair }
+    public var hostPolicy: String { profile + ":host:" + pair }
+    public var clientPolicy: String { profile + ":client:" + pair }
 }
 
 /// Created from original ready/ownership records, never inferred from admission.
@@ -58,12 +62,12 @@ public struct AuthorityScope: Codable, Equatable {
     public var namespace: String { provision.pair }
     public var generation: String { "generation-" + provision.pair }
     public init(provision: AuthorityProvision, host: AuthorityRoot, client: AuthorityRoot) throws {
-        version=1; profile=AuthorityCodec.profile; self.provision=provision; self.host=host; self.client=client
+        version=provision.native ? 2 : 1; profile=provision.profile; self.provision=provision; self.host=host; self.client=client
         try validate()
     }
     public func validate() throws {
         try provision.validate(); try host.validate(); try client.validate()
-        try AuthorityCodec.require(version == 1 && profile == AuthorityCodec.profile && host.role == "host" && client.role == "client" &&
+        try AuthorityCodec.require(version == (provision.native ? 2 : 1) && profile == provision.profile && host.role == "host" && client.role == "client" &&
             host.localID == provision.hostID && client.localID == provision.clientID && host.boot == client.boot &&
             host.identifier != client.identifier && host.root != client.root && host.core != client.core)
     }
@@ -80,13 +84,14 @@ public struct AuthorityAdmission: Codable, Equatable {
     public let requestDigest: String, providerDigest: String, record: String, store: String
     public init(scope: AuthorityScope, ticket: Data, context: Data, requestDigest: String,
                 providerDigest: String, record: String, store: String) throws {
-        version=1; profile=AuthorityCodec.profile; self.scope=scope; self.ticket=ticket; self.context=context
+        version=scope.provision.native ? 2 : 1; profile=scope.profile; self.scope=scope; self.ticket=ticket; self.context=context
         self.requestDigest=requestDigest; self.providerDigest=providerDigest; self.record=record; self.store=store
         try validate()
     }
     public func validate() throws {
         try scope.validate()
-        try AuthorityCodec.require(version == 1 && profile == AuthorityCodec.profile && (41...4096).contains(ticket.count) &&
+        if let execution=scope.provision.execution { try AuthorityCodec.require(providerDigest == AuthorityCodec.hash(execution.provider)) }
+        try AuthorityCodec.require(version == (scope.provision.native ? 2 : 1) && profile == scope.profile && (41...4096).contains(ticket.count) &&
             !context.isEmpty && context.count <= 16<<10 && [requestDigest,providerDigest].allSatisfy(AuthorityCodec.isDigest) &&
             [record,store].allSatisfy(AuthorityCodec.uuid))
         _ = try AuthorityCodec.encode(self)
@@ -95,15 +100,15 @@ public struct AuthorityAdmission: Codable, Equatable {
 }
 public struct AuthorityIssued: Codable, Equatable {
     public let body: Data, signature: Data
-    public static func issuerKey(ticketKey: Data) throws -> Curve25519.Signing.PrivateKey {
+    public static func issuerKey(ticketKey: Data, native: Bool = false) throws -> Curve25519.Signing.PrivateKey {
         try AuthorityCodec.require(ticketKey.count == 32)
         let derived = HKDF<SHA256>.deriveKey(inputKeyMaterial:SymmetricKey(data:ticketKey),
-            info:Data("S100/original-admission-issuer/v1".utf8),outputByteCount:32)
+            info:Data((native ? "S101/original-admission-issuer/v2" : "S100/original-admission-issuer/v1").utf8),outputByteCount:32)
         return try derived.withUnsafeBytes { try Curve25519.Signing.PrivateKey(rawRepresentation:Data($0)) }
     }
     public init(_ admission: AuthorityAdmission, ticketKey: Data) throws {
         try admission.validate(); body=try AuthorityCodec.encode(admission)
-        signature=try Self.issuerKey(ticketKey:ticketKey).signature(for:body)
+        signature=try Self.issuerKey(ticketKey:ticketKey,native:admission.scope.provision.native).signature(for:body)
     }
     public func verify(issuer: Data, expectedDigest: String) throws -> AuthorityAdmission {
         guard issuer.count == 32, signature.count == 64, expectedDigest == (try AuthorityCodec.digest(self)),
@@ -117,12 +122,13 @@ public struct AuthorityIssued: Codable, Equatable {
 public struct AuthorityAcceptance: Codable, Equatable {
     public let version: Int, issuer: Data, expectedDigest: String, issued: AuthorityIssued
     public init(issued: AuthorityIssued, originalIssuer: Data, originalSuccessfulExportDigest: String) throws {
-        version=1; issuer=originalIssuer; expectedDigest=originalSuccessfulExportDigest; self.issued=issued
+        version=(try AuthorityCodec.decode(AuthorityAdmission.self,issued.body)).scope.provision.native ? 2 : 1; issuer=originalIssuer; expectedDigest=originalSuccessfulExportDigest; self.issued=issued
         _ = try admission()
     }
     public func admission() throws -> AuthorityAdmission {
-        try AuthorityCodec.require(version == 1)
-        return try issued.verify(issuer:issuer,expectedDigest:expectedDigest)
+        let a=try issued.verify(issuer:issuer,expectedDigest:expectedDigest)
+        try AuthorityCodec.require(version == (a.scope.provision.native ? 2 : 1))
+        return a
     }
 }
 

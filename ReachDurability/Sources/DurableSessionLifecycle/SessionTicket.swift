@@ -53,7 +53,7 @@ extension TicketCodec {
     static func authorityClaims(scope: AuthorityScope, caller: CallerIdentity) throws -> TicketClaims {
         try scope.validate(); try caller.validate()
         let original=try scope.provision.originals.records().host
-        return try TicketClaims(version:2,authority:scope.digest,incarnation:scope.host.localID,boot:scope.host.boot,
+        return try TicketClaims(version:scope.provision.native ? 3 : 2,authority:scope.digest,incarnation:scope.host.localID,boot:scope.host.boot,
             policy:scope.provision.hostPolicy,namespace:scope.namespace,caller:caller,issued:original.anchor,expires:original.deadline)
     }
     static func issueAuthority(scope: AuthorityScope, keys: LifecycleKeys, caller: CallerIdentity) throws -> SessionTicket {

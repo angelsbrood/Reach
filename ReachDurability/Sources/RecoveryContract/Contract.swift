@@ -18,8 +18,9 @@ public struct RecoveryBinding: Codable {
     public let authority: String?
     public let mode: String?, pair: String?
     public var independent: Bool { mode == "independent-v1" }
+    public var nativeRecovery: Bool { mode == "native-recovery-v1" }
     public var authorityOnly: Bool { mode == "recovery-authority-v1" }
-    public var envelopeVersion: Int { get throws { try validate(); return authorityOnly ? 3 : independent ? 2 : 1 } }
+    public var envelopeVersion: Int { get throws { try validate(); return nativeRecovery ? 4 : authorityOnly ? 3 : independent ? 2 : 1 } }
     public let bootstrap: String, core: String, clientRoot: String, host: String, boot: String, hostPolicy: String, clientPolicy: String
     public init(bootstrap: String, core: String, clientRoot: String, host: String, boot: String, hostPolicy: String, clientPolicy: String) {
         authority=nil; mode=nil; pair=nil
@@ -30,14 +31,14 @@ public struct RecoveryBinding: Codable {
         authority=nil; boot=localBoot; clientPolicy=localPolicy; hostPolicy=""; mode="independent-v1"; self.pair=pair
     }
     public init(recoveryAuthority scope: AuthorityScope) throws {
-        try scope.validate(); authority=try scope.digest; mode="recovery-authority-v1"; pair=try scope.provision.digest
+        try scope.validate(); authority=try scope.digest; mode=scope.provision.native ? "native-recovery-v1" : "recovery-authority-v1"; pair=try scope.provision.digest
         bootstrap=scope.client.identifier; core=scope.client.core; clientRoot=scope.client.localID; host=scope.host.localID
         boot=scope.client.boot; hostPolicy=scope.provision.hostPolicy; clientPolicy=scope.provision.clientPolicy
         try validate()
     }
     public func validate() throws {
-        guard (authorityOnly ? authority.map(RecoveryCodec.digest) == true && pair.map(RecoveryCodec.digest) == true && hostPolicy.hasPrefix(AuthorityCodec.profile+":host:") && clientPolicy.hasPrefix(AuthorityCodec.profile+":client:") : authority == nil),
-              (mode == nil && pair == nil && !hostPolicy.isEmpty) || (independent && pair.map(RecoveryCodec.digest) == true && hostPolicy.isEmpty) || authorityOnly,
+        guard ((authorityOnly || nativeRecovery) ? authority.map(RecoveryCodec.digest) == true && pair.map(RecoveryCodec.digest) == true && hostPolicy.hasPrefix((nativeRecovery ? AuthorityCodec.nativeProfile : AuthorityCodec.profile)+":host:") && clientPolicy.hasPrefix((nativeRecovery ? AuthorityCodec.nativeProfile : AuthorityCodec.profile)+":client:") : authority == nil),
+              (mode == nil && pair == nil && !hostPolicy.isEmpty) || (independent && pair.map(RecoveryCodec.digest) == true && hostPolicy.isEmpty) || authorityOnly || nativeRecovery,
               [bootstrap,clientRoot,host,boot].allSatisfy(RecoveryCodec.uuid), RecoveryCodec.digest(core),
               !clientPolicy.isEmpty, hostPolicy.utf8.count<=256, clientPolicy.utf8.count<=256 else { throw RecoveryError.invalid }
     }
@@ -76,7 +77,7 @@ public struct RecoveryTicketClaims: Codable {
         let n=data.prefix(8).reduce(UInt64(0)) { ($0<<8)|UInt64($1) }
         guard n==data.count-40 else { throw RecoveryError.invalid }
         let claims=try RecoveryCodec.decode(Self.self,Data(data[8..<data.count-32]),maximum:RecoveryLimits.ticket)
-        guard (claims.version==1 && claims.authority==nil || claims.version==2 && claims.authority.map(RecoveryCodec.digest)==true && claims.policy.hasPrefix(AuthorityCodec.profile+":host:")), RecoveryCodec.uuid(claims.namespace), claims.issued>0, claims.expires>claims.issued else { throw RecoveryError.invalid }
+        guard (claims.version==1 && claims.authority==nil || claims.version==2 && claims.authority.map(RecoveryCodec.digest)==true && claims.policy.hasPrefix(AuthorityCodec.profile+":host:") || claims.version==3 && claims.authority.map(RecoveryCodec.digest)==true && claims.policy.hasPrefix(AuthorityCodec.nativeProfile+":host:")), RecoveryCodec.uuid(claims.namespace), claims.issued>0, claims.expires>claims.issued else { throw RecoveryError.invalid }
         return claims
     }
 }

@@ -20,6 +20,7 @@ public enum StoreLimits {
 }
 public struct StoreIdentity {
     public let authority: String?
+    public private(set) var native = false
     public var storeID: String
     public var bootID: String
     public var provider: ProviderBinding
@@ -28,8 +29,16 @@ public struct StoreIdentity {
         try validate()
     }
     public init(authority scope: AuthorityScope, storeID: String, provider: ProviderBinding) throws {
-        try scope.validate(); authority=try scope.digest; self.storeID=storeID; bootID=scope.host.boot; self.provider=provider
+        try scope.validate(); guard !scope.provision.native else { throw AuthorityError.scope }; authority=try scope.digest; self.storeID=storeID; bootID=scope.host.boot; self.provider=provider
         guard storeUUID(storeID), case .supported = ResumableMLXProvider.assess(provider) else { throw StoreError.invalid("authority store identity") }
+    }
+    public init(native scope: AuthorityScope, storeID: String, provider: ProviderBinding) throws {
+        try scope.validate(); guard scope.provision.native, let execution=scope.provision.execution,
+            execution.operation == provider.operationID, execution.provider == (try storeEncode(provider)),
+            storeUUID(storeID), case .ordinary(let lane)=provider.lane, case .supported=ResumableMLXProvider.assess(provider),
+            lane.options.prefillStepSize == 256, lane.tokens.count <= lane.options.prefillStepSize, (1...20).contains(lane.options.maximumTokens)
+        else { throw AuthorityError.scope }
+        authority=try scope.digest; native=true; self.storeID=storeID; bootID=scope.host.boot; self.provider=provider
     }
     var bindingBytes: Data { get throws { try storeEncode(provider) } }
     var bindingDigest: String { get throws { try storeHash(bindingBytes) } }
@@ -73,7 +82,7 @@ struct StoreCommitProjection: Codable {
 }
 public enum StoreFaultPoint: String, Codable {
     case afterCandidateBlob, afterReplayBlob, beforeManifestReplace, afterManifestReplace, beforeDirectorySync
-    case afterCommitBeforeAck, afterAckBeforePublication
+    case afterNativeBeforeCommit, afterCommitBeforeAck, afterAckBeforePublication
 }
 /// Synchronous observer/fault hook for selected-root IO and owned process-death
 /// tests. Throwing never authorizes publication; no asynchronous work is started.

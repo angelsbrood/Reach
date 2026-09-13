@@ -172,3 +172,5 @@ original issuer provenance, local action ownership, blocking age, witness loss,
 and nonempty-state refusal. The unchanged ClockPolicy tests retain arithmetic,
 signature, replay, age and overflow coverage. Native feasibility and actual
 postboot authority authentication receive separate verdicts in private evidence.
+
+The separate [S101 ordinary native qualification lane](cross-boot-native-recovery.md) binds original generation records to fresh witness actions across reboot.

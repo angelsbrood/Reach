@@ -69,13 +69,17 @@ struct ClientSnapshot: Codable {
         guard future <= ClientLimits.snapshot else { throw ClientError.full }; return future
     }
     func validate(_ live: LiveClientRecord) throws {
-        guard version == (live.retention?.acceptance == nil ? 1 : 2), authority == (try live.retention?.acceptance?.admission().scope.digest), context.count <= ClientLimits.context, crHash(context) == live.contextDigest,
+        guard version == (live.retention?.version == 3 ? 3 : live.retention?.acceptance == nil ? 1 : 2), authority == (try live.retention?.acceptance?.admission().scope.digest), context.count <= ClientLimits.context, crHash(context) == live.contextDigest,
               batches.count <= 4095, calls.count == live.calls, high <= 65536,
               receiptRevision <= live.snapshot.revision, calls.count <= 32 else { throw ClientError.unavailable }
         let decoded = try JSONDecoder().decode(ClientContext.self, from: context)
         let authority = try ClientAuthority(decoded, retention: live.retention)
         guard authority.bytes == context, authority.identity == live.identity, authority.anchor == live.anchor,
               authority.namespace == live.namespace, decoded.issued == live.issued, decoded.expires == live.expires else { throw ClientError.unavailable }
+        if live.retention?.version == 3 {
+            guard calls.isEmpty, decoded.route == "ordinary" else { throw ClientError.unavailable }
+            for b in batches { for event in try ClientEvents.decode(b.bytes) { if case .toolCallAppendArguments = event { throw ClientError.unavailable } } }
+        }
         var rebuilt = ClientSnapshot(context: context)
         for b in batches {
             let frame = ReplayEnvelope(firstSequence: b.first, count: b.count, providerCommit: b.commit, eventBytes: b.bytes)

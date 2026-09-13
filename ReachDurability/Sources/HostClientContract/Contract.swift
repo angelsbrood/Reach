@@ -4,6 +4,7 @@ import CryptoKit
 public enum HandoffError: Error, Equatable { case invalid, unavailable, oversized, closed }
 public enum HandoffContract {
     public static let revision = "s84-host-client-v1"
+    public static let nativeRevision = "s101-host-client-native-v1"
     public static let authorityRevision = "s100-host-client-authority-v1"
     public static let control = 2<<20, replayMessage = 12<<20, context = 1<<20, batch = 8<<20
     public static func encode<T: Encodable>(_ value: T, maximum: Int = control) throws -> Data {

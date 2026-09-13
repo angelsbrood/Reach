@@ -11,7 +11,7 @@ extension DurableSessionLifecycle {
     /// Initializes the real catalog under the original root. No clock adapter,
     /// maintenance, session owner or provider is constructed for this lane.
     public static func initializeRecoveryAuthority(at path: String, identity: LifecycleIdentity, keys: LifecycleKeys) throws {
-        guard let original=identity.authority else { throw AuthorityError.scope }
+        guard let original=identity.authority, !original.provision.native else { throw AuthorityError.scope }
         try original.validate()
         let fs=try LifecycleFileSystem(path:path,create:true); defer { fs.close() }
         let d=try CatalogDocument(version:2,authority:original.digest,incarnation:identity.incarnation,boot:identity.boot,
@@ -34,7 +34,7 @@ extension DurableSessionLifecycle {
     public static func admitRecoveryAuthority(at path: String, identity: LifecycleIdentity, keys: LifecycleKeys,
         scope: AuthorityScope, caller: CallerIdentity, provider: ProviderBinding, action: RecoveryAuthorityAction,
         fault: LifecycleFaultHook = { _ in }) throws -> AuthorityIssued {
-        guard let original=identity.authority else { throw AuthorityError.scope }
+        guard let original=identity.authority, !original.provision.native else { throw AuthorityError.scope }
         try original.check(scope,role:"host")
         func check() throws { try action.check(scope:scope,operation:.admitHost) }
         try check()
@@ -85,7 +85,7 @@ extension DurableSessionLifecycle {
     }
     private static func readAuthorityAdmission(_ d: CatalogDocument, files: LifecycleFileSystem, identity: LifecycleIdentity,
         keys: LifecycleKeys, scope: AuthorityScope, action: RecoveryAuthorityAction) throws -> AuthorityAdmission {
-        guard let original=identity.authority else { throw AuthorityError.scope }; try original.check(scope,role:"host")
+        guard let original=identity.authority, !original.provision.native else { throw AuthorityError.scope }; try original.check(scope,role:"host")
         guard [.admitHost,.authenticateHost].contains(action.operation) else { throw AuthorityError.scope }
         func check() throws { try action.check(scope:scope,operation:action.operation) }
         try check()

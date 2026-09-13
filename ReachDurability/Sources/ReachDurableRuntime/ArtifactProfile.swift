@@ -24,7 +24,7 @@ final class SelectedArtifactProfile {
     static var configuration:LlamaConfiguration { .init(hiddenSize:16,hiddenLayers:2,intermediateSize:32,attentionHeads:2,rmsNormEps:0.00001,vocabularySize:258,kvHeads:1) }
     let manifest:ArtifactManifest,manifestDigest:String,model:LlamaModel,tokenizer:ArtifactTokenizer,preparer:RequestPreparation
     var observations:[NativeObservation]=[]
-    init(at path:String) throws {
+    init(at path:String, nativeRecovery:Bool = false) throws {
         try LocalFiles.directory(path)
         guard Set(try FileManager.default.contentsOfDirectory(atPath:path))==Self.fileNames.union(["profile.json"]) else { throw LocalRuntimeError.invalid }
         let manifestBytes=try LocalFiles.read(path+"/profile.json",maximum:16384)
@@ -65,8 +65,10 @@ final class SelectedArtifactProfile {
         let initial=try descriptor("pending"),text=try ResumableTextOptions(tokenizerIdentity:initial.tokenizerIdentity,stopTokenIDs:[0],unknownTokenID:257)
         var closing=[Float](repeating:0,count:258);closing[0]=200;closing[35]=100;closing[126]=50
         let whitespace=WhitespaceTokenBias.compute(tokenizer:tokenizer)
+        // Explicit S101 fixture unit; the legacy selected policy remains 64.
+        let prefill = nativeRecovery ? 256 : 64
         let native=SelectedNativePolicy(caches:Array(repeating:.init(kind:.simple,heads:1,keyDimension:8,valueDimension:8),count:2),text:text,
-            guided:.init(model:.init(logitWidth:258,maximumTokens:0,prefillStepSize:64),completionReserve:32,closingBias:closing,whitespaceBias:whitespace.bias.asArray(Float.self),whitespaceTokenIDs:whitespace.tokenIDs),codec:"none-v1",prefill:64)
+            guided:.init(model:.init(logitWidth:258,maximumTokens:0,prefillStepSize:prefill),completionReserve:32,closingBias:closing,whitespaceBias:whitespace.bias.asArray(Float.self),whitespaceTokenIDs:whitespace.tokenIDs),codec:"none-v1",prefill:prefill)
         let selected=try descriptor(native.identity)
         preparer=try .init(descriptor:selected,actualDescriptor:selected,native:native,tokenizer:tokenizer)
         guard Memory.peakMemory<=128<<20 else { throw LocalRuntimeError.unsupported }

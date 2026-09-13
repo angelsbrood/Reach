@@ -15,13 +15,13 @@ enum RecoveryEncryption {
     }
     static func key(_ live:LiveClientRecord, record:String, binding:RecoveryBinding) -> SymmetricKey {
         HKDF<SHA256>.deriveKey(inputKeyMaterial:SymmetricKey(data:live.key),salt:Data(binding.core.utf8),
-            info:Data((binding.authorityOnly ? "S100/ticket-content/v3\0" : "S86/ticket-content/v1\0").utf8)+Data(record.utf8)+Data(live.contextDigest.utf8),outputByteCount:32)
+            info:Data((binding.nativeRecovery ? "S101/ticket-content/v4\0" : binding.authorityOnly ? "S100/ticket-content/v3\0" : "S86/ticket-content/v1\0").utf8)+Data(record.utf8)+Data(live.contextDigest.utf8),outputByteCount:32)
     }
     static func aad(_ live:LiveClientRecord, record:String, binding:RecoveryBinding) throws -> Data {
-        try RecoveryCodec.encode(AAD(revision:binding.authorityOnly ? "s100-original-ticket-authority-v1" : RecoveryLimits.revision,binding:binding,record:record,context:live.contextDigest,issued:live.issued,expires:live.expires,retention:live.retention?.digest))
+        try RecoveryCodec.encode(AAD(revision:binding.nativeRecovery ? "s101-original-ticket-native-v1" : binding.authorityOnly ? "s100-original-ticket-authority-v1" : RecoveryLimits.revision,binding:binding,record:record,context:live.contextDigest,issued:live.issued,expires:live.expires,retention:live.retention?.digest))
     }
     static func seal(_ ticket:Data, live:LiveClientRecord, record:String, binding:RecoveryBinding, root:SymmetricKey) throws -> Data {
-        guard (binding.independent || binding.authorityOnly) == (live.retention != nil), live.retention?.pair == binding.pair,
+        guard (binding.independent || binding.authorityOnly || binding.nativeRecovery) == (live.retention != nil), live.retention?.pair == binding.pair,
               binding.authority == (try live.retention?.acceptance?.admission().scope.digest) else { throw RecoveryError.unavailable }
         guard !ticket.isEmpty, ticket.count<=RecoveryLimits.ticket else { throw RecoveryError.full }
         let box=try AES.GCM.seal(ticket,using:key(live,record:record,binding:binding),nonce:AES.GCM.Nonce(),authenticating:aad(live,record:record,binding:binding))
@@ -39,7 +39,7 @@ enum RecoveryEncryption {
         return b
     }
     static func open(_ data:Data, live:LiveClientRecord, record:String, binding:RecoveryBinding, root:SymmetricKey) throws -> Data {
-        guard (binding.independent || binding.authorityOnly) == (live.retention != nil), live.retention?.pair == binding.pair,
+        guard (binding.independent || binding.authorityOnly || binding.nativeRecovery) == (live.retention != nil), live.retention?.pair == binding.pair,
               binding.authority == (try live.retention?.acceptance?.admission().scope.digest) else { throw RecoveryError.unavailable }
         let b=try inspect(data,binding:binding,root:root)
         guard b.record==record, b.context==live.contextDigest else { throw RecoveryError.unavailable }
