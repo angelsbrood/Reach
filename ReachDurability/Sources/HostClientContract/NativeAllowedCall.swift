@@ -5,6 +5,7 @@ import ReachWire
 /// usage are authenticated by saved host history, not precommitted here.
 public struct NativeAllowedCall {
     public let request:String,operation:String,entryID:String,namespace:String,name:String,schemaJSON:String
+    public let responseSchema:String?
     public let inputTokens:Int,maximumTokens:Int
     static func project(_ provider:Data,digest:String,request:String,operation:String,route:String) throws -> NativeAllowedCall? {
         guard route=="allowed" else { return nil }
@@ -17,7 +18,7 @@ public struct NativeAllowedCall {
               let b=selected["_0"] as? [String:Any],b["version"] as? Int==1,b["route"] as? String=="allowed",
               b["policy"] as? String=="S79-proposals-first;visible-probe-unless-schema;final-ready-wins-v1",
               b["preparationPolicy"] as? String=="S79-json-messages-tokenizer-v1",b["requestIdentity"] as? String==request,
-              b["responseSchema"]==nil,let entry=b["entryID"] as? String,!entry.isEmpty,entry.utf8.count<=256,
+              let entry=b["entryID"] as? String,!entry.isEmpty,entry.utf8.count<=256,
               let namespace=b["namespace"] as? String,namespace.utf8.count==32,
               namespace.utf8.allSatisfy({(48...57).contains($0)||(97...102).contains($0)}),
               let tools=b["tools"] as? [[String:Any]],tools.count==1,
@@ -28,9 +29,13 @@ public struct NativeAllowedCall {
               let maximum=probe["maximumTokens"] as? Int,(1...64).contains(maximum),
               let guided=b["guidedOptions"] as? [String:Any],let model=guided["model"] as? [String:Any],
               model["maximumTokens"] as? Int==maximum,model["prefillStepSize"] as? Int==256 else { throw HandoffError.invalid }
-        let bytes=Data(schema.utf8),portable=try JSONDecoder().decode(WireGenerationSchema.self,from:bytes)
-        guard try HandoffContract.encode(portable)==bytes else { throw HandoffError.invalid }
-        return .init(request:request,operation:operation,entryID:entry,namespace:namespace,name:name,schemaJSON:schema,inputTokens:tokens.count,maximumTokens:maximum)
+        let responseSchema=b["responseSchema"] as? String
+        guard b["responseSchema"]==nil || responseSchema != nil else { throw HandoffError.invalid }
+        for source in [schema]+[responseSchema].compactMap({$0}) {
+            let bytes=Data(source.utf8),portable=try JSONDecoder().decode(WireGenerationSchema.self,from:bytes)
+            guard try HandoffContract.encode(portable)==bytes else { throw HandoffError.invalid }
+        }
+        return .init(request:request,operation:operation,entryID:entry,namespace:namespace,name:name,schemaJSON:schema,responseSchema:responseSchema,inputTokens:tokens.count,maximumTokens:maximum)
     }
     struct Registration { let id:String,name:String,arguments:Data }
     func validate(_ events:[WireEvent]) throws -> Registration? {
@@ -47,12 +52,20 @@ public struct NativeAllowedCall {
             return .init(id:id,name:name,arguments:canonical)
         }
         if events.count==2,case .usage(let input,let output)=events[0],case .finished(.complete)=events[1] {
-            guard input==inputTokens,(0...maximumTokens).contains(output) else { throw HandoffError.invalid };return nil
+            if responseSchema != nil {
+                guard input==2*inputTokens,(0..<(2*maximumTokens)).contains(output) else { throw HandoffError.invalid }
+            } else { guard input==inputTokens,(0...maximumTokens).contains(output) else { throw HandoffError.invalid } }
+            return nil
         }
         if events.count==1 {
             switch events[0] { case .finished(.error),.finished(.cancelled):return nil;default:break }
         }
-        for event in events {
+        // Exhausted schema guidance can retain its last response fragment and
+        // finished(error) together. It contributes no successful pass usage.
+        let responseEvents:ArraySlice<WireEvent>
+        if responseSchema != nil,case .finished(.error)?=events.last { responseEvents=events.dropLast() }
+        else { responseEvents=events[...] }
+        for event in responseEvents {
             guard case .responseAppend(let entry,let text,let segment,let count)=event,
                   entry==nil,segment==nil,!text.isEmpty,count==1 else { throw HandoffError.invalid }
         }

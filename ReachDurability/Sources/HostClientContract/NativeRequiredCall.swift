@@ -79,6 +79,7 @@ public struct NativeRecoveryPrefix {
         } else if let allowed {
             guard prefix.registrations==0 else { throw HandoffError.invalid }
             if let call=try allowed.validate(events) {
+                guard allowed.responseSchema==nil || prefix.high==0 else { throw HandoffError.invalid }
                 try prefix.register(id:Data(call.id.utf8),name:Data(call.name.utf8),arguments:call.arguments)
             }
         } else {

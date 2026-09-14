@@ -145,8 +145,8 @@ public enum NativeRecoveryRuntime {
             }
             func boundary(_ point: String) throws {
                 guard point == fault, !faultUsed else { return }; faultUsed=true
-                struct Boundary: Encodable { let stage="boundary"; let point:String, nativeCalls:Int; let guided:ProviderGuidedProgress?, required:ProviderRequiredProgress?,allowed:ProviderAllowedProgress? }
-                try RecoveryAuthorityChannel.write(Boundary(point:point,nativeCalls:calls,guided:guidedProgress.last,required:requiredProgress,allowed:allowedProgress))
+                struct Boundary: Encodable { let stage="boundary"; let point:String, nativeCalls:Int; let guided:ProviderGuidedProgress?, required:ProviderRequiredProgress?,allowed:ProviderAllowedProgress?; let allowedOperation:String,traces:[NativeObservation] }
+                try RecoveryAuthorityChannel.write(Boundary(point:point,nativeCalls:calls,guided:guidedProgress.last,required:requiredProgress,allowed:allowedProgress,allowedOperation:allowedOperation,traces:profile?.observations ?? []))
                 let command=try AuthorityCodec.decode(AuthorityControl.self,RecoveryAuthorityChannel.read())
                 guard command.stage == "continue" || command.stage == "observe" else { throw AuthorityError.state }
                 if command.stage == "observe" { try RecoveryAuthorityChannel.observe(action) }
@@ -181,12 +181,24 @@ public enum NativeRecoveryRuntime {
                             if allowedSteps.isEmpty { try LocalFiles.createDirectory(directory) }
                             try action.check();allowedSteps.append(try step.write(to:directory));try action.publication(host.admission)
                         }
-                        func allowedCut() -> Bool {
-                            guard allowedBoundary != "none",let p=allowedProgress else { return false }
+                        func allowedCut() throws -> Bool {
+                            guard allowedBoundary != "none",let p=allowedProgress,case .allowed(let binding)=host.provider.lane else { return false }
                             switch allowedBoundary {
-                            case "probe":return p.phase=="probe" && p.probe.rawTokens>0 && p.proseDelivered>0
+                            case "probe":
+                                guard p.phase=="probe",p.probe.rawTokens>0 else { return false }
+                                return try binding.responseSchema==nil ? p.proseDelivered>0 : p.proseDelivered==0 && client.witness(action:action).high==0
                             case "route-ready":return p.phase=="routeReady"
-                            case "guided":return p.phase=="guided" && (p.guided?.consumedTokens ?? 0)>0 && (p.guided?.pendingTokens ?? 0)>0 && !p.whole.isEmpty
+                            case "guided":
+                                guard p.phase=="guided",(p.guided?.consumedTokens ?? 0)>0,(p.guided?.pendingTokens ?? 0)>0,!p.whole.isEmpty else { return false }
+                                if p.route=="schema" {
+                                    for batch in try client.inbox(action:action) {
+                                        for event in try JSONDecoder().decode([WireEvent].self,from:batch.bytes).dropFirst(batch.skip) {
+                                            if case .responseAppend(_,let text,_,_)=event,!text.isEmpty { return true }
+                                        }
+                                    }
+                                    return false
+                                }
+                                return true
                             case "ready":return p.phase=="finalReady"
                             case "emitted":return p.phase=="finalEmitted"
                             default:return false

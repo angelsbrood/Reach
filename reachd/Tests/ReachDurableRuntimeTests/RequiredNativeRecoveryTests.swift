@@ -66,7 +66,7 @@ final class RequiredNativeRecoveryTests:XCTestCase {
             var b=good;b.lane = .required(lane,tokens:tokens);try check(b,false)
         }
         try check(binding(p,ArtifactFixtures.request("allowed",maximum:16)),true)
-        try check(binding(p,ArtifactFixtures.request("combined",maximum:16)),false)
+        try check(binding(p,ArtifactFixtures.request("combined",maximum:16)),true)
         let config=AdapterConfiguration(dialect:2,model:p.preparer.policy.descriptor.model,optIn:true,ready:true)
         for kind in 0..<4 {
             var lane=original

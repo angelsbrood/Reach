@@ -47,12 +47,14 @@ public enum NativeRecoveryBinding {
                 unknownTokenID:s.unknownTokenID,fastForward:s.fastForward,options:b.options)
             guard try storeEncode(exact) == storeEncode(b) else { throw AuthorityError.scope }
         case .allowed(let b):
-            guard b.tools.count==1,b.responseSchema==nil,b.requestIdentity==provider.requestID,
+            guard b.tools.count==1,b.requestIdentity==provider.requestID,
                   b.probeOptions.prefillStepSize==256,b.guidedOptions.model.prefillStepSize==256,
                   (1...512).contains(b.originalTokens.count),(1...64).contains(b.probeOptions.maximumTokens),
                   b.guidedOptions.model.maximumTokens==b.probeOptions.maximumTokens else { throw AuthorityError.scope }
-            let bytes=Data(b.tools[0].schemaJSON.utf8),schema=try JSONDecoder().decode(WireGenerationSchema.self,from:bytes)
-            guard try storeEncode(schema)==bytes else { throw AuthorityError.scope }
+            for source in [b.tools[0].schemaJSON]+[b.responseSchema].compactMap({$0}) {
+                let bytes=Data(source.utf8),schema=try JSONDecoder().decode(WireGenerationSchema.self,from:bytes)
+                guard try storeEncode(schema)==bytes else { throw AuthorityError.scope }
+            }
         }
     }
 }

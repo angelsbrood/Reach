@@ -162,7 +162,7 @@ final class SchemaNativeRecoveryTests: XCTestCase {
         }
         lane=original; lane.specification.source=" "+lane.specification.source; bad=good; bad.lane = .guided(lane); try check(bad,accepted:false)
         try check(Self.binding(p,ArtifactFixtures.request("allowed",maximum:16)),accepted:true)
-        try check(Self.binding(p,ArtifactFixtures.request("combined",maximum:16)),accepted:false)
+        try check(Self.binding(p,ArtifactFixtures.request("combined",maximum:16)),accepted:true)
         XCTAssertTrue(p.observations.isEmpty)
     } }
     func testCompleteStoredArtifactComparisonStillPrecedesFactory() throws { try LocalDurableRuntime.withCPU {

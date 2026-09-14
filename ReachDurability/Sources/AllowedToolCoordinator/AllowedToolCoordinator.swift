@@ -73,7 +73,8 @@ public final class AllowedToolCoordinator {
         if let guided { view=try .init(checkpoint:.init(data:d.child),validatedOperation:guided,tokenizer:runtime.tokenizer) }
         else { view=nil }
         return .init(phase:c.phase,route:c.route,outcome:c.outcome?.rawValue,proposals:c.proposals,current:c.current,whole:c.whole,
-            completedCalls:c.completed.compactMap(\.call),deliveredCalls:c.deliveredCalls,proseDelivered:c.proseDelivered,
+            completed:c.completed.map { .init(kind:$0.kind,index:$0.index,inputDigest:$0.inputDigest,prompt:$0.prompt,output:$0.output) },
+            schemaReturnedBytes:c.schemaReturnedBytes,completedCalls:c.completed.compactMap(\.call),deliveredCalls:c.deliveredCalls,proseDelivered:c.proseDelivered,
             inputTokens:usage.0,outputTokens:usage.1,probe:c.probe,child:d.child,guided:view)
     }
     public func advance() throws -> Batch? {

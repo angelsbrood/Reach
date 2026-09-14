@@ -6,6 +6,9 @@ zero or one complete observed proposals. Execution and terminal review verdicts
 are recorded in the private S104 handback; this description is not an execution
 verdict.
 
+The combined request extension is described in
+[Combined schema and tool recovery](cross-boot-schema-tool-recovery.md).
+
 There are two distinct executions. `reachd durable-native-recovery` uses the
 existing tiny Llama artifact for no-call prose recovery. The separate
 `reach-allowed-recovery-fixture` executable uses the prescribed native state

@@ -50,8 +50,9 @@ import MLXLMCommon
 func validateAllowedRecoveryPass(_ pass:AllowedPreparedPass,binding:AllowedToolBinding,tokenizer:ArtifactTokenizer) throws {
     guard (1...512).contains(pass.tokens.count),pass.index==0,
           pass.inputDigest == (try ResumableTokenIdentity.inputDigest(pass.tokens)) else { throw AuthorityError.scope }
-    if pass.kind == .probe {
-        guard pass.tokens==binding.originalTokens,pass.messages.isEmpty,pass.proposalID==nil else { throw AuthorityError.scope }
+    if pass.kind == .probe || pass.kind == .schema {
+        guard pass.kind != .schema || binding.responseSchema != nil,
+              pass.tokens==binding.originalTokens,pass.messages.isEmpty,pass.proposalID==nil else { throw AuthorityError.scope }
     } else {
         guard pass.kind == .tool,let id=pass.proposalID,!id.isEmpty,id.utf8.count<=256,!pass.messages.isEmpty,
               pass.tokens==tokenizer.encode(text:AllowedToolReplayInput.policy+"\n"+String(decoding:pass.messages,as:UTF8.self)) else { throw AuthorityError.scope }
