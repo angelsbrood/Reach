@@ -180,11 +180,19 @@ let reachdTargets: [Target] = [
 #else
 let reachdProducts: [Product] = [
     .executable(name: "reachd", targets: ["reachd"]),
+    .executable(name:"reach-allowed-recovery-fixture",targets:["AllowedRecoveryFixture"]),
     .library(name: "ReachDaemon", targets: ["ReachDaemon"]),
     reachHostProduct,
 ]
 
 let reachdTargets: [Target] = [
+    .executableTarget(name:"AllowedRecoveryFixture",dependencies:[
+        .product(name:"ReachDurableRuntime",package:"ReachDurability"),
+        .product(name:"ArgumentParser",package:"swift-argument-parser"),
+        .product(name:"MLXLLM",package:"mlx-swift-lm"),
+        .product(name:"MLXLMCommon",package:"mlx-swift-lm"),
+        .product(name:"MLXGuidedGeneration",package:"mlx-swift-lm"),
+        .product(name:"ReachWire",package:"ReachKit")]),
     // Thin CLI over the daemon library: serve, pair, ca, wg, status.
     .executableTarget(
         name: "reachd",
@@ -247,7 +255,7 @@ let reachdTargets: [Target] = [
     ),
 
     reachHostTestsTarget,
-    .testTarget(name:"ReachDurableRuntimeTests",dependencies:["ReachDaemon",
+    .testTarget(name:"ReachDurableRuntimeTests",dependencies:["ReachDaemon","AllowedRecoveryFixture",
         .product(name:"ReachTransport",package:"ReachKit"),.product(name:"ReachIdentity",package:"ReachKit"),
         .product(name:"ReachDurableRuntime",package:"ReachDurability"),
         .product(name:"ReachWire",package:"ReachKit"),

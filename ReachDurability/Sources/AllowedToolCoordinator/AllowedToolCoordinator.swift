@@ -65,6 +65,17 @@ public final class AllowedToolCoordinator {
     public func capture() throws -> AllowedToolCheckpoint {
         guard !isClosed else { throw AllowedToolError.closed }; return try .init(document: d)
     }
+    public func validatedProgress(_ selected:AllowedToolCheckpoint) throws -> AllowedToolProgress {
+        guard !isClosed,try capture()==selected else { throw AllowedToolError.incompatible }
+        try validate()
+        let c=d.control,usage=try c.usage()
+        let view:ResumableGuidedCheckpointView?
+        if let guided { view=try .init(checkpoint:.init(data:d.child),validatedOperation:guided,tokenizer:runtime.tokenizer) }
+        else { view=nil }
+        return .init(phase:c.phase,route:c.route,outcome:c.outcome?.rawValue,proposals:c.proposals,current:c.current,whole:c.whole,
+            completedCalls:c.completed.compactMap(\.call),deliveredCalls:c.deliveredCalls,proseDelivered:c.proseDelivered,
+            inputTokens:usage.0,outputTokens:usage.1,probe:c.probe,child:d.child,guided:view)
+    }
     public func advance() throws -> Batch? {
         guard !isClosed else { throw AllowedToolError.closed }
         if phase == .finalEmitted { return nil }

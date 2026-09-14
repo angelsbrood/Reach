@@ -12,6 +12,8 @@ lane. See [Schema-guided native recovery](cross-boot-schema-recovery.md) for its
 bounds, pending-token checkpoint and cold-reboot gates.
 S103 adds [one required-tool recovery](cross-boot-required-recovery.md), with
 private generating/ready checkpoints and one durable registration without effects.
+S104 adds [allowed-tool recovery](cross-boot-allowed-recovery.md): normal Llama
+no-call continuation and a separate prescribed native fixture for one-call integration.
 
 The original declaration freezes the request input digest, artifact declaration,
 operation identity and exact prepared ProviderBinding before either independent

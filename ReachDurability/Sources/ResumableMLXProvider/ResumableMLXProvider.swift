@@ -76,6 +76,16 @@ public final class ResumableMLXProvider {
         let progress=try operation.validatedProgress(.init(data:checkpoint.child))
         return try ProviderRequiredProgress(selected:checked,coordinator:checkpoint.child,progress:progress)
     }
+    public func committedAllowedProgress(_ selected:ProviderCandidate) throws -> ProviderAllowedProgress {
+        guard !isClosed,pending==nil,acceptedCommit==selected.commit,
+              let child,case .allowed(let operation)=child else { throw ProviderError.commit }
+        let checked=try ProviderCandidate(data:selected.data),checkpoint=try checked.checkpoint()
+        guard try providerEncode(binding)==providerEncode(checkpoint.binding),
+              child.phase==checkpoint.phase,try child.capture()==checkpoint.child else { throw ProviderError.commit }
+        try child.validateTerminal(checkpoint.terminal)
+        let progress=try operation.validatedProgress(.init(data:checkpoint.child))
+        return try .init(selected:checked,coordinator:checkpoint.child,progress:progress)
+    }
     public func pendingCandidate() throws -> ProviderCandidate? {
         guard !isClosed else { throw ProviderError.closed }; return pending
     }

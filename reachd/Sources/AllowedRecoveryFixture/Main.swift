@@ -4,8 +4,14 @@ import Darwin
 import ReachDurableRuntime
 
 /// Explicit qualification dispatch only; no ordinary offer/profile is changed.
-struct DurableNativeRecovery: ParsableCommand {
-    static let configuration=CommandConfiguration(commandName:"durable-native-recovery",abstract:"Qualify ordinary, schema-guided or one required/allowed-tool continuation across a receiver reboot.",subcommands:[Witness.self,PrepareFixture.self,ProbeGuidedFixture.self,ProbeRequiredFixture.self,ProbeAllowedFixture.self,Provision.self,Initialize.self,Admit.self,Accept.self,Run.self,Retire.self])
+@main
+struct AllowedRecoveryFixtureCommand: ParsableCommand {
+    static let configuration=CommandConfiguration(commandName:"reach-allowed-recovery-fixture",abstract:"Prescribed S104 state-model allowed-route qualification only.",subcommands:[MakeFixture.self,Witness.self,PrepareFixture.self,ProbeAllowedFixture.self,Provision.self,Initialize.self,Admit.self,Accept.self,Run.self,Retire.self])
+    struct MakeFixture: ParsableCommand {
+        @Option(name:.long) var model:String
+        @Option(name:.long) var variant:String = "success"
+        func run() throws { try nativeCommand { try S104Fixture.write(at:model,variant:variant) } }
+    }
     struct Pair: ParsableArguments {
         @Option(name:.long) var hostReceipt:String
         @Option(name:.long) var hostDigest:String
@@ -23,7 +29,7 @@ struct DurableNativeRecovery: ParsableCommand {
         @Option(name:.long) var request:String
         @Option(name:.long) var output:String
         func run() throws {
-            try nativeCommand { try NativeRecoveryRoots.provision(originals:RecoveryAuthorityChannel.read(),publicModel:publicModel,request:request,model:model,prepared:prepared,output:output) }
+            try nativeCommand { try NativeRecoveryRoots.provision(originals:RecoveryAuthorityChannel.read(),publicModel:publicModel,request:request,model:model,prepared:prepared,output:output,fixture:S104Fixture.factory) }
         }
     }
     struct Initialize: ParsableCommand {
@@ -35,7 +41,7 @@ struct DurableNativeRecovery: ParsableCommand {
         @Option(name:.long) var unlockSecretFd:Int32
         func run() throws {
             try nativeCommand {
-                let digest=try NativeRecoveryRoots.initialize(root:root,role:role,configuration:configuration,receipt:ownerReceipt,secretDescriptor:unlockSecretFd)
+                let digest=try NativeRecoveryRoots.initialize(root:root,role:role,configuration:configuration,receipt:ownerReceipt,secretDescriptor:unlockSecretFd,fixture:S104Fixture.factory)
                 struct Result:Encodable { let stage="ready"; let role:String, ownerReceiptDigest:String }
                 try RecoveryAuthorityChannel.write(Result(role:role,ownerReceiptDigest:digest))
             }
@@ -48,7 +54,7 @@ struct DurableNativeRecovery: ParsableCommand {
         @Option(name:.long) var export:String
         func run() throws {
             try nativeCommand { try NativeRecoveryRuntime.admit(hostReceipt:pair.hostReceipt,hostDigest:pair.hostDigest,
-                clientReceipt:pair.clientReceipt,clientDigest:pair.clientDigest,secretDescriptor:unlockSecretFd,request:request,export:export) }
+                clientReceipt:pair.clientReceipt,clientDigest:pair.clientDigest,secretDescriptor:unlockSecretFd,request:request,export:export,fixture:S104Fixture.factory) }
         }
     }
     struct Accept: ParsableCommand {
@@ -61,7 +67,7 @@ struct DurableNativeRecovery: ParsableCommand {
             guard let issuer=Data(base64Encoded:originalIssuer), issuer.count == 32 else { throw ValidationError("Expected the original host issuer public key.") }
             try nativeCommand { try NativeRecoveryRuntime.accept(hostReceipt:pair.hostReceipt,hostDigest:pair.hostDigest,
                 clientReceipt:pair.clientReceipt,clientDigest:pair.clientDigest,secretDescriptor:unlockSecretFd,export:export,
-                originalIssuer:issuer,successfulExportDigest:successfulExportDigest) }
+                originalIssuer:issuer,successfulExportDigest:successfulExportDigest,fixture:S104Fixture.factory) }
         }
     }
     struct PrepareFixture: ParsableCommand {
@@ -70,25 +76,13 @@ struct DurableNativeRecovery: ParsableCommand {
         @Option(name:.long) var operation:String
         @Option(name:.long) var output:String
         @Option(name:.long) var publicModel:String
-        func run() throws { try nativeCommand { try NativeRecoveryRuntime.prepareFixture(model:model,request:request,operation:operation,output:output,publicModel:publicModel) } }
-    }
-    struct ProbeGuidedFixture: ParsableCommand {
-        @Option(name:.long) var model:String
-        @Option(name:.long) var prepared:String
-        @Option(name:.long) var report:String
-        func run() throws { try nativeCommand { try NativeRecoveryRuntime.probeGuidedFixture(model:model,prepared:prepared,report:report) } }
-    }
-    struct ProbeRequiredFixture: ParsableCommand {
-        @Option(name:.long) var model:String
-        @Option(name:.long) var prepared:String
-        @Option(name:.long) var report:String
-        func run() throws { try nativeCommand { try NativeRecoveryRuntime.probeRequiredFixture(model:model,prepared:prepared,report:report) } }
+        func run() throws { try nativeCommand { try NativeRecoveryRuntime.prepareFixture(model:model,request:request,operation:operation,output:output,publicModel:publicModel,fixture:S104Fixture.factory) } }
     }
     struct ProbeAllowedFixture: ParsableCommand {
         @Option(name:.long) var model:String
         @Option(name:.long) var prepared:String
         @Option(name:.long) var report:String
-        func run() throws { try nativeCommand { try NativeRecoveryRuntime.probeAllowedFixture(model:model,prepared:prepared,report:report) } }
+        func run() throws { try nativeCommand { try NativeRecoveryRuntime.probeAllowedFixture(model:model,prepared:prepared,report:report,fixture:S104Fixture.factory) } }
     }
     struct Run: ParsableCommand {
         @OptionGroup var pair:Pair
@@ -106,7 +100,7 @@ struct DurableNativeRecovery: ParsableCommand {
         func run() throws {
             try nativeCommand { try NativeRecoveryRuntime.run(hostReceipt:pair.hostReceipt,hostDigest:pair.hostDigest,
                 clientReceipt:pair.clientReceipt,clientDigest:pair.clientDigest,hostSecret:hostSecretFd,clientSecret:clientSecretFd,
-                original:original,stopAfterCalls:stopAfterCalls,leaveHostAhead:leaveHostAhead,report:report,fault:fault,stopWithPendingGuided:stopWithPendingGuided,requiredBoundary:requiredBoundary,duplicateExact:duplicateExact,allowedBoundary:allowedBoundary) }
+                original:original,stopAfterCalls:stopAfterCalls,leaveHostAhead:leaveHostAhead,report:report,fault:fault,stopWithPendingGuided:stopWithPendingGuided,requiredBoundary:requiredBoundary,duplicateExact:duplicateExact,allowedBoundary:allowedBoundary,fixture:S104Fixture.factory) }
         }
     }
     struct Retire: ParsableCommand {

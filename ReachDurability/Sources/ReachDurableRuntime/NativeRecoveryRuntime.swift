@@ -39,34 +39,34 @@ public enum NativeRecoveryRuntime {
         try NativeRecoveryBinding.validate(provider)
     }
     /// Independent fixture preparation is completed and compared before originals.
-    public static func prepareFixture(model: String, request: String, operation: String, output: String, publicModel: String) throws {
+    public static func prepareFixture(model: String, request: String, operation: String, output: String, publicModel: String,fixture:AllowedRecoveryQualificationFactory? = nil) throws {
         try LocalDurableRuntime.withCPU {
-            let p=try SelectedArtifactProfile(at:model,nativeRecovery:true), input=try LocalDurableRuntime.request(from:request)
+            let p=try selectedProfile(at:model,fixture:fixture), input=try LocalDurableRuntime.request(from:request)
             let binding=try prepare(p,input:input,operation:operation)
             let e=try AuthorityExecution(operation:operation,provider:AuthorityCodec.encode(binding))
             try LocalFiles.writeNew(AuthorityCodec.encode(e),to:output)
             try LocalFiles.writeNew(AuthorityCodec.encode(IndependentPublicModel(descriptor:p.preparer.policy.descriptor,artifactDigest:p.manifestDigest)),to:publicModel)
         }
     }
-    private static func prepare(_ p: SelectedArtifactProfile, input: WireGenerationRequest, operation: String) throws -> ProviderBinding {
-        guard try ["ordinary","guided","required"].contains(p.preparer.policy.route(input)) else { throw AuthorityError.state }
+    static func prepare(_ p: any NativeRecoverySelectedProfile, input: WireGenerationRequest, operation: String) throws -> ProviderBinding {
+        guard try ["ordinary","guided","required","allowed"].contains(p.preparer.policy.route(input)) else { throw AuthorityError.state }
         let config=AdapterConfiguration(dialect:2,model:p.preparer.policy.descriptor.model,optIn:true,ready:true)
         let reference=DurableGenerationReference(session:.init(modelID:config.model,profile:config.profile,sessionID:"00000000-0000-0000-0000-000000000001"),generationID:"fixture-generation",operationID:operation)
         let b=try p.preparer.prepare(input,reference:reference,configuration:config)
         try validateFixture(b); guard p.observations.isEmpty else { throw AuthorityError.state }; return b
     }
     public static func admit(hostReceipt: String, hostDigest: String, clientReceipt: String, clientDigest: String,
-        secretDescriptor: Int32, request: String, export: String) throws {
+        secretDescriptor: Int32, request: String, export: String,fixture:AllowedRecoveryQualificationFactory? = nil) throws {
         let credential=try UnlockCredential(consumingDescriptor:secretDescriptor); defer { credential.close() }
         let scope=try NativeRecoveryRoots.originalScope(hostReceipt:hostReceipt,hostDigest:hostDigest,clientReceipt:clientReceipt,clientDigest:clientDigest)
-        let root=try NativeRecoveryRootAccess(receipt:hostReceipt,expectedDigest:hostDigest)
+        let root=try NativeRecoveryRootAccess(receipt:hostReceipt,expectedDigest:hostDigest,fixture:fixture)
         guard root.core.role == .host, let execution=scope.provision.execution else { throw AuthorityError.scope }
         let owner=try GenerationAuthorityOwner(scope:scope,clock:SystemClock(),validateOwnedRoots:{ try root.validateCurrent() }), action=try owner.begin(.admitHost)
         try RecoveryAuthorityChannel.exchange(action)
         let binding=try LocalDurableRuntime.withCPU { () -> ProviderBinding in
             try action.check()
             guard AuthorityCodec.hash(try LocalFiles.read(request,maximum:64<<10)) == scope.provision.requestInputDigest else { throw AuthorityError.scope }
-            let p=try SelectedArtifactProfile(at:root.configuration.artifactPath,nativeRecovery:true); try action.check()
+            let p=try selectedProfile(at:root.configuration.artifactPath,fixture:fixture); try action.check()
             guard p.manifestDigest == root.configuration.model.artifactDigest, p.preparer.policy.descriptor == root.configuration.model.descriptor else { throw AuthorityError.scope }
             let b=try prepare(p,input:LocalDurableRuntime.request(from:request),operation:execution.operation)
             try action.check(); guard try AuthorityCodec.encode(b) == execution.provider else { throw AuthorityError.scope }; return b
@@ -92,10 +92,10 @@ public enum NativeRecoveryRuntime {
     }
     private static func bindingBytes(_ binding: ProviderBinding) throws -> Data { try AuthorityCodec.encode(binding) }
     public static func accept(hostReceipt: String, hostDigest: String, clientReceipt: String, clientDigest: String,
-        secretDescriptor: Int32, export: String, originalIssuer: Data, successfulExportDigest: String) throws {
+        secretDescriptor: Int32, export: String, originalIssuer: Data, successfulExportDigest: String,fixture:AllowedRecoveryQualificationFactory? = nil) throws {
         let credential=try UnlockCredential(consumingDescriptor:secretDescriptor); defer { credential.close() }
         let scope=try NativeRecoveryRoots.originalScope(hostReceipt:hostReceipt,hostDigest:hostDigest,clientReceipt:clientReceipt,clientDigest:clientDigest)
-        let root=try NativeRecoveryRootAccess(receipt:clientReceipt,expectedDigest:clientDigest)
+        let root=try NativeRecoveryRootAccess(receipt:clientReceipt,expectedDigest:clientDigest,fixture:fixture)
         guard root.core.role == .client else { throw AuthorityError.scope }
         let owner=try GenerationAuthorityOwner(scope:scope,clock:SystemClock(),validateOwnedRoots:{ try root.validateCurrent() }), action=try owner.begin(.acceptClient)
         try RecoveryAuthorityChannel.exchange(action)
@@ -114,12 +114,14 @@ public enum NativeRecoveryRuntime {
     public static func run(hostReceipt: String, hostDigest: String, clientReceipt: String, clientDigest: String,
         hostSecret: Int32, clientSecret: Int32, original: Bool, stopAfterCalls: Int, leaveHostAhead: Bool,
         report: String, fault: String, stopWithPendingGuided: Bool=false,
-        requiredBoundary: String="none", duplicateExact: Bool=false) throws {
-        guard (0...20).contains(stopAfterCalls), ["none","before-native","after-native","after-commit","before-publication"].contains(fault),
+        requiredBoundary: String="none", duplicateExact: Bool=false,allowedBoundary:String="none",fixture:AllowedRecoveryQualificationFactory? = nil) throws {
+        guard (0...20).contains(stopAfterCalls), ["none","before-native","after-native","after-commit","before-publication","after-next-pass-native"].contains(fault),
               ["none","generating","ready","emitted"].contains(requiredBoundary),
-              requiredBoundary == "none" || !stopWithPendingGuided && stopAfterCalls == 0 else { throw AuthorityError.invalid }
+              requiredBoundary == "none" || !stopWithPendingGuided && stopAfterCalls == 0,
+              ["none","probe","route-ready","guided","ready","emitted"].contains(allowedBoundary),
+              allowedBoundary == "none" || requiredBoundary == "none" && !stopWithPendingGuided && stopAfterCalls == 0 else { throw AuthorityError.invalid }
         try LocalDurableRuntime.withCPU {
-            let h=try NativeRecoveryRootAccess(receipt:hostReceipt,expectedDigest:hostDigest), c=try NativeRecoveryRootAccess(receipt:clientReceipt,expectedDigest:clientDigest)
+            let h=try NativeRecoveryRootAccess(receipt:hostReceipt,expectedDigest:hostDigest,fixture:fixture), c=try NativeRecoveryRootAccess(receipt:clientReceipt,expectedDigest:clientDigest,fixture:fixture)
             guard h.core.role == .host, c.core.role == .client else { throw AuthorityError.scope }
             let scope=try h.scope(); guard try c.scope() == scope else { throw AuthorityError.scope }
             if original { guard scope.host.boot == (try RootKeyCodec.boot()) else { throw AuthorityError.scope } }
@@ -128,11 +130,13 @@ public enum NativeRecoveryRuntime {
             let owner=try GenerationAuthorityOwner(scope:scope,clock:SystemClock(),validateOwnedRoots:{ try h.validateCurrent(); try c.validateCurrent() })
             var actionBegan=DispatchTime.now().uptimeNanoseconds
             var action=try owner.begin(.reopen); try RecoveryAuthorityChannel.exchange(action)
-            var profile: SelectedArtifactProfile?, generation: GuardedNativeGeneration?, failureStage="reopen"
+            var profile: (any NativeRecoverySelectedProfile)?, generation: GuardedNativeGeneration?, failureStage="reopen"
             var before:[HandoffBatch]=[], replayedBeforeNative=0, faultUsed=false, didCut=false
             var guidedProgress:[ProviderGuidedProgress]=[]
             var requiredInitial:ProviderRequiredProgress?, requiredProgress:ProviderRequiredProgress?
             var requiredSteps:[NativeRequiredStepReference]=[], duplicateApplied=false
+            var allowedInitial:ProviderAllowedProgress?,allowedProgress:ProviderAllowedProgress?,allowedOperation="none"
+            var allowedSteps:[NativeRequiredStepReference]=[]
             var finalReport: NativeRecoveryReport?, finalAdmission: AuthorityAdmission?
             var calls: Int { profile?.observations.reduce(0){$0+$1.calls} ?? 0 }
             func renew(_ op: GenerationOperation) throws {
@@ -141,8 +145,8 @@ public enum NativeRecoveryRuntime {
             }
             func boundary(_ point: String) throws {
                 guard point == fault, !faultUsed else { return }; faultUsed=true
-                struct Boundary: Encodable { let stage="boundary"; let point:String, nativeCalls:Int; let guided:ProviderGuidedProgress?, required:ProviderRequiredProgress? }
-                try RecoveryAuthorityChannel.write(Boundary(point:point,nativeCalls:calls,guided:guidedProgress.last,required:requiredProgress))
+                struct Boundary: Encodable { let stage="boundary"; let point:String, nativeCalls:Int; let guided:ProviderGuidedProgress?, required:ProviderRequiredProgress?,allowed:ProviderAllowedProgress? }
+                try RecoveryAuthorityChannel.write(Boundary(point:point,nativeCalls:calls,guided:guidedProgress.last,required:requiredProgress,allowed:allowedProgress))
                 let command=try AuthorityCodec.decode(AuthorityControl.self,RecoveryAuthorityChannel.read())
                 guard command.stage == "continue" || command.stage == "observe" else { throw AuthorityError.state }
                 if command.stage == "observe" { try RecoveryAuthorityChannel.observe(action) }
@@ -157,7 +161,37 @@ public enum NativeRecoveryRuntime {
                         defer { client.close() }
                         guard client.admission == host.admission else { throw AuthorityError.scope }
                         if stopWithPendingGuided && host.provider.lane.route != .guided { throw AuthorityError.scope }
-                        if (requiredBoundary != "none" || duplicateExact) && host.provider.lane.route != .required { throw AuthorityError.scope }
+                        if requiredBoundary != "none" && host.provider.lane.route != .required { throw AuthorityError.scope }
+                        if allowedBoundary != "none" && host.provider.lane.route != .allowed { throw AuthorityError.scope }
+                        if fault == "after-next-pass-native" && host.provider.lane.route != .allowed { throw AuthorityError.scope }
+                        if duplicateExact && !["required","allowed"].contains(host.provider.lane.route.rawValue) { throw AuthorityError.scope }
+                        func refreshAllowed() throws {
+                            if host.provider.lane.route == .allowed,let generation {
+                                let value=try generation.allowedProgress(action:action)
+                                try NativeRecoveryAllowed.validate(value,binding:host.provider)
+                                allowedProgress=value;if allowedInitial==nil { allowedInitial=value }
+                            }
+                        }
+                        func observeAllowed(_ operation:String,_ priorCalls:Int,_ prior:ProviderAllowedProgress?) throws {
+                            guard let progress=allowedProgress,let profile,let candidate=try host.store.snapshot().candidate else { return }
+                            let step=try NativeAllowedStepObservation(index:allowedSteps.count,action:owner.actionCount,operation:operation,
+                                began:actionBegan,priorCalls:priorCalls,traces:profile.observations,prior:prior,progress:progress,
+                                candidate:candidate,evaluation:action.publication(host.admission))
+                            let directory=report+".steps"
+                            if allowedSteps.isEmpty { try LocalFiles.createDirectory(directory) }
+                            try action.check();allowedSteps.append(try step.write(to:directory));try action.publication(host.admission)
+                        }
+                        func allowedCut() -> Bool {
+                            guard allowedBoundary != "none",let p=allowedProgress else { return false }
+                            switch allowedBoundary {
+                            case "probe":return p.phase=="probe" && p.probe.rawTokens>0 && p.proseDelivered>0
+                            case "route-ready":return p.phase=="routeReady"
+                            case "guided":return p.phase=="guided" && (p.guided?.consumedTokens ?? 0)>0 && (p.guided?.pendingTokens ?? 0)>0 && !p.whole.isEmpty
+                            case "ready":return p.phase=="finalReady"
+                            case "emitted":return p.phase=="finalEmitted"
+                            default:return false
+                            }
+                        }
                         func refreshRequired() throws {
                             if host.provider.lane.route == .required, let generation {
                                 requiredProgress=try generation.requiredProgress(action:action)
@@ -202,7 +236,10 @@ public enum NativeRecoveryRuntime {
                             return false
                         }
                         host.store.fault={ p in
-                            if p == .afterNativeBeforeCommit { try boundary("after-native") }
+                            if p == .afterNativeBeforeCommit {
+                                if allowedOperation == "next-pass" { try boundary("after-next-pass-native") }
+                                try boundary("after-native")
+                            }
                             if p == .afterCommitBeforeAck { try boundary("after-commit") }
                         }
                         client.fault={ p in if p == .beforePublication { try boundary("before-publication") } }
@@ -226,24 +263,39 @@ public enum NativeRecoveryRuntime {
                         if duplicateExact { guard selected.terminal else { throw AuthorityError.state } }
                         if !selected.terminal {
                             failureStage="model-restore"
-                            try action.check(); let p=try SelectedArtifactProfile(at:h.configuration.artifactPath,nativeRecovery:true); try action.check(); profile=p
+                            try action.check(); let p=try selectedProfile(at:h.configuration.artifactPath,fixture:fixture); try action.check(); profile=p
                             guard p.manifestDigest == h.configuration.model.artifactDigest, p.preparer.policy.descriptor == h.configuration.model.descriptor else { throw AuthorityError.scope }
                             let config=AdapterConfiguration(dialect:2,model:p.preparer.policy.descriptor.model,optIn:true,ready:true)
                             let factory={ try p.runtime(host.provider,configuration:config) }
                             if original { try renew(.prepare); generation=try GuardedNativeGeneration.start(store:host.store,action:action,runtime:factory) }
                             else { generation=try GuardedNativeGeneration.restore(store:host.store,action:action,runtime:factory) }
-                            try host.synchronize(action:action); try deliver(); try inspectGuided(); try refreshRequired()
+                            try host.synchronize(action:action); try deliver(); try inspectGuided(); try refreshRequired();try refreshAllowed()
                             try observeRequired(original ? "prepare" : "restore",0,nil)
+                            try observeAllowed(original ? "prepare" : "restore",0,nil)
                         }
                         while try !host.store.snapshot().terminal {
-                            let priorCalls=calls,priorRequired=requiredProgress
-                            failureStage="advance"; try renew(.advance); try host.store.authorize(action)
-                            try boundary("before-native"); try generation!.advance(action:action)
-                            try host.synchronize(action:action); try inspectGuided(); try refreshRequired()
-                            let stop=try (stopAfterCalls > 0 && calls >= stopAfterCalls) || pendingGuidedCut() || requiredCut()
-                            if !stop || !leaveHostAhead { try deliver() }
-                            try observeRequired("advance",priorCalls,priorRequired)
-                            if stop { didCut=true; break }
+                            let phase=allowedProgress?.phase,actionCalls=calls
+                            let unit=phase == "probe" || phase == "guided" ? 2 : 1
+                            failureStage="advance";try renew(.advance);try host.store.authorize(action)
+                            for _ in 0..<unit {
+                                let priorCalls=calls,priorRequired=requiredProgress,priorAllowed=allowedProgress
+                                allowedOperation=priorAllowed?.phase == "routeReady" ? "next-pass" : priorAllowed?.phase == "finalReady" ? "ready-deliver" : "advance"
+                                try boundary("before-native");try generation!.advance(action:action)
+                                try host.synchronize(action:action);try inspectGuided();try refreshRequired();try refreshAllowed()
+                                let stop=try (stopAfterCalls > 0 && calls >= stopAfterCalls) || pendingGuidedCut() || requiredCut() || allowedCut()
+                                if !stop || !leaveHostAhead { try deliver() }
+                                try observeRequired("advance",priorCalls,priorRequired)
+                                try observeAllowed(allowedOperation,priorCalls,priorAllowed)
+                                if stop { didCut=true;break }
+                                // Preserve guarded work/commit/ack/delivery/receipt
+                                // between both advances; phase changes end the unit.
+                                if allowedProgress?.phase != phase { break }
+                            }
+                            if host.provider.lane.route == .allowed {
+                                guard calls-actionCalls<=2,DispatchTime.now().uptimeNanoseconds-actionBegan<10_000_000_000 else { throw AuthorityError.state }
+                                try action.publication(host.admission)
+                            }
+                            if didCut { break }
                         }
                         if selected.terminal {
                             try renew(.terminalReplay); try host.store.authorize(action); try deliver()
@@ -254,11 +306,11 @@ public enum NativeRecoveryRuntime {
                                 }
                                 let after=try client.witness(action:action)
                                 guard try AuthorityCodec.encode(client.inbox(action:action))==AuthorityCodec.encode(inbox),
-                                      after==receipt,after.registrations==1,profile==nil,calls==0 else { throw AuthorityError.state }
+                                      after==receipt,(host.provider.lane.route == .required ? after.registrations==1 : (0...1).contains(after.registrations)),profile==nil,calls==0 else { throw AuthorityError.state }
                                 try host.acceptReceipt(after,action:action);duplicateApplied=true
                             }
                         }
-                        if (stopWithPendingGuided || requiredBoundary != "none") && !didCut { throw AuthorityError.state }
+                        if (stopWithPendingGuided || requiredBoundary != "none" || allowedBoundary != "none") && !didCut { throw AuthorityError.state }
                         failureStage="publication"
                         let w=try client.witness(action:action), state=try host.store.snapshot()
                         let records=try scope.provision.originals.records()
@@ -272,6 +324,8 @@ public enum NativeRecoveryRuntime {
                             beforeInbox:before,inbox:try client.inbox(action:action),traces:profile?.observations ?? [],nativePeak:Memory.peakMemory,
                             timers:try host.timerBytes(action:action),guidedProgress:guidedProgress,
                             requiredInitial:requiredInitial,requiredProgress:requiredProgress,requiredSteps:requiredSteps,
+                            allowedInitial:allowedInitial,allowedProgress:allowedProgress,allowedSteps:allowedSteps,
+                            repairEncodes:profile?.tokenizer.repairEncodes ?? 0,
                             duplicateExact:duplicateApplied,selectedCommit:state.candidate?.commit.identity,
                             evaluation:try action.publication(host.admission))
                         finalReport=result; finalAdmission=host.admission
@@ -304,6 +358,8 @@ struct NativeRecoveryReport: Encodable {
     let beforeInbox:[HandoffBatch],inbox:[HandoffBatch],traces:[NativeObservation],nativePeak:Int,timers:Data
     let guidedProgress:[ProviderGuidedProgress]
     let requiredInitial:ProviderRequiredProgress?, requiredProgress:ProviderRequiredProgress?, requiredSteps:[NativeRequiredStepReference]
+    let allowedInitial:ProviderAllowedProgress?,allowedProgress:ProviderAllowedProgress?,allowedSteps:[NativeRequiredStepReference]
+    let repairEncodes:Int
     let duplicateExact:Bool, selectedCommit:String?
     var evaluation:Evaluation
 }

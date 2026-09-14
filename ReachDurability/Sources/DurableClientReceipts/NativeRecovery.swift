@@ -191,7 +191,7 @@ public final class NativeClientOwner {
         var (m,s)=try read(action:action); try cleanup(m,action:action)
         if frame.skipPrefix != 0 {
             let context=try AuthorityCodec.decode(ClientContext.self,s.context)
-            guard context.route != "required" else { throw AuthorityError.state }
+            guard !["required","allowed"].contains(context.route) else { throw AuthorityError.state }
         }
         if let known=s.batches.first(where:{$0.first == frame.firstSequence}) {
             guard known.matches(frame) else { throw AuthorityError.state }; try check(action); return

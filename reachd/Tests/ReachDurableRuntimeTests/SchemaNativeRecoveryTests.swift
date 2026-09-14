@@ -161,9 +161,8 @@ final class SchemaNativeRecoveryTests: XCTestCase {
             try check(JSONDecoder().decode(ProviderBinding.self,from:Data(value.utf8)),accepted:false)
         }
         lane=original; lane.specification.source=" "+lane.specification.source; bad=good; bad.lane = .guided(lane); try check(bad,accepted:false)
-        for route in ["allowed","combined"] {
-            try check(Self.binding(p,ArtifactFixtures.request(route,maximum:16)),accepted:false)
-        }
+        try check(Self.binding(p,ArtifactFixtures.request("allowed",maximum:16)),accepted:true)
+        try check(Self.binding(p,ArtifactFixtures.request("combined",maximum:16)),accepted:false)
         XCTAssertTrue(p.observations.isEmpty)
     } }
     func testCompleteStoredArtifactComparisonStillPrecedesFactory() throws { try LocalDurableRuntime.withCPU {
@@ -265,7 +264,7 @@ final class SchemaNativeRecoveryTests: XCTestCase {
         XCTAssertThrowsError(try c.accept(.init(firstSequence:1,count:1,providerCommit:String(repeating:"e",count:64),eventBytes:bytes),action:a))
         XCTAssertEqual(try f.hashes(),before); XCTAssertEqual(try c.witness(action:a).registrations,0)
         let raw=String(decoding:admission.context,as:UTF8.self)
-        for route in ["allowed","combined","unknown"] {
+        for route in ["combined","unknown"] {
             let bytes=Data(raw.replacingOccurrences(of:"\"route\":\"guided\"",with:"\"route\":\""+route+"\"").utf8)
             XCTAssertThrowsError(try ClientAuthority(JSONDecoder().decode(ClientContext.self,from:bytes)))
         }

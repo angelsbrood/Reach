@@ -65,7 +65,8 @@ final class RequiredNativeRecoveryTests:XCTestCase {
             }
             var b=good;b.lane = .required(lane,tokens:tokens);try check(b,false)
         }
-        for route in ["allowed","combined"] { try check(binding(p,ArtifactFixtures.request(route,maximum:16)),false) }
+        try check(binding(p,ArtifactFixtures.request("allowed",maximum:16)),true)
+        try check(binding(p,ArtifactFixtures.request("combined",maximum:16)),false)
         let config=AdapterConfiguration(dialect:2,model:p.preparer.policy.descriptor.model,optIn:true,ready:true)
         for kind in 0..<4 {
             var lane=original
@@ -204,7 +205,7 @@ final class RequiredNativeRecoveryTests:XCTestCase {
         guard case .toolCallAppendArguments(let entry,let id,let name,let arguments,_)=good[0] else { return XCTFail("call") }
         let malformed:[[WireEvent]]=[
             [good[0]],Array(good.prefix(2)),[good[0],good[0],good[1],good[2]],
-            [.responseAppend(entryID:"x",text:"mixed",segmentID:nil,tokenCount:0)]+good,
+            [.responseAppend(entryID:"x",text:"mixed",segmentID:nil,tokenCount:1)]+good,
             [.toolCallAppendArguments(entryID:"wrong",id:id,name:name,content:arguments,tokenCount:1),good[1],good[2]],
             [.toolCallAppendArguments(entryID:entry,id:"wrong",name:name,content:arguments,tokenCount:1),good[1],good[2]],
             [.toolCallAppendArguments(entryID:entry,id:id,name:"wrong",content:arguments,tokenCount:1),good[1],good[2]],

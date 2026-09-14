@@ -53,7 +53,8 @@ extension DurableHostStore {
     }
 }
 /// One bounded native unit per guarded call. Required preparation may contain
-/// two prefill forwards; other native lanes use one. Restore has no prefill. All native algorithms remain in the provider.
+/// two prefill forwards, as may allowed original/repair preparation. Restore
+/// has no prefill. All native algorithms remain in the provider.
 public final class GuardedNativeGeneration {
     public let store: DurableHostStore
     private var provider: ResumableMLXProvider?
@@ -93,6 +94,12 @@ public final class GuardedNativeGeneration {
         let result=try provider.committedRequiredProgress(selected)
         try store.checkNative(); return result
     }
+    public func allowedProgress(action:GenerationAuthorityAction) throws -> ProviderAllowedProgress {
+        try store.authorize(action)
+        guard !failed,let provider,let selected=try store.snapshot().candidate else { throw StoreError.closed }
+        let result=try provider.committedAllowedProgress(selected)
+        try store.checkNative();return result
+    }
     public func acknowledgeDelivery(through cursor: UInt64, action: GenerationAuthorityAction) throws {
         try store.authorize(action); let s=try store.snapshot()
         guard cursor >= deliveredThrough, cursor == s.high else { throw StoreError.replayRequired }
@@ -104,8 +111,14 @@ public final class GuardedNativeGeneration {
         let s=try store.snapshot(); guard !s.terminal, s.high == deliveredThrough,
             let commit=s.candidate?.commit, provider.acceptedCommit == commit else { throw StoreError.replayRequired }
         try store.reserve(); try store.checkNative()
+        var allowed:ProviderAllowedProgress?
+        if case .allowed=store.identity.provider.lane {
+            let progress=try allowedProgress(action:action)
+            try NativeRecoveryAllowed.validate(progress,binding:store.identity.provider);allowed=progress
+        }
         do {
             guard let c=try provider.advance(owner:store.ownerToken,current:commit,credit:ResumableMLXProvider.reservationBytes) else { throw StoreError.stale }
+            if let allowed { try NativeRecoveryAllowed.validateFinalBatch(c,prior:allowed,binding:store.identity.provider) }
             try store.fault(.afterNativeBeforeCommit); try store.checkNative(); try self.commit(c)
         } catch { close(); throw error }
     }

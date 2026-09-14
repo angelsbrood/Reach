@@ -7,6 +7,8 @@ host admission, client acceptance and S99 witness authority. The private S102
 handback records execution and review verdicts separately from this capability.
 The separate [S103 required-tool qualification](cross-boot-required-recovery.md)
 uses the same entrypoint with distinct whole-call and registration boundaries.
+The [S104 allowed-tool qualification](cross-boot-allowed-recovery.md) adds zero/one
+proposal handling with separate normal-artifact and prescribed-fixture evidence.
 
 Admission accepts ordinary generation with its existing 256-token prefill and
 1–20 output-token bounds, or schema-guided generation with 1–256 prepared input

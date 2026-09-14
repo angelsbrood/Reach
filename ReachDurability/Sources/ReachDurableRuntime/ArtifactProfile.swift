@@ -24,7 +24,9 @@ final class SelectedArtifactProfile {
     static var configuration:LlamaConfiguration { .init(hiddenSize:16,hiddenLayers:2,intermediateSize:32,attentionHeads:2,rmsNormEps:0.00001,vocabularySize:258,kvHeads:1) }
     let manifest:ArtifactManifest,manifestDigest:String,model:LlamaModel,tokenizer:ArtifactTokenizer,preparer:RequestPreparation
     var observations:[NativeObservation]=[]
+    private let nativeRecovery:Bool
     init(at path:String, nativeRecovery:Bool = false) throws {
+        self.nativeRecovery=nativeRecovery
         try LocalFiles.directory(path)
         guard Set(try FileManager.default.contentsOfDirectory(atPath:path))==Self.fileNames.union(["profile.json"]) else { throw LocalRuntimeError.invalid }
         let manifestBytes=try LocalFiles.read(path+"/profile.json",maximum:16384)
@@ -101,9 +103,12 @@ final class SelectedArtifactProfile {
         case .ordinary(let b):return .ordinary(.init(tokenizer:tokenizer,codecs:.init(),model:{observed("ordinary",0,b.tokens)}))
         case .guided(let b):return .guided(.init(tokenizer:tokenizer,codecs:.init(),model:{observed("schema",0,b.tokens)}))
         case .required(_,let tokens):return .required(.init(tokenizer:tokenizer,codecs:.init(),model:{observed("required",0,tokens)}))
-        case .allowed:
+        case .allowed(let allowed):
             return .allowed(.init(tokenizer:tokenizer,probeCodecs:.init(),guidedCodecs:.init(),model:{pass in
                 let d=self.preparer.policy.descriptor
+                if self.nativeRecovery {
+                    try validateAllowedRecoveryPass(pass,binding:allowed,tokenizer:self.tokenizer)
+                }
                 guard pass.identity==(try .init(model:d.model,configuration:d.configuration,weights:d.weights,input:ResumableTokenIdentity.inputDigest(pass.tokens),backend:d.backend,dependency:d.dependency)) else { throw LocalRuntimeError.invalid }
                 return observed(pass.kind.rawValue,pass.index,pass.tokens)
             }))

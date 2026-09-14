@@ -12,7 +12,7 @@ public struct NativeRequiredCall {
               root["version"] as? Int == 1,root["policy"] as? String == "S80-exact-candidate-ack;json-sorted-v1",
               root["requestID"] as? String == request,root["operationID"] as? String == operation,
               let lane=root["lane"] as? [String:Any],Set(lane.keys)==Set([route]),
-              ["ordinary","guided","required"].contains(route) else { throw HandoffError.invalid }
+              ["ordinary","guided","required","allowed"].contains(route) else { throw HandoffError.invalid }
         guard route == "required" else { return nil }
         guard let selected=lane[route] as? [String:Any],Set(selected.keys)==Set(["_0","tokens"]),
               let b=selected["_0"] as? [String:Any],b["version"] as? Int == 1,b["route"] as? String == route,
@@ -54,12 +54,14 @@ public struct NativeRequiredCall {
 /// shape and terminal projection. It grants no handler, intent or outcome API.
 public struct NativeRecoveryPrefix {
     public let required:NativeRequiredCall?
+    public let allowed:NativeAllowedCall?
     private var prefix:HandoffPrefix
     public private(set) var terminal=false
     public var high:UInt64 { prefix.high }
     public var registrations:Int { prefix.registrations }
     public init(context:Data,provider:Data,providerDigest:String,request:String,operation:String,route:String) throws {
         required=try NativeRequiredCall.project(provider,digest:providerDigest,request:request,operation:operation,route:route)
+        allowed=try NativeAllowedCall.project(provider,digest:providerDigest,request:request,operation:operation,route:route)
         prefix=HandoffPrefix(context:context)
     }
     public mutating func append(_ batch:HandoffBatch) throws {
@@ -73,6 +75,11 @@ public struct NativeRecoveryPrefix {
             } else {
                 let arguments=try required.wholeCall(events)
                 try prefix.register(id:Data(required.callID.utf8),name:Data(required.name.utf8),arguments:arguments)
+            }
+        } else if let allowed {
+            guard prefix.registrations==0 else { throw HandoffError.invalid }
+            if let call=try allowed.validate(events) {
+                try prefix.register(id:Data(call.id.utf8),name:Data(call.name.utf8),arguments:call.arguments)
             }
         } else {
             for (index,event) in events.enumerated() {

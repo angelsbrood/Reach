@@ -18,9 +18,10 @@ at most 16 KiB and canonical control frames at most 64 KiB.
 `NativeRecoveryBinding` reconstructs the structural specification from the sole
 original portable tool schema. The complete stored-request comparison still
 validates model, tokenizer, input, stable IDs, codecs and native options before
-the model factory. Allowed-tool selection, multiple offered tools, combined
-schema/tool routes and arbitrary structural specifications remain outside this
-qualification. Native generation and checkpoint algorithms and formats are
+the model factory. Multiple offered tools, combined schema/tool routes and
+arbitrary structural specifications remain outside this qualification.
+[S104 allowed-tool recovery](cross-boot-allowed-recovery.md) has separate zero/one
+proposal, shared-budget and prescribed-fixture boundaries. Native generation and checkpoint algorithms and formats are
 unchanged.
 
 The existing coordinator has three distinct states:
