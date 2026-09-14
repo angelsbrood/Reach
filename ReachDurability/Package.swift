@@ -13,7 +13,7 @@ let package=Package(
         .target(name:"RequiredToolCoordinator",dependencies:[lm("MLXLMCommon"),lm("MLXGuidedGeneration"),wire()]),
         .target(name:"AllowedToolCoordinator",dependencies:["RequiredToolCoordinator",lm("MLXLMCommon"),lm("MLXGuidedGeneration"),wire()]),
         .target(name:"ResumableMLXProvider",dependencies:["AllowedToolCoordinator","RequiredToolCoordinator",lm("MLXLMCommon"),lm("MLXGuidedGeneration"),wire()]),
-        .target(name:"DurableHostStore",dependencies:["RecoveryAuthorityContract","ResumableMLXProvider",wire()]),
+        .target(name:"DurableHostStore",dependencies:["RecoveryAuthorityContract","ResumableMLXProvider",lm("MLXLMCommon"),wire()]),
         .target(name:"HostClientContract"),.target(name:"RecoveryContract",dependencies:["RecoveryAuthorityContract"]),
         .target(name:"DurableClientReceipts",dependencies:["RecoveryAuthorityContract",wire(),"HostClientContract","RecoveryContract"]),
         .target(name:"DurableSessionLifecycle",dependencies:["RecoveryAuthorityContract","DurableHostStore","ResumableMLXProvider",wire(),"DurableClientReceipts","HostClientContract"]),

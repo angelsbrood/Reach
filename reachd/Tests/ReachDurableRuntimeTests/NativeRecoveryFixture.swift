@@ -38,14 +38,14 @@ final class NativeRecoveryFixture {
     let provider: ProviderBinding
     let counter=NativeUnitCounter()
     let caller=CallerIdentity(principal:"fixture",device:"original",app:AuthorityCodec.nativeProfile)
-    init(hostCap: UInt64=90, clientCap: UInt64=150) throws {
+    init(hostCap: UInt64=90, clientCap: UInt64=150, request: WireGenerationRequest?=nil) throws {
         base=try ArtifactFixtures.base()+"/native-"+UUID().uuidString.lowercased(); host=base+"/host"; client=base+"/client"
         for path in [base,host,client,host+"/bootstrap",client+"/bootstrap"] { try LocalFiles.createDirectory(path) }
         provider=try LocalDurableRuntime.withCPU {
             let p=try SelectedArtifactProfile(at:ArtifactFixtures.artifacts(),nativeRecovery:true)
             let config=AdapterConfiguration(dialect:2,model:p.preparer.policy.descriptor.model,optIn:true,ready:true)
-            let request=WireGenerationRequest(id:UUID(uuidString:"00000000-0000-0000-0000-000000000101")!,portableTranscript:.init(entries:[.prompt(.init(id:"prompt",segments:[.text(.init(id:"text",content:"Hi."))]))]),options:.init(temperature:0,maximumResponseTokens:16,sampling:.greedy))
-            return try p.preparer.prepare(request,reference:.init(session:.init(modelID:config.model,profile:config.profile,sessionID:"fixture"),generationID:"fixture",operationID:"native-unit-operation"),configuration:config)
+            let input=request ?? WireGenerationRequest(id:UUID(uuidString:"00000000-0000-0000-0000-000000000101")!,portableTranscript:.init(entries:[.prompt(.init(id:"prompt",segments:[.text(.init(id:"text",content:"Hi."))]))]),options:.init(temperature:0,maximumResponseTokens:16,sampling:.greedy))
+            return try p.preparer.prepare(input,reference:.init(session:.init(modelID:config.model,profile:config.profile,sessionID:"fixture"),generationID:"fixture",operationID:"native-unit-operation"),configuration:config)
         }
         try NativeRecoveryRuntime.validateFixture(provider)
         witness=try Witness(clock:witnessClock)
@@ -80,7 +80,10 @@ final class NativeRecoveryFixture {
     func openClient(_ a: GenerationAuthorityAction) throws -> NativeClientOwner {
         try .init(path:client+"/bootstrap/client",parent:client,environment:clientEnvironment,metadataKey:clientKey,scope:scope,action:a)
     }
-    func runtime() -> ProviderRuntime { .ordinary(.init(tokenizer:ArtifactTokenizer(),codecs:.init(),model:{ NativeUnitModel(self.counter) })) }
+    func runtime() -> ProviderRuntime {
+        let native=ProviderNativeRuntime(tokenizer:ArtifactTokenizer(),codecs:.init(),model:{ NativeUnitModel(self.counter) })
+        return provider.lane.route == .guided ? .guided(native) : .ordinary(native)
+    }
     func deliver(_ h: NativeLifecycleOwner, _ c: NativeClientOwner, _ g: GuardedNativeGeneration?, _ a: GenerationAuthorityAction) throws {
         try h.store.authorize(a)
         let w=try c.witness(action:a)

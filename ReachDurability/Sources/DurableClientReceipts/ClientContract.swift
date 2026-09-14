@@ -77,7 +77,7 @@ public struct ClientContext: Codable {
     func validate() throws {
         try caller.validate()
         for id in [host, store, namespace, generation, request, operation, route, revision] { try crID(id) }
-        guard (version == 1 && authority == nil || version == 2 && authority.map(AuthorityCodec.isDigest) == true && revision == "s100-host-client-authority-v1" || version == 3 && authority.map(AuthorityCodec.isDigest) == true && revision == "s101-host-client-native-v1" && route == "ordinary"), projection == "s80-events-v1", crDigest(upstreamDigest), issued > 0,
+        guard (version == 1 && authority == nil || version == 2 && authority.map(AuthorityCodec.isDigest) == true && revision == "s100-host-client-authority-v1" || version == 3 && authority.map(AuthorityCodec.isDigest) == true && revision == "s101-host-client-native-v1" && ["ordinary","guided"].contains(route)), projection == "s80-events-v1", crDigest(upstreamDigest), issued > 0,
               expires > issued, expires <= (try crAdd(issued, ClientLimits.session)),
               try crEncode(self).count <= ClientLimits.context else { throw ClientError.invalid("context") }
     }

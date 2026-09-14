@@ -7,6 +7,10 @@ client acceptance, and the unchanged S99 cooperating-witness time policy.
 Qualification execution and terminal Architecture acceptance are recorded in the
 private S101 handback; the implementation alone is not an execution verdict.
 
+S102 adds a separately qualified closed schema-guided route to this same explicit
+lane. See [Schema-guided native recovery](cross-boot-schema-recovery.md) for its
+bounds, pending-token checkpoint and cold-reboot gates.
+
 The original declaration freezes the request input digest, artifact declaration,
 operation identity and exact prepared ProviderBinding before either independent
 primary/reference admission. The S101 artifact selection uses a 256-token prefill

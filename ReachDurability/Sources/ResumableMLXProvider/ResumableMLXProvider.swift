@@ -1,5 +1,7 @@
 import Foundation
 import ReachWire
+import MLXLMCommon
+import MLXGuidedGeneration
 
 /// One synchronous owner, one accepted descriptor and at most one frozen pending
 /// candidate. Host acknowledgements/owner tokens are local caller assertions.
@@ -48,6 +50,20 @@ public final class ResumableMLXProvider {
             live.acceptedCommit = checked.commit; live.isTerminal = checkpoint.terminal != nil
             return live
         } catch { live.close(); throw error }
+    }
+    /// Inspect only this live operation's exact acknowledged candidate. The child
+    /// was prepared/restored and validated by the native implementation; parsing
+    /// an arbitrary checkpoint is never sufficient to produce this diagnostic.
+    public func committedGuidedProgress(_ selected: ProviderCandidate, tokenizer: any Tokenizer) throws -> ProviderGuidedProgress {
+        guard !isClosed, pending == nil, acceptedCommit == selected.commit,
+              let child, case .guided(let operation, _) = child else { throw ProviderError.commit }
+        let checked=try ProviderCandidate(data:selected.data), checkpoint=try checked.checkpoint()
+        guard try providerEncode(binding) == providerEncode(checkpoint.binding),
+              child.phase == checkpoint.phase, try child.capture() == checkpoint.child else { throw ProviderError.commit }
+        try child.validateTerminal(checkpoint.terminal)
+        let native=try ResumableGuidedCheckpoint(data:checkpoint.child)
+        let view=try ResumableGuidedCheckpointView(checkpoint:native,validatedOperation:operation,tokenizer:tokenizer)
+        return try ProviderGuidedProgress(selected:checked,child:checkpoint.child,view:view)
     }
     public func pendingCandidate() throws -> ProviderCandidate? {
         guard !isClosed else { throw ProviderError.closed }; return pending

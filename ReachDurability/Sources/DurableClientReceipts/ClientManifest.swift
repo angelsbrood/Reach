@@ -77,7 +77,7 @@ struct ClientSnapshot: Codable {
         guard authority.bytes == context, authority.identity == live.identity, authority.anchor == live.anchor,
               authority.namespace == live.namespace, decoded.issued == live.issued, decoded.expires == live.expires else { throw ClientError.unavailable }
         if live.retention?.version == 3 {
-            guard calls.isEmpty, decoded.route == "ordinary" else { throw ClientError.unavailable }
+            guard calls.isEmpty, ["ordinary","guided"].contains(decoded.route) else { throw ClientError.unavailable }
             for b in batches { for event in try ClientEvents.decode(b.bytes) { if case .toolCallAppendArguments = event { throw ClientError.unavailable } } }
         }
         var rebuilt = ClientSnapshot(context: context)

@@ -35,9 +35,7 @@ extension RecoveryAuthorityChannel {
 }
 public enum NativeRecoveryRuntime {
     static func validateFixture(_ provider: ProviderBinding) throws {
-        guard case .supported=ResumableMLXProvider.assess(provider), case .ordinary(let b)=provider.lane,
-              b.options.prefillStepSize == 256, b.tokens.count <= b.options.prefillStepSize, (1...20).contains(b.options.maximumTokens)
-        else { throw AuthorityError.state }
+        try NativeRecoveryBinding.validate(provider)
     }
     /// Independent fixture preparation is completed and compared before originals.
     public static func prepareFixture(model: String, request: String, operation: String, output: String, publicModel: String) throws {
@@ -50,7 +48,7 @@ public enum NativeRecoveryRuntime {
         }
     }
     private static func prepare(_ p: SelectedArtifactProfile, input: WireGenerationRequest, operation: String) throws -> ProviderBinding {
-        guard try p.preparer.policy.route(input) == "ordinary" else { throw AuthorityError.state }
+        guard try ["ordinary","guided"].contains(p.preparer.policy.route(input)) else { throw AuthorityError.state }
         let config=AdapterConfiguration(dialect:2,model:p.preparer.policy.descriptor.model,optIn:true,ready:true)
         let reference=DurableGenerationReference(session:.init(modelID:config.model,profile:config.profile,sessionID:"00000000-0000-0000-0000-000000000001"),generationID:"fixture-generation",operationID:operation)
         let b=try p.preparer.prepare(input,reference:reference,configuration:config)
@@ -114,7 +112,7 @@ public enum NativeRecoveryRuntime {
     }
     public static func run(hostReceipt: String, hostDigest: String, clientReceipt: String, clientDigest: String,
         hostSecret: Int32, clientSecret: Int32, original: Bool, stopAfterCalls: Int, leaveHostAhead: Bool,
-        report: String, fault: String) throws {
+        report: String, fault: String, stopWithPendingGuided: Bool=false) throws {
         guard (0...20).contains(stopAfterCalls), ["none","before-native","after-native","after-commit","before-publication"].contains(fault) else { throw AuthorityError.invalid }
         try LocalDurableRuntime.withCPU {
             let h=try NativeRecoveryRootAccess(receipt:hostReceipt,expectedDigest:hostDigest), c=try NativeRecoveryRootAccess(receipt:clientReceipt,expectedDigest:clientDigest)
@@ -126,7 +124,8 @@ public enum NativeRecoveryRuntime {
             let owner=try GenerationAuthorityOwner(scope:scope,clock:SystemClock(),validateOwnedRoots:{ try h.validateCurrent(); try c.validateCurrent() })
             var action=try owner.begin(.reopen); try RecoveryAuthorityChannel.exchange(action)
             var profile: SelectedArtifactProfile?, generation: GuardedNativeGeneration?, failureStage="reopen"
-            var before:[HandoffBatch]=[], replayedBeforeNative=0, faultUsed=false
+            var before:[HandoffBatch]=[], replayedBeforeNative=0, faultUsed=false, didCut=false
+            var guidedProgress:[ProviderGuidedProgress]=[]
             var finalReport: NativeRecoveryReport?, finalAdmission: AuthorityAdmission?
             var calls: Int { profile?.observations.reduce(0){$0+$1.calls} ?? 0 }
             func renew(_ op: GenerationOperation) throws {
@@ -134,8 +133,8 @@ public enum NativeRecoveryRuntime {
             }
             func boundary(_ point: String) throws {
                 guard point == fault, !faultUsed else { return }; faultUsed=true
-                struct Boundary: Encodable { let stage="boundary"; let point:String, nativeCalls:Int }
-                try RecoveryAuthorityChannel.write(Boundary(point:point,nativeCalls:calls))
+                struct Boundary: Encodable { let stage="boundary"; let point:String, nativeCalls:Int; let guided:ProviderGuidedProgress? }
+                try RecoveryAuthorityChannel.write(Boundary(point:point,nativeCalls:calls,guided:guidedProgress.last))
                 let command=try AuthorityCodec.decode(AuthorityControl.self,RecoveryAuthorityChannel.read())
                 guard command.stage == "continue" || command.stage == "observe" else { throw AuthorityError.state }
                 if command.stage == "observe" { try RecoveryAuthorityChannel.observe(action) }
@@ -149,6 +148,23 @@ public enum NativeRecoveryRuntime {
                         let client=try NativeClientOwner(path:c.core.root+"/bootstrap/client",parent:c.core.root,environment:.init(recoveryAuthority:c.core.nativeStorage()),metadataKey:clientKeys.key(.clientMetadata).use{$0},scope:scope,action:action)
                         defer { client.close() }
                         guard client.admission == host.admission else { throw AuthorityError.scope }
+                        if stopWithPendingGuided && host.provider.lane.route != .guided { throw AuthorityError.scope }
+                        func inspectGuided() throws {
+                            if host.provider.lane.route == .guided, let generation, let profile {
+                                guidedProgress.append(try generation.guidedProgress(action:action,tokenizer:profile.tokenizer))
+                            }
+                        }
+                        func pendingGuidedCut() throws -> Bool {
+                            guard stopWithPendingGuided, let v=guidedProgress.last, v.terminalReason == nil,
+                                  v.consumedTokens>0, v.pendingTokens>0, !v.cumulativeEmittedBytes.isEmpty,
+                                  v.modelOffsets.allSatisfy({$0>0}) else { return false }
+                            for batch in try client.inbox(action:action) {
+                                for event in try JSONDecoder().decode([WireEvent].self,from:batch.bytes).dropFirst(batch.skip) {
+                                    if case .responseAppend(_,let text,_,_) = event, !text.isEmpty { return true }
+                                }
+                            }
+                            return false
+                        }
                         host.store.fault={ p in
                             if p == .afterNativeBeforeCommit { try boundary("after-native") }
                             if p == .afterCommitBeforeAck { try boundary("after-commit") }
@@ -179,21 +195,23 @@ public enum NativeRecoveryRuntime {
                             let factory={ try p.runtime(host.provider,configuration:config) }
                             if original { try renew(.prepare); generation=try GuardedNativeGeneration.start(store:host.store,action:action,runtime:factory) }
                             else { generation=try GuardedNativeGeneration.restore(store:host.store,action:action,runtime:factory) }
-                            try host.synchronize(action:action); try deliver()
+                            try host.synchronize(action:action); try deliver(); try inspectGuided()
                         }
                         while try !host.store.snapshot().terminal {
                             failureStage="advance"; try renew(.advance); try host.store.authorize(action)
                             try boundary("before-native"); try generation!.advance(action:action)
-                            try host.synchronize(action:action)
-                            if stopAfterCalls > 0 && calls >= stopAfterCalls && leaveHostAhead { break }
+                            try host.synchronize(action:action); try inspectGuided()
+                            let stop=try (stopAfterCalls > 0 && calls >= stopAfterCalls) || pendingGuidedCut()
+                            if stop && leaveHostAhead { didCut=true; break }
                             try deliver()
-                            if stopAfterCalls > 0 && calls >= stopAfterCalls { break }
+                            if stop { didCut=true; break }
                         }
                         if selected.terminal { try renew(.terminalReplay); try host.store.authorize(action); try deliver() }
+                        if stopWithPendingGuided && !didCut { throw AuthorityError.state }
                         failureStage="publication"
                         let w=try client.witness(action:action), state=try host.store.snapshot()
                         let records=try scope.provision.originals.records()
-                        let result=NativeRecoveryReport(stage:stopAfterCalls > 0 && !state.terminal ? "checkpoint" : "complete",profile:AuthorityCodec.nativeProfile,
+                        let result=NativeRecoveryReport(stage:didCut && !state.terminal ? "checkpoint" : "complete",profile:AuthorityCodec.nativeProfile,
                             original:original,receiverBoot:try RootKeyCodec.boot(),originalBoot:scope.host.boot,admission:try host.admission.digest,
                             provider:host.provider,hostDeadline:records.host.deadline,clientDeadline:records.client.deadline,
                             hostHigh:state.high,client:w,nativeCalls:calls,modelLoads:profile == nil ? 0 : 1,
@@ -201,7 +219,8 @@ public enum NativeRecoveryRuntime {
                             requestPreparations:0,templateCalls:profile?.tokenizer.renders ?? 0,requestTokenizations:profile?.tokenizer.requestTokenizations ?? 0,
                             issues:0,begins:0,recoveries:original ? 0 : 1,actions:owner.actionCount,replayedBeforeNative:replayedBeforeNative,
                             beforeInbox:before,inbox:try client.inbox(action:action),traces:profile?.observations ?? [],nativePeak:Memory.peakMemory,
-                            timers:try host.timerBytes(action:action),evaluation:try action.publication(host.admission))
+                            timers:try host.timerBytes(action:action),guidedProgress:guidedProgress,selectedCommit:state.candidate?.commit.identity,
+                            evaluation:try action.publication(host.admission))
                         finalReport=result; finalAdmission=host.admission
 
                     }
@@ -230,5 +249,6 @@ struct NativeRecoveryReport: Encodable {
     let hostDeadline:UInt64,clientDeadline:UInt64,hostHigh:UInt64,client:HandoffWitness
     let nativeCalls:Int,modelLoads:Int,modelPrepares:Int,requestPreparations:Int,templateCalls:Int,requestTokenizations:Int,issues:Int,begins:Int,recoveries:Int,actions:Int,replayedBeforeNative:Int
     let beforeInbox:[HandoffBatch],inbox:[HandoffBatch],traces:[NativeObservation],nativePeak:Int,timers:Data
+    let guidedProgress:[ProviderGuidedProgress], selectedCommit:String?
     var evaluation:Evaluation
 }

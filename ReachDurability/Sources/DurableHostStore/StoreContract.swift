@@ -35,9 +35,8 @@ public struct StoreIdentity {
     public init(native scope: AuthorityScope, storeID: String, provider: ProviderBinding) throws {
         try scope.validate(); guard scope.provision.native, let execution=scope.provision.execution,
             execution.operation == provider.operationID, execution.provider == (try storeEncode(provider)),
-            storeUUID(storeID), case .ordinary(let lane)=provider.lane, case .supported=ResumableMLXProvider.assess(provider),
-            lane.options.prefillStepSize == 256, lane.tokens.count <= lane.options.prefillStepSize, (1...20).contains(lane.options.maximumTokens)
-        else { throw AuthorityError.scope }
+            storeUUID(storeID) else { throw AuthorityError.scope }
+        try NativeRecoveryBinding.validate(provider)
         authority=try scope.digest; native=true; self.storeID=storeID; bootID=scope.host.boot; self.provider=provider
     }
     var bindingBytes: Data { get throws { try storeEncode(provider) } }

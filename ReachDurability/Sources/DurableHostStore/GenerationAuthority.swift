@@ -1,6 +1,7 @@
 import Foundation
 import ResumableMLXProvider
 import RecoveryAuthorityContract
+import MLXLMCommon
 
 extension DurableHostStore {
     func checkNative(operations: [GenerationOperation] = [.admitHost,.reopen,.prepare,.advance,.delivery,.terminalReplay]) throws {
@@ -51,7 +52,7 @@ extension DurableHostStore {
         } catch { fs.close(); throw error }
     }
 }
-/// One ordinary native unit per guarded call. Original input fits one prefill
+/// One bounded native unit per guarded call. Original input fits one prefill
 /// chunk; restore has no prefill. All native algorithms remain in the provider.
 public final class GuardedNativeGeneration {
     public let store: DurableHostStore
@@ -79,6 +80,12 @@ public final class GuardedNativeGeneration {
         let live=try ResumableMLXProvider.restore(committed:c,expected:store.identity.provider,runtime:native,owner:store.ownerToken)
         do { try store.checkNative(); return .init(store:store,provider:live) }
         catch { live.close(); throw error }
+    }
+    public func guidedProgress(action: GenerationAuthorityAction, tokenizer: any Tokenizer) throws -> ProviderGuidedProgress {
+        try store.authorize(action)
+        guard !failed, let provider, let selected=try store.snapshot().candidate else { throw StoreError.closed }
+        let result=try provider.committedGuidedProgress(selected,tokenizer:tokenizer)
+        try store.checkNative(); return result
     }
     public func acknowledgeDelivery(through cursor: UInt64, action: GenerationAuthorityAction) throws {
         try store.authorize(action); let s=try store.snapshot()

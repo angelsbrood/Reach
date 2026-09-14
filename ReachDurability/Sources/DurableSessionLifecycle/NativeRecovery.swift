@@ -36,9 +36,8 @@ extension DurableSessionLifecycle {
         fault: LifecycleFaultHook = { _ in }) throws -> AuthorityIssued {
         guard let original=identity.authority, original.provision.native else { throw AuthorityError.scope }
         try original.check(scope,role:"host")
-        guard scope.provision.execution?.provider == (try lcEncode(provider)), scope.provision.execution?.operation == provider.operationID,
-              case .ordinary(let lane)=provider.lane, lane.options.prefillStepSize == 256,
-              lane.tokens.count <= 256, (1...20).contains(lane.options.maximumTokens) else { throw AuthorityError.scope }
+        guard scope.provision.execution?.provider == (try lcEncode(provider)), scope.provision.execution?.operation == provider.operationID else { throw AuthorityError.scope }
+        try NativeRecoveryBinding.validate(provider)
         func check() throws { try action.check(scope:scope,operation:.admitHost) }
         try check()
         guard scope.host.boot == (try StoreEnvironment.bootIdentity()) else { throw AuthorityError.scope }

@@ -107,8 +107,9 @@ struct LifecycleRequest: Codable {
     var caller: CallerIdentity
     var provider: ProviderBinding
     func validate() throws {
-        guard (version == 1 && authority == nil || version == 2 && authority.map(AuthorityCodec.isDigest) == true || version == 3 && authority.map(AuthorityCodec.isDigest) == true && provider.lane.route == .ordinary), lcUUID(namespace), case .supported = ResumableMLXProvider.assess(provider),
+        guard (version == 1 && authority == nil || version == 2 && authority.map(AuthorityCodec.isDigest) == true || version == 3 && authority.map(AuthorityCodec.isDigest) == true), lcUUID(namespace), case .supported = ResumableMLXProvider.assess(provider),
               try lcEncode(self).count <= LifecycleLimits.request else { throw LifecycleError.invalid("request binding") }
+        if version == 3 { try NativeRecoveryBinding.validate(provider) }
         try lcID(generation); try caller.validate()
     }
 }
