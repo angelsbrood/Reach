@@ -52,8 +52,8 @@ extension DurableHostStore {
         } catch { fs.close(); throw error }
     }
 }
-/// One bounded native unit per guarded call. Original input fits one prefill
-/// chunk; restore has no prefill. All native algorithms remain in the provider.
+/// One bounded native unit per guarded call. Required preparation may contain
+/// two prefill forwards; other native lanes use one. Restore has no prefill. All native algorithms remain in the provider.
 public final class GuardedNativeGeneration {
     public let store: DurableHostStore
     private var provider: ResumableMLXProvider?
@@ -85,6 +85,12 @@ public final class GuardedNativeGeneration {
         try store.authorize(action)
         guard !failed, let provider, let selected=try store.snapshot().candidate else { throw StoreError.closed }
         let result=try provider.committedGuidedProgress(selected,tokenizer:tokenizer)
+        try store.checkNative(); return result
+    }
+    public func requiredProgress(action: GenerationAuthorityAction) throws -> ProviderRequiredProgress {
+        try store.authorize(action)
+        guard !failed, let provider, let selected=try store.snapshot().candidate else { throw StoreError.closed }
+        let result=try provider.committedRequiredProgress(selected)
         try store.checkNative(); return result
     }
     public func acknowledgeDelivery(through cursor: UInt64, action: GenerationAuthorityAction) throws {

@@ -82,7 +82,7 @@ final class NativeRecoveryFixture {
     }
     func runtime() -> ProviderRuntime {
         let native=ProviderNativeRuntime(tokenizer:ArtifactTokenizer(),codecs:.init(),model:{ NativeUnitModel(self.counter) })
-        return provider.lane.route == .guided ? .guided(native) : .ordinary(native)
+        switch provider.lane.route { case .guided:return .guided(native);case .required:return .required(native);default:return .ordinary(native) }
     }
     func deliver(_ h: NativeLifecycleOwner, _ c: NativeClientOwner, _ g: GuardedNativeGeneration?, _ a: GenerationAuthorityAction) throws {
         try h.store.authorize(a)

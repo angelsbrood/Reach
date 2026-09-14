@@ -133,5 +133,14 @@ public final class RequiredToolCoordinator {
         }
         try RequiredToolCheckpoint.checkBounds(document)
     }
+    /// Read-only observation of this exact settled coordinator and validated child.
+    public func validatedProgress(_ selected: RequiredToolCheckpoint) throws -> RequiredToolProgress {
+        guard !isClosed, let child, try capture() == selected,
+              try child.capture().data == document.child else { throw RequiredToolError.incompatible }
+        let checkpoint=try ResumableGuidedCheckpoint(data:document.child)
+        let view=try ResumableGuidedCheckpointView(checkpoint:checkpoint,validatedOperation:child,tokenizer:tokenizer)
+        try validate(view)
+        return RequiredToolProgress(phase:phase,whole:document.control.whole,call:document.control.call,child:checkpoint,view:view)
+    }
     public func close() { isClosed = true; child?.close(); child = nil }
 }

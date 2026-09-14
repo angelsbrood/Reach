@@ -152,6 +152,7 @@ public final class NativeLifecycleOwner {
             let child=try DurableHostStore.reopenNative(at:fs.childPath(w.child),identity:.init(native:scope,storeID:w.child,provider:request.provider),keys:w.keys.storeKeys(),admission:a,action:action,fault:storeFault)
             files=fs; self.identity=identity; self.keys=keys; admission=a; provider=request.provider; store=child
             epoch=try lcAdd(d.epoch,1); d.epoch=epoch
+            if let receipt=d.nativeReceipt { try validateReceipt(receipt,action:action) }
             d.records[0].work!.times.attachmentEpoch=try lcAdd(w.times.attachmentEpoch,1)
             try reconcilePrepared(action)
             try project(&d,action:action); try select(d,action:action)
@@ -166,7 +167,8 @@ public final class NativeLifecycleOwner {
         let d=try LifecycleCatalog.read(files,identity:identity,keys:keys); try check(action)
         guard d.epoch == epoch else { throw LifecycleError.stale }
         let (a,_)=try DurableSessionLifecycle.readNativeAdmission(d,files:files,identity:identity,keys:keys,scope:admission.scope,action:action)
-        guard a == admission else { throw AuthorityError.scope }; return d
+        guard a == admission else { throw AuthorityError.scope }
+        if let receipt=d.nativeReceipt { try validateReceipt(receipt,action:action) };return d
     }
     private func reconcilePrepared(_ action: GenerationAuthorityAction) throws {
         try check(action)
@@ -204,22 +206,30 @@ public final class NativeLifecycleOwner {
     public func acceptReceipt(_ witness: HandoffWitness, action: GenerationAuthorityAction) throws {
         guard [.delivery,.terminalReplay,.reopen,.advance,.prepare].contains(action.operation) else { throw AuthorityError.scope }
         try store.authorize(action); var d=try read(action)
-        try witness.validate(expectedRoot:admission.scope.client.localID)
-        let state=try store.snapshot()
-        guard witness.high <= state.high, witness.context == AuthorityCodec.hash(admission.context), witness.registrations == 0 else { throw AuthorityError.scope }
-        var prefix=HandoffPrefix(context:admission.context)
-        for frame in try store.replay(after:0) {
-            let batch=HandoffBatch(first:frame.firstSequence,count:frame.count,commit:frame.providerCommit,bytes:frame.eventBytes)
-            if try batch.last() <= witness.high { try prefix.append(batch) }
-        }
-        let digests=prefix.digests()
-        guard prefix.high == witness.high, witness.prefix == digests.0, witness.calls == digests.1,
-              !witness.terminal || state.terminal && witness.high == state.high else { throw AuthorityError.state }
+        try validateReceipt(witness,action:action)
         if let old=d.nativeReceipt {
             guard witness.revision >= old.revision, witness.high >= old.high,
                   witness.revision != old.revision || witness == old else { throw AuthorityError.state }
         }
         d.nativeReceipt=witness; try reconcilePrepared(action); try project(&d,action:action); try select(d,action:action)
+    }
+    private func validateReceipt(_ witness:HandoffWitness,action:GenerationAuthorityAction) throws {
+        try check(action);try store.authorize(action)
+        try witness.validate(expectedRoot:admission.scope.client.localID)
+        let state=try store.snapshot(),context=try AuthorityCodec.decode(ClientContext.self,admission.context)
+        guard witness.high<=state.high,witness.context==AuthorityCodec.hash(admission.context),
+              let execution=admission.scope.provision.execution else { throw AuthorityError.scope }
+        var prefix=try NativeRecoveryPrefix(context:admission.context,provider:execution.provider,providerDigest:admission.providerDigest,
+            request:context.request,operation:context.operation,route:context.route)
+        for frame in try store.replay(after:0) {
+            let batch=HandoffBatch(first:frame.firstSequence,count:frame.count,commit:frame.providerCommit,bytes:frame.eventBytes)
+            if try batch.last()<=witness.high { try prefix.append(batch) }
+        }
+        let count=prefix.registrations,digests=prefix.digests()
+        guard prefix.high==witness.high,witness.prefix==digests.0,witness.calls==digests.1,
+              witness.registrations==count,witness.terminal==prefix.terminal,
+              !prefix.terminal || state.terminal && witness.high==state.high else { throw AuthorityError.state }
+        try check(action)
     }
     public func timerBytes(action: GenerationAuthorityAction) throws -> Data {
         let d=try read(action), result=try lcEncode(d.records[0].work!.times)

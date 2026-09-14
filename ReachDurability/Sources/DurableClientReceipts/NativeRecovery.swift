@@ -79,7 +79,7 @@ extension DurableClientReceipts {
     static func readNativeClient(_ m: ClientManifest, fs: ClientFileSystem, parent: String,
         environment e: ClientEnvironment, key: SymmetricKey, action: GenerationAuthorityAction) throws -> AuthorityAdmission {
         guard action.scope.provision.native, m.revision >= 2, m.records.count == 1,
-              let live=m.records[0].live, m.records[0].cleanup == nil, live.calls == 0,
+              let live=m.records[0].live, m.records[0].cleanup == nil, (0...1).contains(live.calls),
               live.snapshot.revision >= 2, let retention=live.retention, let acceptance=retention.acceptance else { throw AuthorityError.state }
         let a=try acceptance.admission(), scope=a.scope
         func check() throws { try action.check(scope:scope,operation:action.operation) }
@@ -90,8 +90,7 @@ extension DurableClientReceipts {
         let (bytes,frame)=try ClientCrypto.open(cipher,role:"snapshot",environment:e,key:SymmetricKey(data:live.key),rootKey:key)
         let snapshot=try JSONDecoder().decode(ClientSnapshot.self,from:bytes)
         guard try crEncode(snapshot) == bytes, frame.generation == m.records[0].id, frame.revision == live.snapshot.revision,
-              live.snapshot.name == "s-"+frame.record+".bin", snapshot.context == a.context,
-              snapshot.calls.isEmpty else { throw AuthorityError.state }
+              live.snapshot.name == "s-"+frame.record+".bin", snapshot.context == a.context else { throw AuthorityError.state }
         try snapshot.validate(live); try check()
         let binding=try RecoveryBinding(recoveryAuthority:scope)
         let dir=try RecoveryFileSystem(parent:parent,binding:binding,fresh:false); defer { dir.close() }; try check()
@@ -110,7 +109,7 @@ extension DurableClientReceipts {
     }
 }
 
-/// Original acceptance plus an evolving ordinary inbox. No ClientClock, effect
+/// Original acceptance plus one closed native inbox. No ClientClock, effect
 /// methods, imported replacement ticket or retention renewal enters this owner.
 public final class NativeClientOwner {
     public let admission: AuthorityAdmission
@@ -190,13 +189,19 @@ public final class NativeClientOwner {
     public func accept(_ frame: ReplayEnvelope, action: GenerationAuthorityAction) throws {
         guard [.delivery,.terminalReplay,.reopen,.advance,.prepare].contains(action.operation) else { throw AuthorityError.scope }
         var (m,s)=try read(action:action); try cleanup(m,action:action)
+        if frame.skipPrefix != 0 {
+            let context=try AuthorityCodec.decode(ClientContext.self,s.context)
+            guard context.route != "required" else { throw AuthorityError.state }
+        }
         if let known=s.batches.first(where:{$0.first == frame.firstSequence}) {
             guard known.matches(frame) else { throw AuthorityError.state }; try check(action); return
         }
         let events=try frame.validate(cursor:s.high,high:s.high)
-        for event in events { if case .toolCallAppendArguments = event { throw AuthorityError.state } }
+        guard var live=m.records[0].live else { throw AuthorityError.state }
+        var prefix=try s.nativePrefix(live)
+        try prefix.append(.init(first:frame.firstSequence,count:frame.count,commit:frame.providerCommit,bytes:frame.eventBytes))
         m.revision=try crAdd(m.revision,1); try s.append(frame,events:events,revision:m.revision)
-        guard s.calls.isEmpty, var live=m.records[0].live else { throw AuthorityError.state }
+        live.calls=s.calls.count
         let id=UUID().uuidString.lowercased(), name="s-"+id+".bin"
         let bytes=try ClientCrypto.seal(crEncode(s),role:"snapshot",record:id,generation:m.records[0].id,revision:m.revision,
             environment:environment,key:SymmetricKey(data:live.key),rootKey:key)
@@ -210,11 +215,11 @@ public final class NativeClientOwner {
     }
     public func witness(action: GenerationAuthorityAction) throws -> HandoffWitness {
         let (m,s)=try read(action:action); try cleanup(m,action:action)
-        var prefix=HandoffPrefix(context:admission.context)
-        for b in s.batches { try prefix.append(.init(first:b.first,count:b.count,commit:b.commit,bytes:b.bytes)) }
-        let digests=prefix.digests()
+        guard let live=m.records[0].live else { throw AuthorityError.state }
+        var prefix=try s.nativePrefix(live)
+        let registrations=prefix.registrations,digests=prefix.digests()
         let w=HandoffWitness(context:crHash(admission.context),clientRoot:admission.scope.client.localID,
-            revision:s.receiptRevision,high:s.high,terminal:s.terminal,prefix:digests.0,registrations:0,calls:digests.1)
+            revision:s.receiptRevision,high:s.high,terminal:s.terminal,prefix:digests.0,registrations:registrations,calls:digests.1)
         try fault(.beforePublication); try check(action); return w
     }
     public func inbox(action: GenerationAuthorityAction) throws -> [HandoffBatch] {

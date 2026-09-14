@@ -10,6 +10,8 @@ private S101 handback; the implementation alone is not an execution verdict.
 S102 adds a separately qualified closed schema-guided route to this same explicit
 lane. See [Schema-guided native recovery](cross-boot-schema-recovery.md) for its
 bounds, pending-token checkpoint and cold-reboot gates.
+S103 adds [one required-tool recovery](cross-boot-required-recovery.md), with
+private generating/ready checkpoints and one durable registration without effects.
 
 The original declaration freezes the request input digest, artifact declaration,
 operation identity and exact prepared ProviderBinding before either independent
@@ -49,7 +51,7 @@ Admission times, last contact/observation, queue and absolute deadlines remain
 original. Owner/attachment epochs and committed output may advance. Terminal
 retention ends at the original host deadline. The client retains its separate
 original deadline, issuer pin, successful host-export digest and ticket envelope.
-Replay rejects tool/effect state. Terminal selection precedes the artifact and
+Ordinary replay rejects tool/effect state. Terminal selection precedes the artifact and
 provider factory, allowing a separate replay worker with model reads denied.
 
 `Tools/CrossBootNativeRecovery/run_vm.py` uses the unchanged owned VM recipe,

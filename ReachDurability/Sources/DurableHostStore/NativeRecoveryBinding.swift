@@ -34,7 +34,19 @@ public enum NativeRecoveryBinding {
             let expected=type(of:s).init(jsonSchema:s.source,vocabulary:s.vocabulary,vocabularyType:s.vocabularyType,
                 tokenizerIdentity:s.tokenizerIdentity,eosTokenID:s.eosTokenID,unknownTokenID:s.unknownTokenID,fastForward:s.fastForward)
             guard try storeEncode(expected) == storeEncode(s) else { throw AuthorityError.scope }
-        case .required, .allowed: throw AuthorityError.scope
+        case .required(let b, let tokens):
+            guard b.tools.count == 1, b.options.model.prefillStepSize == 256,
+                  (1...512).contains(tokens.count), (1...48).contains(b.options.model.maximumTokens),
+                  b.requestIdentity == provider.requestID else { throw AuthorityError.scope }
+            let schema=try JSONDecoder().decode(WireGenerationSchema.self,from:Data(b.tools[0].schemaJSON.utf8))
+            guard try storeEncode(schema) == Data(b.tools[0].schemaJSON.utf8) else { throw AuthorityError.scope }
+            let s=b.specification
+            let exact=try type(of:b).init(requestIdentity:b.requestIdentity,entryID:b.entryID,callID:b.callID,tools:b.tools,
+                identity:b.identity,cacheSpecs:b.cacheSpecs,codecIdentity:b.codecIdentity,vocabulary:s.vocabulary,
+                vocabularyType:s.vocabularyType,tokenizerIdentity:s.tokenizerIdentity,eosTokenID:s.eosTokenID,
+                unknownTokenID:s.unknownTokenID,fastForward:s.fastForward,options:b.options)
+            guard try storeEncode(exact) == storeEncode(b) else { throw AuthorityError.scope }
+        case .allowed: throw AuthorityError.scope
         }
     }
 }

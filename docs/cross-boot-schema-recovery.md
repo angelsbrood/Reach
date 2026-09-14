@@ -5,14 +5,16 @@ canonical portable JSON-schema generation. It retains the
 `reach-native-recovery-qualification-v1` profile, original v5 role keys, signed
 host admission, client acceptance and S99 witness authority. The private S102
 handback records execution and review verdicts separately from this capability.
+The separate [S103 required-tool qualification](cross-boot-required-recovery.md)
+uses the same entrypoint with distinct whole-call and registration boundaries.
 
 Admission accepts ordinary generation with its existing 256-token prefill and
 1–20 output-token bounds, or schema-guided generation with 1–256 prepared input
 tokens, a 256-token prefill and a 1–32 generation-token budget. The guided budget
 includes intercepted EOS. A provider declaration remains at most 16 KiB.
-Structural-tag and literal-fixture specifications, tool routes and combined
-schema/tool routes are refused. Native client receipts continue to reject tool
-registrations and effect events. Default artifact profiles retain prefill 64.
+Within the schema-only route, structural-tag and literal-fixture specifications,
+tools and combined schema/tool requests are refused. Schema client receipts
+continue to reject tool registrations and effect events. Default artifact profiles retain prefill 64.
 
 `NativeRecoveryBinding` applies the closed declaration at runtime, native store
 identity and lifecycle admission/reopen boundaries. It reconstructs the public
