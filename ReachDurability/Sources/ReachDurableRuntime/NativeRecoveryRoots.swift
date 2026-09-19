@@ -49,13 +49,15 @@ extension RoleBootstrapCore {
     }
 }
 public enum NativeRecoveryRoots {
-    public static func provision(originals: Data, publicModel: String, request: String, model: String, prepared: String, output: String, fixture:AllowedRecoveryQualificationFactory? = nil) throws {
+    public static func provision(originals: Data, publicModel: String, request: String, model: String, prepared: String, output: String, fixture:AllowedRecoveryQualificationFactory? = nil, witness:NativeWitnessSelection? = nil) throws {
+        try witness?.requireOrdinary(fixture:fixture)
         let records=try AuthorityCodec.decode(ClockPolicy.Originals.self,originals)
-        let modelBytes=try LocalFiles.read(publicModel,maximum:64<<10)
-        let declaration=try AuthorityCodec.decode(IndependentPublicModel.self,modelBytes)
         let execution=try AuthorityCodec.decode(AuthorityExecution.self,LocalFiles.read(prepared,maximum:64<<10))
         let binding=try AuthorityCodec.decode(ProviderBinding.self,execution.provider)
         try NativeRecoveryRuntime.validateFixture(binding)
+        try witness?.validate(originals:records,binding:binding,fixture:fixture)
+        let modelBytes=try LocalFiles.read(publicModel,maximum:64<<10)
+        let declaration=try AuthorityCodec.decode(IndependentPublicModel.self,modelBytes)
         let requestBytes=try LocalFiles.read(request,maximum:64<<10)
         _=try LocalDurableRuntime.request(from:request)
         let p=try AuthorityProvision(originals:records,hostID:UUID().uuidString.lowercased(),clientID:UUID().uuidString.lowercased(),

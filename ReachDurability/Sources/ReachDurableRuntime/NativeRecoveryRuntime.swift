@@ -56,13 +56,17 @@ public enum NativeRecoveryRuntime {
         try validateFixture(b); guard p.observations.isEmpty else { throw AuthorityError.state }; return b
     }
     public static func admit(hostReceipt: String, hostDigest: String, clientReceipt: String, clientDigest: String,
-        secretDescriptor: Int32, request: String, export: String,fixture:AllowedRecoveryQualificationFactory? = nil) throws {
+        secretDescriptor: Int32, request: String, export: String,fixture:AllowedRecoveryQualificationFactory? = nil,witness:NativeWitnessSelection? = nil) throws {
+        try NativeRecoveryRoots.validateWitness(witness,hostReceipt:hostReceipt,hostDigest:hostDigest,clientReceipt:clientReceipt,clientDigest:clientDigest,fixture:fixture)
+
         let credential=try UnlockCredential(consumingDescriptor:secretDescriptor); defer { credential.close() }
         let scope=try NativeRecoveryRoots.originalScope(hostReceipt:hostReceipt,hostDigest:hostDigest,clientReceipt:clientReceipt,clientDigest:clientDigest)
         let root=try NativeRecoveryRootAccess(receipt:hostReceipt,expectedDigest:hostDigest,fixture:fixture)
         guard root.core.role == .host, let execution=scope.provision.execution else { throw AuthorityError.scope }
-        let owner=try GenerationAuthorityOwner(scope:scope,clock:SystemClock(),validateOwnedRoots:{ try root.validateCurrent() }), action=try owner.begin(.admitHost)
-        try RecoveryAuthorityChannel.exchange(action)
+        try witness?.validate(scope.provision,fixture:fixture)
+        let clock=SystemClock()
+        let owner=try GenerationAuthorityOwner(scope:scope,clock:clock,validateOwnedRoots:{ try root.validateCurrent() }), action=try owner.begin(.admitHost)
+        try NativeWitnessAccess.exchange(action,selection:witness,clock:clock)
         let binding=try LocalDurableRuntime.withCPU { () -> ProviderBinding in
             try action.check()
             guard AuthorityCodec.hash(try LocalFiles.read(request,maximum:64<<10)) == scope.provision.requestInputDigest else { throw AuthorityError.scope }
@@ -92,13 +96,17 @@ public enum NativeRecoveryRuntime {
     }
     private static func bindingBytes(_ binding: ProviderBinding) throws -> Data { try AuthorityCodec.encode(binding) }
     public static func accept(hostReceipt: String, hostDigest: String, clientReceipt: String, clientDigest: String,
-        secretDescriptor: Int32, export: String, originalIssuer: Data, successfulExportDigest: String,fixture:AllowedRecoveryQualificationFactory? = nil) throws {
+        secretDescriptor: Int32, export: String, originalIssuer: Data, successfulExportDigest: String,fixture:AllowedRecoveryQualificationFactory? = nil,witness:NativeWitnessSelection? = nil) throws {
+        try NativeRecoveryRoots.validateWitness(witness,hostReceipt:hostReceipt,hostDigest:hostDigest,clientReceipt:clientReceipt,clientDigest:clientDigest,fixture:fixture)
+
         let credential=try UnlockCredential(consumingDescriptor:secretDescriptor); defer { credential.close() }
         let scope=try NativeRecoveryRoots.originalScope(hostReceipt:hostReceipt,hostDigest:hostDigest,clientReceipt:clientReceipt,clientDigest:clientDigest)
         let root=try NativeRecoveryRootAccess(receipt:clientReceipt,expectedDigest:clientDigest,fixture:fixture)
         guard root.core.role == .client else { throw AuthorityError.scope }
-        let owner=try GenerationAuthorityOwner(scope:scope,clock:SystemClock(),validateOwnedRoots:{ try root.validateCurrent() }), action=try owner.begin(.acceptClient)
-        try RecoveryAuthorityChannel.exchange(action)
+        try witness?.validate(scope.provision,fixture:fixture)
+        let clock=SystemClock()
+        let owner=try GenerationAuthorityOwner(scope:scope,clock:clock,validateOwnedRoots:{ try root.validateCurrent() }), action=try owner.begin(.acceptClient)
+        try NativeWitnessAccess.exchange(action,selection:witness,clock:clock)
         let issued=try AuthorityCodec.decode(AuthorityIssued.self,LocalFiles.read(export,maximum:64<<10))
         let acceptance=try AuthorityAcceptance(issued:issued,originalIssuer:originalIssuer,originalSuccessfulExportDigest:successfulExportDigest)
         let a=try acceptance.admission(); guard a.scope == scope else { throw AuthorityError.scope }
@@ -114,7 +122,10 @@ public enum NativeRecoveryRuntime {
     public static func run(hostReceipt: String, hostDigest: String, clientReceipt: String, clientDigest: String,
         hostSecret: Int32, clientSecret: Int32, original: Bool, stopAfterCalls: Int, leaveHostAhead: Bool,
         report: String, fault: String, stopWithPendingGuided: Bool=false,
-        requiredBoundary: String="none", duplicateExact: Bool=false,allowedBoundary:String="none",fixture:AllowedRecoveryQualificationFactory? = nil) throws {
+        requiredBoundary: String="none", duplicateExact: Bool=false,allowedBoundary:String="none",fixture:AllowedRecoveryQualificationFactory? = nil,witness:NativeWitnessSelection? = nil) throws {
+        try witness?.requireOrdinaryOptions(stopWithPendingGuided:stopWithPendingGuided,requiredBoundary:requiredBoundary,allowedBoundary:allowedBoundary,duplicateExact:duplicateExact,fault:fault,fixture:fixture)
+        try NativeRecoveryRoots.validateWitness(witness,hostReceipt:hostReceipt,hostDigest:hostDigest,clientReceipt:clientReceipt,clientDigest:clientDigest,fixture:fixture)
+
         guard (0...20).contains(stopAfterCalls), ["none","before-native","after-native","after-commit","before-publication","after-next-pass-native"].contains(fault),
               ["none","generating","ready","emitted"].contains(requiredBoundary),
               requiredBoundary == "none" || !stopWithPendingGuided && stopAfterCalls == 0,
@@ -127,9 +138,11 @@ public enum NativeRecoveryRuntime {
             if original { guard scope.host.boot == (try RootKeyCodec.boot()) else { throw AuthorityError.scope } }
             let hs=try UnlockCredential(consumingDescriptor:hostSecret), cs=try UnlockCredential(consumingDescriptor:clientSecret)
             defer { hs.close(); cs.close() }
-            let owner=try GenerationAuthorityOwner(scope:scope,clock:SystemClock(),validateOwnedRoots:{ try h.validateCurrent(); try c.validateCurrent() })
+            try witness?.validate(scope.provision,fixture:fixture)
+            let clock=SystemClock()
+            let owner=try GenerationAuthorityOwner(scope:scope,clock:clock,validateOwnedRoots:{ try h.validateCurrent(); try c.validateCurrent() })
             var actionBegan=DispatchTime.now().uptimeNanoseconds
-            var action=try owner.begin(.reopen); try RecoveryAuthorityChannel.exchange(action)
+            var action=try owner.begin(.reopen)
             var profile: (any NativeRecoverySelectedProfile)?, generation: GuardedNativeGeneration?, failureStage="reopen"
             var before:[HandoffBatch]=[], replayedBeforeNative=0, faultUsed=false, didCut=false
             var guidedProgress:[ProviderGuidedProgress]=[]
@@ -141,18 +154,17 @@ public enum NativeRecoveryRuntime {
             var calls: Int { profile?.observations.reduce(0){$0+$1.calls} ?? 0 }
             func renew(_ op: GenerationOperation) throws {
                 try action.finish(); actionBegan=DispatchTime.now().uptimeNanoseconds
-                action=try owner.begin(op); try RecoveryAuthorityChannel.exchange(action)
+                action=try owner.begin(op); try NativeWitnessAccess.exchange(action,selection:witness,clock:clock)
             }
             func boundary(_ point: String) throws {
                 guard point == fault, !faultUsed else { return }; faultUsed=true
                 struct Boundary: Encodable { let stage="boundary"; let point:String, nativeCalls:Int; let guided:ProviderGuidedProgress?, required:ProviderRequiredProgress?,allowed:ProviderAllowedProgress?; let allowedOperation:String,traces:[NativeObservation] }
                 try RecoveryAuthorityChannel.write(Boundary(point:point,nativeCalls:calls,guided:guidedProgress.last,required:requiredProgress,allowed:allowedProgress,allowedOperation:allowedOperation,traces:profile?.observations ?? []))
                 let command=try AuthorityCodec.decode(AuthorityControl.self,RecoveryAuthorityChannel.read())
-                guard command.stage == "continue" || command.stage == "observe" else { throw AuthorityError.state }
-                if command.stage == "observe" { try RecoveryAuthorityChannel.observe(action) }
-                try action.check()
+                try NativeWitnessAccess.continueAction(command.stage,action:action,selection:witness)
             }
             do {
+                try NativeWitnessAccess.exchange(action,selection:witness,clock:clock)
                 try h.withKeys(scope:scope,owner:owner,credential:hs,original:false) { hostKeys in
                     try c.withKeys(scope:scope,owner:owner,credential:cs,original:false) { clientKeys in
                         let host=try NativeLifecycleOwner(path:h.core.root+"/bootstrap/host",identity:.init(recoveryAuthority:h.core.nativeStorage()),keys:LocalRuntimeOwner.hostKeys(hostKeys),scope:scope,action:action)

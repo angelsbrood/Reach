@@ -1,0 +1,89 @@
+import Foundation
+import ClockPolicy
+import WitnessAccess
+import RecoveryAuthorityContract
+import ResumableMLXProvider
+
+/// One frozen launch selection. It owns no Verifier and cannot replace originals.
+public struct NativeWitnessSelection {
+    private let descriptor:Descriptor
+    public init(path:String,expectedSHA256:String) throws {
+        descriptor=try Descriptor.load(path:path,expectedSHA256:expectedSHA256)
+    }
+    public static func load(path:String?,expectedSHA256:String?) throws -> Self? {
+        if path==nil && expectedSHA256==nil {return nil}
+        guard let path,let expectedSHA256 else {throw AuthorityError.invalid}
+        return try Self(path:path,expectedSHA256:expectedSHA256)
+    }
+    public func originals(subject:String) throws -> Data {try AuthorityCodec.encode(descriptor.select(subject:subject))}
+    func requireOrdinary(fixture:AllowedRecoveryQualificationFactory?) throws {
+        guard fixture==nil else {throw AuthorityError.scope}
+    }
+    func validate(originals:Originals,binding:ProviderBinding,fixture:AllowedRecoveryQualificationFactory?) throws {
+        try requireOrdinary(fixture:fixture);try NativeRecoveryRuntime.validateFixture(binding)
+        guard binding.lane.route == .ordinary else {throw AuthorityError.scope}
+        let subject=try originals.records().host.subject
+        guard try descriptor.select(subject:subject)==originals else {throw AuthorityError.scope}
+    }
+    func validate(_ provision:AuthorityProvision,fixture:AllowedRecoveryQualificationFactory?) throws {
+        try requireOrdinary(fixture:fixture);try provision.validate()
+        guard provision.native,let execution=provision.execution else {throw AuthorityError.scope}
+        try validate(originals:provision.originals,binding:AuthorityCodec.decode(ProviderBinding.self,execution.provider),fixture:fixture)
+    }
+    func requireOrdinaryOptions(stopWithPendingGuided:Bool,requiredBoundary:String,allowedBoundary:String,duplicateExact:Bool,fault:String,fixture:AllowedRecoveryQualificationFactory?) throws {
+        try requireOrdinary(fixture:fixture)
+        guard !stopWithPendingGuided,requiredBoundary=="none",allowedBoundary=="none",!duplicateExact,fault != "after-next-pass-native" else {throw AuthorityError.scope}
+    }
+    func exchange(_ action:GenerationAuthorityAction,clock:any PolicyClock,
+                  transport:(Data,UnixEndpoint,IODeadline)throws->Data = {try SocketIO.exchange($0,endpoint:$1,deadline:$2)},
+                  report:(NativeSocketReport)throws->Void = {try RecoveryAuthorityChannel.write($0)}) throws {
+        var response:Data?,observed:Sample?
+        do {
+            let deadline=try IODeadline(start:action.clockAction.sent,clock:clock)
+            try validate(action.scope.provision,fixture:nil);try deadline.check()
+            let endpoint=try UnixEndpoint(path:descriptor.endpoint,uid:descriptor.uid)
+            response=try transport(action.request,endpoint,deadline);try deadline.check()
+            try action.receive(response!);try deadline.check()
+            observed=try clock.sample();try deadline.check()
+        } catch {
+            action.observeWitnessLoss()
+            // Diagnostic output cannot rescue an exchange or supply a certificate.
+            try? report(.init(operation:action.operation,request:action.request,sent:action.clockAction.sent,
+                              certificate:response,afterReceive:observed,accepted:false))
+            throw error
+        }
+        try report(.init(operation:action.operation,request:action.request,sent:action.clockAction.sent,
+                         certificate:response,afterReceive:observed,accepted:true))
+    }
+}
+
+/// These are transport/verification observations, not a prospective-use decision.
+/// afterReceive is a separate observation and is never represented as Verifier r1.
+struct NativeSocketReport:Encodable {
+    let stage="socket-authority"
+    let operation:GenerationOperation,request:Data,sent:Sample,certificate:Data?,afterReceive:Sample?,accepted:Bool
+}
+enum NativeWitnessAccess {
+    static func exchange(_ action:GenerationAuthorityAction,selection:NativeWitnessSelection?,clock:any PolicyClock) throws {
+        if let selection {try selection.exchange(action,clock:clock)} else {try RecoveryAuthorityChannel.exchange(action)}
+    }
+    static func continueAction(_ stage:String,action:GenerationAuthorityAction,selection:NativeWitnessSelection?) throws {
+        guard stage=="continue" || (selection==nil && stage=="observe") else {throw AuthorityError.state}
+        if stage=="observe" {try RecoveryAuthorityChannel.observe(action)}
+        try action.check()
+    }
+}
+
+extension NativeRecoveryRoots {
+    /// Bounded metadata only: reject socket selection/route before leases, secrets,
+    /// Keychain access, native construction or executable storage operations.
+    static func validateWitness(_ witness:NativeWitnessSelection?,hostReceipt:String,hostDigest:String,
+                                clientReceipt:String,clientDigest:String,fixture:AllowedRecoveryQualificationFactory?) throws {
+        guard let witness else {return}
+        try witness.requireOrdinary(fixture:fixture)
+        let h=try receipt(hostReceipt,expectedDigest:hostDigest).ready.core
+        let c=try receipt(clientReceipt,expectedDigest:clientDigest).ready.core
+        guard h.role == .host,c.role == .client,let provision=h.authority,provision==c.authority else {throw AuthorityError.scope}
+        try witness.validate(provision,fixture:fixture)
+    }
+}
