@@ -11,6 +11,11 @@ S100 uses this unchanged clock contract in the explicitly selected
 allocating/preparing records. Its authority guard remains separate from scalar
 runtime clocks and native continuation.
 
+S106 exposes this unchanged policy through explicitly selected
+[local operational witness access](operational-witness-access.md). Independent
+receiver processes can use the same originals against a surviving Unix-domain
+service; each action retains its own fresh send bracket.
+
 ## Conditional contract
 
 The exact versioned qualification profile binds:
