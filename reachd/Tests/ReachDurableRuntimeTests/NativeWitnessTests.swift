@@ -2,6 +2,7 @@ import XCTest
 import Foundation
 import Darwin
 import CryptoKit
+import DurableStoreBootstrap
 @testable import ClockPolicy
 import WitnessAccess
 import RecoveryAuthorityContract
@@ -61,8 +62,8 @@ final class NativeWitnessTests:XCTestCase {
         XCTAssertThrowsError(try s.exchange(a,clock:f.receiverClock,transport:{_,_,_ in transports+=1;return Data()},report:{_ in}))
         XCTAssertEqual(transports,0);XCTAssertThrowsError(try a.check());XCTAssertThrowsError(try f.owner.begin(.advance))
     }
-    func testNonordinaryProvisionRefusesBeforeModelAndRequestRead() throws {
-        for route in ["guided","required","allowed","combined"] {
+    func testToolProvisionRefusesBeforeModelAndRequestRead() throws {
+        for route in ["required","allowed","combined"] {
             let f=try NativeRecoveryFixture(request:ArtifactFixtures.request(route,maximum:16)),(s,_,_)=try selection(f)
             let prepared=f.base+"/prepared",output=f.base+"/not-created"
             try LocalFiles.writeNew(AuthorityCodec.encode(f.scope.provision.execution!),to:prepared)
@@ -82,7 +83,7 @@ final class NativeWitnessTests:XCTestCase {
         XCTAssertEqual(loads,0)
     }
     func testMetadataRouteRefusalPrecedesCredentialsAtExecutableEntries() throws {
-        let f=try NativeRecoveryFixture(request:ArtifactFixtures.request("guided",maximum:16)),(s,_,_)=try selection(f)
+        let f=try NativeRecoveryFixture(request:ArtifactFixtures.request("required",maximum:16)),(s,_,_)=try selection(f)
         let h=try LifecycleFixture(role:.host,unlock:true,authority:f.scope.provision),c=try LifecycleFixture(unlock:true,authority:f.scope.provision)
         let hd=try XCTUnwrap(h.digest),cd=try XCTUnwrap(c.digest)
         let checks:[()throws->Void]=[
@@ -94,8 +95,68 @@ final class NativeWitnessTests:XCTestCase {
         // No selection leaves the old pipe entry path in control of metadata.
         try NativeRecoveryRoots.validateWitness(nil,hostReceipt:"/missing",hostDigest:"",clientReceipt:"/missing",clientDigest:"",fixture:nil)
     }
-    func testOriginalR0AndSameOwnerCapacityAcrossRenewals() throws {
+    func testOrdinaryAndCanonicalSchemaSelectionsUseAuthenticatedOriginalMetadata() throws {
+        for route in ["ordinary","guided"] {
+            let f=try NativeRecoveryFixture(request:ArtifactFixtures.request(route,maximum:route == "guided" ? 32 : 16)),(s,_,_)=try selection(f)
+            XCTAssertEqual(try AuthorityCodec.encode(s.validate(f.scope.provision,fixture:nil)),try AuthorityCodec.encode(f.provider))
+            let h=try LifecycleFixture(role:.host,unlock:true,authority:f.scope.provision),c=try LifecycleFixture(unlock:true,authority:f.scope.provision)
+            let hd=try XCTUnwrap(h.digest),cd=try XCTUnwrap(c.digest)
+            try NativeRecoveryRoots.validateWitness(s,hostReceipt:h.receipt,hostDigest:hd,clientReceipt:c.receipt,clientDigest:cd,fixture:nil)
+            if route == "guided" {
+                try NativeRecoveryRoots.validateWitness(s,hostReceipt:h.receipt,hostDigest:hd,clientReceipt:c.receipt,clientDigest:cd,fixture:nil,stopWithPendingGuided:true)
+            }
+            XCTAssertThrowsError(try NativeRecoveryRoots.validateWitness(s,hostReceipt:h.receipt,hostDigest:String(repeating:"0",count:64),clientReceipt:c.receipt,clientDigest:cd,fixture:nil,stopWithPendingGuided:true))
+            XCTAssertEqual(h.provider.loads,0);XCTAssertEqual(c.provider.loads,0);XCTAssertEqual(f.counter.models,0)
+        }
+    }
+    func testGuidedTagDoesNotAdmitOtherKindsOrNoncanonicalSchema() throws {
+        let f=try NativeRecoveryFixture(request:ArtifactFixtures.request("guided",maximum:32)),(s,_,_)=try selection(f)
+        let encoded=String(decoding:try ArtifactFixtures.encode(f.provider),as:UTF8.self)
+        XCTAssertTrue(encoded.contains("\"kind\":\"json-schema\""))
+        for kind in ["structural-tag","literal-fixture","unknown-kind"] {
+            let bytes=Data(encoded.replacingOccurrences(of:"\"kind\":\"json-schema\"",with:"\"kind\":\""+kind+"\"").utf8)
+            let binding=try JSONDecoder().decode(ProviderBinding.self,from:bytes)
+            XCTAssertThrowsError(try s.validate(originals:f.scope.provision.originals,binding:binding,fixture:nil))
+        }
+        guard case .guided(let original)=f.provider.lane else {return XCTFail("schema fixture")}
+        var lane=original;lane.specification.source=" "+lane.specification.source
+        var binding=f.provider;binding.lane = .guided(lane)
+        XCTAssertThrowsError(try s.validate(originals:f.scope.provision.originals,binding:binding,fixture:nil))
+        XCTAssertEqual(f.counter.models,0)
+    }
+    func testPendingGuidedOnOrdinaryRefusesBeforeLeasesAndCredentialConsumption() throws {
         let f=try NativeRecoveryFixture(),(s,_,_)=try selection(f)
+        let h=try LifecycleFixture(role:.host,unlock:true,authority:f.scope.provision),c=try LifecycleFixture(unlock:true,authority:f.scope.provision)
+        let (_,hostLease)=try RoleLifecycleLease.selectNativeRecovery(receipt:h.receipt,expectedDigest:XCTUnwrap(h.digest))
+        let (_,clientLease)=try RoleLifecycleLease.selectNativeRecovery(receipt:c.receipt,expectedDigest:XCTUnwrap(c.digest))
+        defer {hostLease.close();clientLease.close()}
+        let secret=f.base+"/unconsumed-secret",report=f.base+"/not-created"
+        try LocalFiles.writeNew(Data(repeating:65,count:64),to:secret)
+        let fd=open(secret,O_RDONLY|O_NOFOLLOW);XCTAssertGreaterThanOrEqual(fd,0);defer {close(fd)}
+        XCTAssertThrowsError(try NativeRecoveryRuntime.run(hostReceipt:h.receipt,hostDigest:XCTUnwrap(h.digest),clientReceipt:c.receipt,clientDigest:XCTUnwrap(c.digest),hostSecret:fd,clientSecret:fd,original:false,stopAfterCalls:0,leaveHostAhead:true,report:report,fault:"none",stopWithPendingGuided:true,witness:s)) {XCTAssertEqual($0 as? AuthorityError,.scope)}
+        XCTAssertEqual(lseek(fd,0,SEEK_CUR),0);XCTAssertFalse(FileManager.default.fileExists(atPath:report))
+        XCTAssertEqual(h.provider.loads,0);XCTAssertEqual(c.provider.loads,0);XCTAssertEqual(f.counter.models,0)
+    }
+    func testUnsupportedSocketOptionsRefuseBeforeReceiptAndCredentialAccess() throws {
+        for route in ["ordinary","guided"] {
+            let f=try NativeRecoveryFixture(request:ArtifactFixtures.request(route,maximum:16)),(s,_,_)=try selection(f)
+            for options in [("generating","none",false,"none"),("none","guided",false,"none"),("none","none",true,"none"),("none","none",false,"after-next-pass-native")] {
+                XCTAssertThrowsError(try NativeRecoveryRuntime.run(hostReceipt:"/missing",hostDigest:"",clientReceipt:"/missing",clientDigest:"",hostSecret:-1,clientSecret:-1,original:false,stopAfterCalls:0,leaveHostAhead:false,report:"/missing",fault:options.3,stopWithPendingGuided:route == "guided",requiredBoundary:options.0,duplicateExact:options.2,allowedBoundary:options.1,witness:s)) {XCTAssertEqual($0 as? AuthorityError,.scope)}
+            }
+            XCTAssertEqual(f.counter.models,0)
+        }
+    }
+    func testGuidedReceiptsStillRequireTheExactPairAndMatchingProvisions() throws {
+        let f=try NativeRecoveryFixture(request:ArtifactFixtures.request("guided",maximum:32)),g=try NativeRecoveryFixture(request:ArtifactFixtures.request("guided",maximum:32))
+        let (s,_,_)=try selection(f),(other,_,_)=try selection(g)
+        let h=try LifecycleFixture(role:.host,unlock:true,authority:f.scope.provision),c=try LifecycleFixture(unlock:true,authority:f.scope.provision),wrong=try LifecycleFixture(unlock:true,authority:g.scope.provision)
+        XCTAssertThrowsError(try NativeRecoveryRoots.validateWitness(other,hostReceipt:h.receipt,hostDigest:XCTUnwrap(h.digest),clientReceipt:c.receipt,clientDigest:XCTUnwrap(c.digest),fixture:nil,stopWithPendingGuided:true))
+        XCTAssertThrowsError(try NativeRecoveryRoots.validateWitness(s,hostReceipt:h.receipt,hostDigest:XCTUnwrap(h.digest),clientReceipt:wrong.receipt,clientDigest:XCTUnwrap(wrong.digest),fixture:nil,stopWithPendingGuided:true)) {XCTAssertEqual($0 as? AuthorityError,.scope)}
+        XCTAssertEqual(h.provider.loads+c.provider.loads+wrong.provider.loads,0)
+    }
+    func testOriginalR0AndSameOwnerCapacityAcrossRenewals() throws {
+        for route in ["ordinary","guided"] {
+        let f=try NativeRecoveryFixture(request:ArtifactFixtures.request(route,maximum:16)),(s,_,_)=try selection(f)
         var nonces=Set<String>(),reports=0
         for _ in 0..<64 {
             let a=try f.owner.begin(.advance),sent=a.clockAction.sent
@@ -108,6 +169,7 @@ final class NativeWitnessTests:XCTestCase {
             let e=try a.check();XCTAssertEqual(e.r0,sent);try a.finish();XCTAssertThrowsError(try a.check())
         }
         XCTAssertEqual(reports,64);XCTAssertEqual(f.owner.actionCount,64);XCTAssertThrowsError(try f.owner.begin(.delivery))
+        }
     }
     func testOriginalR0IncludesDelayBeforeConnect() throws {
         let f=try NativeRecoveryFixture(),(s,_,_)=try selection(f),a=try f.owner.begin(.reopen);var calls=0

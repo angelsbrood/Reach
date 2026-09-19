@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""S107 guest-owned direct-socket native recovery. No host certificate relay."""
+"""Guest-owned ordinary/schema native recovery through the selected local socket."""
 import base64, hashlib, json, os, select, shutil, stat, subprocess, sys, time, traceback, uuid
 from pathlib import Path
 sys.dont_write_bytecode=True
@@ -16,13 +16,16 @@ if len(sys.argv)>1 and sys.argv[1]=='worker':
     sys.stdout.buffer.write(data+b'\n');sys.stdout.buffer.flush()
     os.execv(selected['command'][0],selected['command'])
 BASE=Path(sys.argv[1]).resolve(strict=True);PHASE=sys.argv[2] if len(sys.argv)>2 else 'campaign'
-assert str(BASE).startswith('/Users/threshold-auto/reach-s107-') and os.getuid()==503
+LANE=sys.argv[3] if len(sys.argv)>3 else 'ordinary';assert len(sys.argv)<=4 and LANE in ['ordinary','schema']
+SLICE={'ordinary':'s107','schema':'s108'}[LANE]
+assert PHASE in ['campaign','loss','retirement'] or PHASE.startswith('cleanup-') and PHASE[8:].isdigit()
+assert str(BASE).startswith('/Users/threshold-auto/reach-'+SLICE+'-') and os.getuid()==503
 assert BASE.stat().st_uid==503 and stat.S_IMODE(BASE.stat().st_mode)==0o700
 os.umask(0o077)
 for name in ['logs','reports','roots','control','secrets','originals','tmp','original-inputs','services','socket','other-socket']:
     (BASE/name).mkdir(exist_ok=True,mode=0o700)
 EXE=BASE/'bin/reachd'; INPUTS=BASE/'original-inputs'
-record=dict(phase=PHASE,wrapperPID=os.getpid(),processes=[],result='RUNNING')
+record=dict(lane=LANE,slice=SLICE,phase=PHASE,wrapperPID=os.getpid(),processes=[],result='RUNNING')
 def raw(x):return json.dumps(x,sort_keys=True,separators=(',',':'),ensure_ascii=False).encode()
 def write(p,x):p.write_bytes(raw(x)+b'\n');p.chmod(0o600)
 def sha(p):return hashlib.sha256(Path(p).read_bytes()).hexdigest()
@@ -45,11 +48,11 @@ def sentinel_check():
 def controller(value):
     owned=allocation(BASE);fixture=allocation(BASE/'fixtures');free=shutil.disk_usage(BASE).free
     assert owned<=32<<30 and fixture<=3<<30 and free>=30<<30
-    value=dict(value,resources=dict(guestAllocatedBytes=owned,guestFixtureAllocatedBytes=fixture,guestFreeBytes=free))
+    value=dict(value,lane=LANE,slice=SLICE,resources=dict(guestAllocatedBytes=owned,guestFixtureAllocatedBytes=fixture,guestFreeBytes=free))
     data=raw(value);assert len(data)<=65536
     sys.stdout.buffer.write(data+b'\n');sys.stdout.buffer.flush()
     line=sys.stdin.buffer.readline(65538);assert line.endswith(b'\n') and len(line)<=65537;return json.loads(line)
-def event(name,evidence):assert controller(dict(kind='event',name=name,evidence=evidence))=={'kind':'ack'}
+def event(name,evidence):assert controller(dict(kind='event',name=name,evidence=dict(evidence,lane=LANE,slice=SLICE)))=={'kind':'ack'}
 def signed(x):return json.loads(base64.b64decode(json.loads(base64.b64decode(x))['body']))
 def capture(args):
     started=time.monotonic();p=subprocess.Popen(args,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
@@ -74,6 +77,7 @@ os.environ['TMPDIR']=str(BASE/'tmp');assert 'MLX_DISABLE_COMPILE' not in os.envi
 ENDPOINT=str(BASE/'socket/s');assert len(ENDPOINT.encode())+1<=104
 SERVICE=BASE/'bin/witness-access-qualification'
 serviceOwner=None
+serviceNonces={}
 
 def sandbox(denyInputs=False,denyModel=False,keychainDeny=True):
     p='(version 1)(allow default)(deny network*)'
@@ -129,7 +133,7 @@ def command(label,args,secret=None,pair=None,expected=0,checkpoint=False,boundar
     native=[str(EXE),'durable-native-recovery',*args]
     wrapper=[str(BASE/'guest.py'),'worker',base64.b64encode(raw(dict(command=native,probes=probes,fds=fds))).decode()]
     cmd=['/usr/bin/sandbox-exec','-p',sandbox(denyInputs,denyModel,keychainDeny=False),'/usr/bin/python3',*wrapper]
-    item=dict(label=label,command=native,sandbox=sandbox(denyInputs,denyModel,keychainDeny=False),joined=False,frames=[],certificates=[],exchanges=[])
+    item=dict(label=label,lane=LANE,maximumFrameBytes=0,command=native,sandbox=sandbox(denyInputs,denyModel,keychainDeny=False),joined=False,frames=[],certificates=[],exchanges=[])
     out=(BASE/'logs'/(label+'.stdout.log')).open('xb');err=(BASE/'logs'/(label+'.stderr.log')).open('xb')
     started=time.monotonic();p=subprocess.Popen(cmd,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=err,pass_fds=tuple(fds))
     for fd in fds:os.close(fd)
@@ -145,11 +149,14 @@ def command(label,args,secret=None,pair=None,expected=0,checkpoint=False,boundar
                 out.write(data);out.flush();buf+=data
                 assert out.tell()<=192<<20 and err.tell()<=192<<20 and len(buf.split(b'\n',1)[0])<=65536
                 if b'\n' not in buf:continue
-            line,buf=buf.split(b'\n',1);value=json.loads(line);assert raw(value)==line
+            line,buf=buf.split(b'\n',1);item['maximumFrameBytes']=max(item['maximumFrameBytes'],len(line));value=json.loads(line);assert raw(value)==line
             stage=value.get('stage')
             assert stage not in ['challenge','observe-witness'],'socket mode attempted pipe authority'
             if stage=='socket-authority':
-                item['exchanges'].append(value)
+                item['exchanges'].append(value);assert len(item['exchanges'])<=64
+                request=json.loads(base64.b64decode(value['request']));identity=hashlib.sha256(raw(request['witness'])).hexdigest()
+                nonces=serviceNonces.setdefault(identity,[]);assert request['nonce'] not in nonces;nonces.append(request['nonce']);assert len(nonces)<=128
+                if value['accepted']:assert 0<=value['afterReceive']['nanoseconds']-value['sent']['nanoseconds']<5_000_000_000
                 if value.get('certificate') and value['accepted']:item['certificates'].append(signed(value['certificate']))
             elif stage=='read-denial':assert value['paths']==probes;item['readDenials']=probes
             elif stage=='boundary':
@@ -210,12 +217,15 @@ def hashes(pair):
 
 def fixture():
     write(BASE/'reports/keychains-before.json',metadata())
-    request=json.loads((BASE/'fixtures/requests/ordinary.json').read_bytes());request['options']['maximumResponseTokens']=16
-    write(INPUTS/'request.json',request)
+    if LANE=='ordinary':
+        request=json.loads((BASE/'fixtures/requests/ordinary.json').read_bytes());request['options']['maximumResponseTokens']=16
+        write(INPUTS/'request.json',request)
+    else:
+        shutil.copyfile(BASE/'fixtures/requests/native-guided.json',INPUTS/'request.json');(INPUTS/'request.json').chmod(0o600)
     # Two real preparation passes freeze one exact binding before either run.
     for name in ['primary','reference']:
         command('prepare-'+name,['prepare-fixture','--model',BASE/'fixtures/model','--request',INPUTS/'request.json',
-            '--operation','s107-original-common-operation','--output',INPUTS/(name+'-prepared.json'),'--public-model',INPUTS/(name+'-model.json')])
+            '--operation',SLICE+'-original-common-operation','--output',INPUTS/(name+'-prepared.json'),'--public-model',INPUTS/(name+'-model.json')])
     assert (INPUTS/'primary-prepared.json').read_bytes()==(INPUTS/'reference-prepared.json').read_bytes()
     assert (INPUTS/'primary-model.json').read_bytes()==(INPUTS/'reference-model.json').read_bytes()
     e=json.loads((INPUTS/'primary-prepared.json').read_bytes());provider=json.loads(base64.b64decode(e['provider']))
@@ -223,7 +233,66 @@ def fixture():
         publicModelSHA256=sha(INPUTS/'primary-model.json'),beforeEitherOriginal=True,
         compiler=compiler,compilerSHA256=sha(compiler),sdk=sdk,cmathSHA256=sha(Path(sdk)/'usr/include/c++/v1/cmath'),
         launcherSHA256=sha(shim),nativeCompileDisabled=False,modelSHA256={p.name:sha(p) for p in (BASE/'fixtures/model').iterdir()})
-    write(BASE/'reports/fixture-binding.json',evidence);event('exact-common-preparation-frozen',evidence)
+    write(BASE/'reports/fixture-binding.json',dict(evidence,lane=LANE,slice=SLICE));event('exact-common-preparation-frozen',evidence)
+    if LANE=='schema':schema_feasibility(provider)
+def guided_pending(v):
+    return v.get('terminalReason') is None and v['consumedTokens']>0 and v['pendingTokens']>0 and bool(base64.b64decode(v['cumulativeEmittedBytes'])) and all(x>0 for x in v['modelOffsets'])
+
+def schema_feasibility(provider):
+    assert serviceOwner is None and not list((BASE/'roots').iterdir()) and not list((BASE/'control').iterdir())
+    report=BASE/'reports/guided-feasibility-native.json'
+    item=command('guided-feasibility',['probe-guided-fixture','--model',BASE/'fixtures/model','--prepared',INPUTS/'primary-prepared.json','--report',report])
+    data=json.loads(report.read_bytes());progress=data['progress'];end=progress[-1]
+    assert data['beforeOriginals'] and data['cutFound'] and data['provider']==provider and data['nativePeak']<=128<<20
+    # The semantic cut also needs a prefix delivered by an earlier advance.
+    cutIndex=next(i for i,v in enumerate(progress) if i>0 and guided_pending(v) and base64.b64decode(progress[i-1]['cumulativeEmittedBytes']))
+    cut=progress[cutIndex];remaining=len(progress)-cutIndex-1
+    assert cut['pendingTokens']>1 and remaining>1 and all(x['origin']=='forced' for x in cut['accepts'][cut['consumedTokens']:])
+    assert end['terminalReason']=='complete' and end['interceptedEndings']==1 and end['pendingTokens']==0 and end['consumedTokens']<=32
+    assert json.loads(base64.b64decode(end['cumulativeEmittedBytes']))=={'value':'中'}
+    actions=dict(cut=2+cutIndex,resume=1+remaining,terminal=2,reference=1+len(progress))
+    # Each original pair also needs one admit and one accept exchange.
+    positiveNonces=4+sum(actions.values());assert max(actions.values())<=64 and positiveNonces<128
+    evidence=dict(beforeServiceOriginals=True,cutIndex=cutIndex,cut=cut,remainingAdvances=remaining,referenceNativeCalls=data['nativeCalls'],
+        expectedActions=actions,positiveServiceNonceBound=positiveNonces,maximumActions=64,maximumNonces=128,
+        measuredSeconds=item['seconds'],maximumFrameBytes=item['maximumFrameBytes'],providerBytes=len(raw(provider)),nativePeak=data['nativePeak'],reportSHA256=sha(report))
+    assert evidence['providerBytes']<=16<<10 and evidence['maximumFrameBytes']<=64<<10
+    write(BASE/'reports/schema-expectation.json',dict(evidence,lane=LANE,slice=SLICE));event('schema-feasibility-before-originals',evidence)
+
+def schema_resume(cut,result):
+    saved=cut['guidedProgress'][-1];progress=result['guidedProgress'];assert progress[0]==saved
+    for step in range(1,saved['pendingTokens']+1):
+        current=progress[step]
+        assert current['sampledTokens']==saved['sampledTokens'] and current['forcedTokens']==saved['forcedTokens']+step
+        assert current['accepts']==saved['accepts'] and current['pendingTokens']==saved['pendingTokens']-step
+        assert current['consumedTokens']==saved['consumedTokens']+step
+        assert current['modelOffsets']==[x+step for x in saved['modelOffsets']]
+    end=progress[-1]
+    assert end['terminalReason']=='complete' and end['interceptedEndings']==1 and end['pendingTokens']==0 and end['consumedTokens']<=32
+    assert json.loads(base64.b64decode(end['cumulativeEmittedBytes']))=={'value':'中'} and result['client']['registrations']==0
+
+def schema_reference(cut,result,reference):
+    assert reference['guidedProgress']==cut['guidedProgress']+result['guidedProgress'][1:]
+    assert len(cut['traces'])==len(result['traces'])==len(reference['traces'])==1
+    first=cut['traces'][0];resumed=result['traces'][0];whole=reference['traces'][0]
+    for key in ['kind','index','preparedTokens']:assert first[key]==resumed[key]==whole[key]
+    for key in ['offsets','inputDigests']:assert first[key]+resumed[key]==whole[key]
+    for key in ['calls','prepares']:assert first[key]+resumed[key]==whole[key]
+    assert reference['nativeCalls']==cut['nativeCalls']+result['nativeCalls']
+    expected=json.loads((BASE/'reports/schema-expectation.json').read_bytes())
+    assert reference['nativeCalls']==expected['referenceNativeCalls']
+    assert reference['admission']!=result['admission']
+
+def schema_cli_refusals(service):
+    options=[['--required-boundary','generating'],['--allowed-boundary','guided'],['--duplicate-exact'],['--fault','after-next-pass-native']]
+    for index,option in enumerate(options):
+        label='unsupported-socket-option-'+str(index)
+        item=command(label,['run',*selectionargs(service),'--host-receipt','/missing','--host-digest','missing','--client-receipt','/missing','--client-digest','missing',
+            '--host-secret-fd=-1','--client-secret-fd=-1','--report',BASE/'reports/not-created','--stop-with-pending-guided',*option],expected=1)
+        assert not item['frames'] and not item['exchanges'] and not (BASE/'reports/not-created').exists()
+        assert b'AuthorityError:scope' in (BASE/'logs'/(label+'.stderr.log')).read_bytes()
+    event('schema-cli-options-refuse-before-receipts',dict(cases=options,noCredentialsSupplied=True,noReceiptsRead=True,beforeRoles=True))
+
 def original(name,service,subject):
     assert not list((BASE/'roots').iterdir())
     pair=dict(name=name,boot=boot(),subject=subject,descriptor=service['descriptor'],descriptorSHA256=service['descriptorSHA256'],servicePID=service['pid'])
@@ -250,16 +319,22 @@ def run(pair,label,original=False,checkpoint=False,fault=None,boundary=None,expe
     report=BASE/'reports'/(label+'-native.json')
     args=['run',*pairargs(pair),*selectionargs(pair),'--report',report]
     if original:args+=['--original']
-    if checkpoint:args+=['--stop-after-calls','8','--leave-host-ahead']
+    if checkpoint:args+=(['--stop-after-calls','8'] if LANE=='ordinary' else ['--stop-with-pending-guided'])+['--leave-host-ahead']
     if fault:args+=['--fault',fault]
     item=command(label,args,pair=pair,checkpoint=checkpoint,boundary=boundary,expected=expected,denyInputs=not original,denyModel=terminal)
     if expected==0:
-        data=json.loads(report.read_bytes());assert data['nativePeak']<=128<<20
+        data=json.loads(report.read_bytes());assert data['nativePeak']<=128<<20 and data['actions']==len(item['exchanges'])
         assert data['admission']==pair['admission']['admission']
         assert data['hostDeadline']==pair['registrations']['host']['deadline'] and data['clientDeadline']==pair['registrations']['client']['deadline']
         assert data['provider']==json.loads((BASE/'reports/fixture-binding.json').read_bytes())['provider']
         if checkpoint:
-            assert data['nativeCalls']==8 and data['client']['high']>0 and not data['client']['terminal'] and data['hostHigh']>data['client']['high']
+            assert data['client']['high']>0 and not data['client']['terminal'] and data['hostHigh']>data['client']['high']
+            if LANE=='ordinary':assert data['nativeCalls']==8
+            else:
+                expected=json.loads((BASE/'reports/schema-expectation.json').read_bytes());v=data['guidedProgress'][-1]
+                assert guided_pending(v) and v==expected['cut'] and v['commit']==data['selectedCommit']
+                assert data['nativeCalls']>0 and data['actions']==expected['expectedActions']['cut']
+                assert any(json.loads(x).get('responseAppend',{}).get('text') for x in exact_events(data))
             pair['checkpoint']=data;pair['checkpointHashes']=hashes(pair);savepair(pair)
         return data,item
     assert not report.exists()
@@ -339,19 +414,24 @@ try:
     if not (BASE/'reports/keychains-before.json').exists():write(BASE/'reports/keychains-before.json',metadata())
     if PHASE.startswith('cleanup'):cleanup()
     elif PHASE=='retirement':
-        socket_probe();keychain_metadata_probe();fixture()
+        socket_probe()
+        if LANE=='ordinary':keychain_metadata_probe()
+        fixture()
         selected=selected_pairs([(90,150)]);svc=service_start('retirement',selected)
         pair=original('retirement',svc,selected[0]['subject']);retire(pair);service_stop();cleanup()
     else:
-        socket_probe();keychain_metadata_probe();fixture()
+        socket_probe()
+        if LANE=='ordinary':keychain_metadata_probe()
+        fixture()
         if PHASE!='loss':
             selected=selected_pairs([(600,900),(900,1200)])
             svc=service_start('positive',selected)
+            if LANE=='schema':schema_cli_refusals(svc)
             started=time.monotonic();pair=original('primary',svc,selected[0]['subject'])
             cut,first=run(pair,'primary-cut',original=True,checkpoint=True)
             setupSeconds=time.monotonic()-started
             assert serviceOwner[0].poll() is None and boot()==pair['boot'] and hashes(pair)==pair['checkpointHashes']
-            event('eight-call-checkpoint-and-joined-receiver',dict(report=cut,workerPID=first['pid'],exitCode=first['exitCode'],joined=first['joined'],setupSeconds=setupSeconds))
+            event('eight-call-checkpoint-and-joined-receiver' if LANE=='ordinary' else 'pending-guided-checkpoint-and-joined-receiver',dict(report=cut,workerPID=first['pid'],exitCode=first['exitCode'],joined=first['joined'],setupSeconds=setupSeconds))
             result,second=run(pair,'primary-resumed');before=cut['inbox']
             assert second['pid']!=first['pid'] and result['nativeCalls']>0 and result['client']['terminal']
             assert result['inbox'][:len(before)]==before and result['beforeInbox']==before
@@ -363,16 +443,19 @@ try:
             assert ca['receiverBoot']==cb['receiverBoot'] and ca['receiverIncarnation']!=cb['receiverIncarnation'] and ca['nonce']!=cb['nonce']
             assert a['sent']!=b['sent'] and serviceOwner[0].pid==pair['servicePID'] and serviceOwner[0].poll() is None
             assert ca['witness']==cb['witness']==pair['originals']['pin']
+            if LANE=='schema':schema_resume(cut,result)
             pair['terminal']=result;savepair(pair)
             event('same-service-fresh-receiver-native-continuation',dict(report=result,firstReceiver=first['pid'],freshReceiver=second['pid'],originalService=svc,firstChallenge=ca,freshChallenge=cb,sameBoot=True,noReboot=True))
             replay,third=run(pair,'primary-terminal-replay',terminal=True)
             assert replay['inbox']==result['inbox'] and replay['client']==result['client']
             assert all(replay[x]==0 for x in ['nativeCalls','modelLoads','modelPrepares','requestPreparations','templateCalls','requestTokenizations','issues','begins']) and not replay['traces']
+            if LANE=='schema':assert not replay['guidedProgress'] and replay['selectedCommit']==result['selectedCommit']
             event('model-free-terminal-replay-under-read-denial',dict(report=replay,denied=third['readDenials']))
             retire(pair)
             reference=original('reference',svc,selected[1]['subject']);ref,_=run(reference,'reference-uninterrupted',original=True)
             assert ref['provider']==result['provider'] and ref['client']['terminal'] and exact_events(ref)==exact_events(result)
-            event('exact-independent-reference',dict(exactEventBytes=True,eventCount=len(exact_events(ref)),eventStreamSHA256=hashlib.sha256(b''.join(exact_events(ref))).hexdigest(),report=ref))
+            if LANE=='schema':schema_reference(cut,result,ref)
+            event('exact-independent-reference',dict(exactEventBytes=True,exactFullNativeTrace=LANE=='schema',exactFullGuidedProgress=LANE=='schema',eventCount=len(exact_events(ref)),eventStreamSHA256=hashlib.sha256(b''.join(exact_events(ref))).hexdigest(),report=ref))
             retire(reference);positiveJoin=service_stop()
             # Each serial negative gets fresh originals. Budget follows measured setup.
             short=max(45,int(setupSeconds*2+20));assert short<=120
@@ -395,15 +478,22 @@ try:
                 event(name+'-active-independent-refusal',dict(witnessSample=sample,expiredDeadline=limit,otherDeadline=pair['registrations'][other]['deadline'],refusal=refusal['frames'][-1]))
                 retire(pair);service_stop()
         selected=selected_pairs([(300,450)]);svc=service_start('faults',selected);pair=original('faults',svc,selected[0]['subject'])
-        run(pair,'faults-cut',original=True,checkpoint=True)
+        active,_=run(pair,'faults-cut',original=True,checkpoint=True)
         if PHASE!='loss':
             _,delayed=run(pair,'after-native-delay',fault='after-native',boundary='delay',expected=1)
             assert delayed['seconds']>=11 and delayed['frames'][-1]['nativeCalls']==1
             assert all(x['accepted'] for x in delayed['exchanges'])
+            if LANE=='schema':
+                boundary=next(x for x in delayed['frames'] if x['stage']=='boundary')
+                assert boundary['guided']==active['guidedProgress'][-1] and guided_pending(boundary['guided'])
             event('completed-action-native-commit-age-refusal',dict(seconds=delayed['seconds'],refusal=delayed['frames'][-1],completedExchanges=len(delayed['exchanges']),diskState='requires-authenticated-reconciliation'))
         _,lost=run(pair,'actual-socket-loss',fault='before-native',boundary='loss',expected=1)
         assert lost['joinedServiceLoss']['joined'] and not lost['exchanges'][-1]['accepted']
         assert lost['frames'][-1]['stage']=='native-refusal'
+        if LANE=='schema':
+            boundary=next(x for x in lost['frames'] if x['stage']=='boundary')
+            assert guided_pending(boundary['guided']) and boundary['guided']['pendingTokens']>1
+            assert lost['frames'][-1]['nativeCalls']==1 and len(lost['exchanges'])>=3
         event('actual-socket-loss-at-next-exchange',dict(joinedOriginal=lost['joinedServiceLoss'],refusal=lost['frames'][-1],failedExchange=lost['exchanges'][-1],observationLimit='completed action remains bounded until next exchange; no continuous observation'))
         replacementSelection=selected_pairs([(300,450)]);replacement=service_start('replacement',replacementSelection)
         assert replacement['identity']!=pair['originals']['pin'];available=live_replacement_probe(replacement,replacementSelection[0]['subject'])
@@ -421,6 +511,6 @@ finally:
     service_stop()
     record['rootObservations']=[str(p.relative_to(BASE)) for p in (BASE/'roots').iterdir()]
     record['keychainPaths']=[str(p.relative_to(BASE)) for p in BASE.rglob('*.keychain-db')]
-    record['knownWorkersJoined']=all(p['joined'] for p in record['processes']);save()
+    record['knownWorkersJoined']=all(p['joined'] for p in record['processes']);record['serviceRequestCounts']={k:len(v) for k,v in serviceNonces.items()};save()
     controller(dict(kind='phase-result',evidence={k:v for k,v in record.items() if k!='processes'}))
 sys.exit(0 if record['result']=='PASS' else 1)

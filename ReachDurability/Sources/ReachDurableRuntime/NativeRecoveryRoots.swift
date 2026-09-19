@@ -50,7 +50,7 @@ extension RoleBootstrapCore {
 }
 public enum NativeRecoveryRoots {
     public static func provision(originals: Data, publicModel: String, request: String, model: String, prepared: String, output: String, fixture:AllowedRecoveryQualificationFactory? = nil, witness:NativeWitnessSelection? = nil) throws {
-        try witness?.requireOrdinary(fixture:fixture)
+        try witness?.requireArtifact(fixture:fixture)
         let records=try AuthorityCodec.decode(ClockPolicy.Originals.self,originals)
         let execution=try AuthorityCodec.decode(AuthorityExecution.self,LocalFiles.read(prepared,maximum:64<<10))
         let binding=try AuthorityCodec.decode(ProviderBinding.self,execution.provider)

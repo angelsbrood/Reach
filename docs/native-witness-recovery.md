@@ -1,8 +1,8 @@
 # Native recovery through a local witness
 
 The explicit `durable-native-recovery` qualification commands can obtain authority
-from the local `witness-access-qualification service`. This selection opens only
-ordinary text generation. A receiver can resume the same durable generation after
+from the local `witness-access-qualification service`. This selection supports ordinary text generation and the existing canonical
+schema-only guided lane. A receiver can resume the same durable generation after
 its predecessor exits while the original service remains alive in the same boot.
 It does not make the service or its private key persistent across an OS reboot.
 
@@ -31,9 +31,18 @@ its file cannot update a running receiver's selection.
 
 Each executable entry validates that the descriptor's selected pair equals the
 pair in the original scope, including both signed registrations and their full
-issuer pin. Matching only a key, subject or deadline is insufficient. Nonordinary
-bindings and the separate allowed-route qualification factory refuse before
-credential access, native construction or executable storage work. Bounded
+issuer pin. Matching only a key, subject or deadline is insufficient. Complete binding
+validation reconstructs the public JSON-schema specification; a guided route tag
+alone cannot admit structural tags, literal fixtures or other guided kinds.
+Ordinary input/output bounds remain 256/20 tokens; schema input/generated-input
+bounds remain 256/32, including intercepted EOS. Both use prefill step 256.
+
+Required, allowed and combined schema/tool routes, and the separate prescribed
+qualification factory, refuse before credential access, native construction or
+executable storage work. The same early check rejects tool-boundary options,
+duplicate delivery and the next-pass native fault. `--stop-with-pending-guided`
+requires a schema lane in the exact authenticated original receipt provision.
+This option/route join precedes leases and unlock-secret reads; bounded receipt
 metadata reads needed to make that decision are allowed.
 
 `init` and original-key retirement keep their existing ownership checks. They do
@@ -69,9 +78,13 @@ failure now produces the existing bounded `native-refusal` counters as well.
 
 `Tools/NativeWitnessRecovery/run.py` imports the existing VM lifecycle primitives.
 Supply the built normal daemon, unchanged service product, selected cached tiny
-ordinary fixture and metallib, an owned scratch directory, a private retained
+fixture and metallib, an owned scratch directory, a private retained
 evidence directory, the authenticated opening baseline and the free-space sample
-from before scratch preparation. Its `--help` lists the required arguments. `--campaign loss` and
+from before scratch preparation. `--lane ordinary|schema` is closed and defaults
+to ordinary. The lane follows every phase, including cleanup, and is recorded in
+inputs and evidence. Ownership prefixes are fixed: S107 for ordinary and S108 for
+schema; the runner does not accept an arbitrary prefix. Its `--help` lists the
+required arguments. `--campaign loss` and
 `--campaign retirement` select focused fresh-original retries; their PASS covers
 only those gates, and must be combined with authenticated unchanged evidence
 for a complete qualification.
@@ -85,11 +98,24 @@ The guest probes socket access before originals. Native role operations retain
 the accepted nonsecret default/search-list Keychain metadata APIs; service and
 network-probe processes additionally deny data opens beneath default Keychains.
 
-The campaign freezes independent primary/reference preparation before admission,
-cuts and joins an eight-call receiver with a positive prefix and host-ahead batch,
-then resumes through the surviving service. It checks positive-offset restore,
-replay before new native work and exact event bytes against the independent
-reference. Terminal replay denies model and original-request reads. Serial fresh
+Both lanes freeze independent primary/reference preparation before admission.
+Ordinary retains its eight-call cut. Schema uses the complete retained tiny-Llama
+schema fixture and first runs the normal daemon's `probe-guided-fixture`, before
+service originals or roles exist. This freezes a semantic cut with a visible
+prefix and pending forced suffix, accepted-EOS completion, and measured frame,
+action and nonce headroom. Historical call counts are not an acceptance gate.
+
+The campaign kills and joins a receiver with a committed host batch ahead of its
+client, then resumes through the surviving original service. It checks a fresh
+receiver incarnation, nonce and original r0, positive-offset restore, replay
+before native work and exact ordered event payload bytes against the independent
+reference. Schema additionally checks exact initial saved guided state, one
+forced-token consumption per advance without resampling, complete native traces
+and guided progress, and one accepted EOS with no pending tokens. A valid JSON
+prefix alone does not establish successful completion.
+
+Terminal replay denies model and original-request reads and performs no native
+or guided work. Serial fresh
 pairs check independent original expiry, an eleven-second pause after native work,
 actual service loss at a subsequent exchange and an available replacement issuer.
 

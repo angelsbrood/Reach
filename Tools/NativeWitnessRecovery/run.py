@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""S107: one disposable guest, direct local witness, fresh receiver continuation."""
+"""Ordinary/schema recovery in one disposable guest through a direct local witness."""
 import argparse,hashlib,io,json,os,re,select,shutil,stat,subprocess,sys,tarfile,time,traceback
 from pathlib import Path
 sys.dont_write_bytecode=True
@@ -10,10 +10,11 @@ parser=argparse.ArgumentParser(description=__doc__)
 for name in ['scratch','fixtures','executable','service','metallib','retain','opening-baseline']:parser.add_argument('--'+name,type=Path,required=True)
 parser.add_argument('--baseline-free',type=int,required=True)
 parser.add_argument('--label',required=True)
+parser.add_argument('--lane',choices=['ordinary','schema'],default='ordinary')
 parser.add_argument('--campaign',choices=['full','loss','retirement'],default='full')
-a=parser.parse_args();base=a.scratch.resolve(strict=True);fixtures=a.fixtures.resolve(strict=True)
-assert str(base).startswith('/private/tmp/reach-s107.') and base.stat().st_uid==os.getuid() and stat.S_IMODE(base.stat().st_mode)==0o700
-assert str(fixtures).startswith('/private/tmp/reach-s93.s107.') and fixtures.name=='fixtures'
+a=parser.parse_args();sliceID={'ordinary':'s107','schema':'s108'}[a.lane];base=a.scratch.resolve(strict=True);fixtures=a.fixtures.resolve(strict=True)
+assert str(base).startswith('/private/tmp/reach-'+sliceID+'.') and base.stat().st_uid==os.getuid() and stat.S_IMODE(base.stat().st_mode)==0o700
+assert str(fixtures).startswith('/private/tmp/reach-s93.'+sliceID+'.') and fixtures.name=='fixtures'
 assert re.fullmatch('[a-z0-9-]+',a.label)
 root=base/('native-'+a.label);root.mkdir(mode=0o700)
 rig=json.loads(a.opening_baseline.read_bytes())['rigInputs']
@@ -31,7 +32,7 @@ class NativeVM(VM):
     def baseline(self,label):
         super().baseline(label)
         assert all(sha(path)==value['expectedSHA256'] for path,value in rig.items())
-        write(self.e/('s107-rig-'+label+'.json'),rig)
+        write(self.e/(sliceID+'-rig-'+label+'.json'),rig)
     def sample(self):
         super().sample()
         owned=sum(allocation(p) for p in [base,fixtures.parent,a.retain]);fixture=allocation(fixtures.parent)
@@ -54,7 +55,7 @@ class NativeVM(VM):
     def phase(self,phase):
         # The supervisor uses the existing Tart control pipe. Apply each complete
         # sandbox exactly once to service/receiver children, including read denials.
-        cmd=[str(TART),'exec','-i',self.name,'/bin/launchctl','asuser','503','/usr/bin/sudo','-H','-u','threshold-auto','/usr/bin/python3',self.guest+'/guest.py',self.guest,phase]
+        cmd=[str(TART),'exec','-i',self.name,'/bin/launchctl','asuser','503','/usr/bin/sudo','-H','-u','threshold-auto','/usr/bin/python3',self.guest+'/guest.py',self.guest,phase,a.lane]
         err=(self.e/(phase+'.stderr.log')).open('xb');started=time.monotonic()
         p=subprocess.Popen(cmd,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=err,env=self.env)
         self.commands.append(dict(label=phase,command=cmd));failure=None
@@ -63,6 +64,7 @@ class NativeVM(VM):
                 assert time.monotonic()-started<1200
                 value=self.frame(p)
                 if value is None:break
+                assert value['lane']==a.lane and value['slice']==sliceID
                 resources=value['resources'];self.guestAllocated=resources['guestAllocatedBytes'];self.guestFixtures=resources['guestFixtureAllocatedBytes'];self.sample()
                 kind=value['kind']
                 if kind=='event':
@@ -82,9 +84,10 @@ class NativeVM(VM):
         finally:
             err.close();p.stdin.close();p.stdout.close()
             self.children.append(dict(label=phase,pid=p.pid,exitCode=p.returncode,joined=True,failure=failure,seconds=time.monotonic()-started));self.sample();self.save()
-vm=NativeVM(root,'reach-s107-'+base.name.split('.',1)[1]+'-'+a.label)
-result=dict(result='RUNNING',campaign=a.campaign,scope={'full':'full native socket campaign','loss':'fresh active loss and available replacement only','retirement':'original-role retirement and unrelated sentinel only'}[a.campaign],vm=vm.name,guest=vm.guest,noOSReboot=True,directGuestSocket=True)
-write(root/'inputs.json',dict(executableSHA256=sha(a.executable),serviceSHA256=sha(a.service),metallibSHA256=sha(a.metallib),sources={p.name:sha(p) for p in PRODUCT.glob('*.py')},existingVMRecipeSHA256=sha(PRODUCT.parent/'CrossBootRoleLifecycle/vm.py'),fixtureSHA256={str(p.relative_to(fixtures)):sha(p) for p in fixtures.rglob('*') if p.is_file()},initialFreeBeforeCacheCopy=a.baseline_free))
+vm=NativeVM(root,'reach-'+sliceID+'-'+base.name.split('.',1)[1]+'-'+a.label)
+result=dict(result='RUNNING',lane=a.lane,slice=sliceID,campaign=a.campaign,scope={'full':'full native socket campaign','loss':'fresh active loss and available replacement only','retirement':'original-role retirement and unrelated sentinel only'}[a.campaign],vm=vm.name,guest=vm.guest,noOSReboot=True,directGuestSocket=True)
+selectedFixtures=([fixtures/'model'/name for name in ['profile.json','weights.safetensors','config.json','template.txt','tokenizer.json']]+[fixtures/'requests/native-guided.json']) if a.lane=='schema' else [p for p in fixtures.rglob('*') if p.is_file()]
+write(root/'inputs.json',dict(lane=a.lane,slice=sliceID,executableSHA256=sha(a.executable),serviceSHA256=sha(a.service),metallibSHA256=sha(a.metallib),sources={p.name:sha(p) for p in PRODUCT.glob('*.py')},existingVMRecipeSHA256=sha(PRODUCT.parent/'CrossBootRoleLifecycle/vm.py'),fixtureSHA256={str(p.relative_to(fixtures)):sha(p) for p in selectedFixtures},initialFreeBeforeCacheCopy=a.baseline_free))
 payload=False;clean=False
 
 def collect(label):
@@ -99,12 +102,12 @@ def collect(label):
                 assert member.size<=192<<20;target.parent.mkdir(exist_ok=True,parents=True,mode=0o700)
                 target.write_bytes(archive.extractfile(member).read());target.chmod(0o600)
 try:
-    vm.clone();vm.start('s107-initial-boot')
+    vm.clone();vm.start(sliceID+'-initial-boot')
     vm.rpc('prepare-owned-guest','set -eu\n[[ $EUID == 0 ]]\n[[ ! -e '+vm.guest+' && ! -L '+vm.guest+' ]]\n/bin/mkdir -m 700 '+vm.guest+'\n/usr/sbin/chown 503:20 '+vm.guest+'\n')
     bundle=root/'payload.tar'
     with tarfile.open(bundle,'w') as archive:
         files=[(a.executable,'bin/reachd',0o700),(a.service,'bin/witness-access-qualification',0o700),(a.metallib,'bin/mlx.metallib',0o600),(PRODUCT/'guest.py','guest.py',0o600)]
-        files += [(p,'fixtures/'+str(p.relative_to(fixtures)),0o600) for p in fixtures.rglob('*') if p.is_file()]
+        files += [(p,'fixtures/'+str(p.relative_to(fixtures)),0o600) for p in selectedFixtures]
         for source,name,mode in files:
             info=archive.gettarinfo(str(source),arcname=name);info.uid=503;info.gid=20;info.mode=mode
             with source.open('rb') as data:archive.addfile(info,data)
@@ -138,7 +141,7 @@ finally:
         if vm.boot is not None:
             try:
                 if payload:vm.rpc('remove-owned-payload','set -eu\n[[ $EUID == 503 ]]\n[[ -d '+vm.guest+' && ! -L '+vm.guest+' ]]\n[[ $(/usr/bin/stat -f %u '+vm.guest+') == 503 ]]\n/bin/rm -rf '+vm.guest+'\n[[ ! -e '+vm.guest+' && ! -L '+vm.guest+' ]]\nprint OWNED_PAYLOAD_ABSENT\n',user=True)
-                vm.stop('s107-final-stop')
+                vm.stop(sliceID+'-final-stop')
             except BaseException as error:result['stopFailure']=str(error)
         if vm.boot is None and vm.target.exists():
             try:vm.dispose()

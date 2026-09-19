@@ -16,23 +16,25 @@ public struct NativeWitnessSelection {
         return try Self(path:path,expectedSHA256:expectedSHA256)
     }
     public func originals(subject:String) throws -> Data {try AuthorityCodec.encode(descriptor.select(subject:subject))}
-    func requireOrdinary(fixture:AllowedRecoveryQualificationFactory?) throws {
+    func requireArtifact(fixture:AllowedRecoveryQualificationFactory?) throws {
         guard fixture==nil else {throw AuthorityError.scope}
     }
     func validate(originals:Originals,binding:ProviderBinding,fixture:AllowedRecoveryQualificationFactory?) throws {
-        try requireOrdinary(fixture:fixture);try NativeRecoveryRuntime.validateFixture(binding)
-        guard binding.lane.route == .ordinary else {throw AuthorityError.scope}
+        try requireArtifact(fixture:fixture);try NativeRecoveryRuntime.validateFixture(binding)
+        guard [.ordinary,.guided].contains(binding.lane.route) else {throw AuthorityError.scope}
         let subject=try originals.records().host.subject
         guard try descriptor.select(subject:subject)==originals else {throw AuthorityError.scope}
     }
-    func validate(_ provision:AuthorityProvision,fixture:AllowedRecoveryQualificationFactory?) throws {
-        try requireOrdinary(fixture:fixture);try provision.validate()
+    @discardableResult func validate(_ provision:AuthorityProvision,fixture:AllowedRecoveryQualificationFactory?) throws -> ProviderBinding {
+        try requireArtifact(fixture:fixture);try provision.validate()
         guard provision.native,let execution=provision.execution else {throw AuthorityError.scope}
-        try validate(originals:provision.originals,binding:AuthorityCodec.decode(ProviderBinding.self,execution.provider),fixture:fixture)
+        let binding=try AuthorityCodec.decode(ProviderBinding.self,execution.provider)
+        try validate(originals:provision.originals,binding:binding,fixture:fixture)
+        return binding
     }
-    func requireOrdinaryOptions(stopWithPendingGuided:Bool,requiredBoundary:String,allowedBoundary:String,duplicateExact:Bool,fault:String,fixture:AllowedRecoveryQualificationFactory?) throws {
-        try requireOrdinary(fixture:fixture)
-        guard !stopWithPendingGuided,requiredBoundary=="none",allowedBoundary=="none",!duplicateExact,fault != "after-next-pass-native" else {throw AuthorityError.scope}
+    func requireSupportedOptions(requiredBoundary:String,allowedBoundary:String,duplicateExact:Bool,fault:String,fixture:AllowedRecoveryQualificationFactory?) throws {
+        try requireArtifact(fixture:fixture)
+        guard requiredBoundary=="none",allowedBoundary=="none",!duplicateExact,fault != "after-next-pass-native" else {throw AuthorityError.scope}
     }
     func exchange(_ action:GenerationAuthorityAction,clock:any PolicyClock,
                   transport:(Data,UnixEndpoint,IODeadline)throws->Data = {try SocketIO.exchange($0,endpoint:$1,deadline:$2)},
@@ -78,12 +80,14 @@ extension NativeRecoveryRoots {
     /// Bounded metadata only: reject socket selection/route before leases, secrets,
     /// Keychain access, native construction or executable storage operations.
     static func validateWitness(_ witness:NativeWitnessSelection?,hostReceipt:String,hostDigest:String,
-                                clientReceipt:String,clientDigest:String,fixture:AllowedRecoveryQualificationFactory?) throws {
+                                clientReceipt:String,clientDigest:String,fixture:AllowedRecoveryQualificationFactory?,stopWithPendingGuided:Bool=false) throws {
         guard let witness else {return}
-        try witness.requireOrdinary(fixture:fixture)
+        try witness.requireArtifact(fixture:fixture)
         let h=try receipt(hostReceipt,expectedDigest:hostDigest).ready.core
         let c=try receipt(clientReceipt,expectedDigest:clientDigest).ready.core
         guard h.role == .host,c.role == .client,let provision=h.authority,provision==c.authority else {throw AuthorityError.scope}
-        try witness.validate(provision,fixture:fixture)
+        let binding=try witness.validate(provision,fixture:fixture)
+        // Join cut intent to the authenticated original metadata before leases or keys.
+        guard !stopWithPendingGuided || binding.lane.route == .guided else {throw AuthorityError.scope}
     }
 }

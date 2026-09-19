@@ -123,8 +123,8 @@ public enum NativeRecoveryRuntime {
         hostSecret: Int32, clientSecret: Int32, original: Bool, stopAfterCalls: Int, leaveHostAhead: Bool,
         report: String, fault: String, stopWithPendingGuided: Bool=false,
         requiredBoundary: String="none", duplicateExact: Bool=false,allowedBoundary:String="none",fixture:AllowedRecoveryQualificationFactory? = nil,witness:NativeWitnessSelection? = nil) throws {
-        try witness?.requireOrdinaryOptions(stopWithPendingGuided:stopWithPendingGuided,requiredBoundary:requiredBoundary,allowedBoundary:allowedBoundary,duplicateExact:duplicateExact,fault:fault,fixture:fixture)
-        try NativeRecoveryRoots.validateWitness(witness,hostReceipt:hostReceipt,hostDigest:hostDigest,clientReceipt:clientReceipt,clientDigest:clientDigest,fixture:fixture)
+        try witness?.requireSupportedOptions(requiredBoundary:requiredBoundary,allowedBoundary:allowedBoundary,duplicateExact:duplicateExact,fault:fault,fixture:fixture)
+        try NativeRecoveryRoots.validateWitness(witness,hostReceipt:hostReceipt,hostDigest:hostDigest,clientReceipt:clientReceipt,clientDigest:clientDigest,fixture:fixture,stopWithPendingGuided:stopWithPendingGuided)
 
         guard (0...20).contains(stopAfterCalls), ["none","before-native","after-native","after-commit","before-publication","after-next-pass-native"].contains(fault),
               ["none","generating","ready","emitted"].contains(requiredBoundary),
