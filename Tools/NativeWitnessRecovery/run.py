@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Ordinary/schema recovery in one disposable guest through a direct local witness."""
+"""Ordinary/schema/required recovery in one disposable guest through a direct local witness."""
 import argparse,hashlib,io,json,os,re,select,shutil,stat,subprocess,sys,tarfile,time,traceback
 from pathlib import Path
 sys.dont_write_bytecode=True
@@ -10,9 +10,9 @@ parser=argparse.ArgumentParser(description=__doc__)
 for name in ['scratch','fixtures','executable','service','metallib','retain','opening-baseline']:parser.add_argument('--'+name,type=Path,required=True)
 parser.add_argument('--baseline-free',type=int,required=True)
 parser.add_argument('--label',required=True)
-parser.add_argument('--lane',choices=['ordinary','schema'],default='ordinary')
+parser.add_argument('--lane',choices=['ordinary','schema','required'],default='ordinary')
 parser.add_argument('--campaign',choices=['full','loss','retirement'],default='full')
-a=parser.parse_args();sliceID={'ordinary':'s107','schema':'s108'}[a.lane];base=a.scratch.resolve(strict=True);fixtures=a.fixtures.resolve(strict=True)
+a=parser.parse_args();sliceID={'ordinary':'s107','schema':'s108','required':'s109'}[a.lane];base=a.scratch.resolve(strict=True);fixtures=a.fixtures.resolve(strict=True)
 assert str(base).startswith('/private/tmp/reach-'+sliceID+'.') and base.stat().st_uid==os.getuid() and stat.S_IMODE(base.stat().st_mode)==0o700
 assert str(fixtures).startswith('/private/tmp/reach-s93.'+sliceID+'.') and fixtures.name=='fixtures'
 assert re.fullmatch('[a-z0-9-]+',a.label)
@@ -86,7 +86,7 @@ class NativeVM(VM):
             self.children.append(dict(label=phase,pid=p.pid,exitCode=p.returncode,joined=True,failure=failure,seconds=time.monotonic()-started));self.sample();self.save()
 vm=NativeVM(root,'reach-'+sliceID+'-'+base.name.split('.',1)[1]+'-'+a.label)
 result=dict(result='RUNNING',lane=a.lane,slice=sliceID,campaign=a.campaign,scope={'full':'full native socket campaign','loss':'fresh active loss and available replacement only','retirement':'original-role retirement and unrelated sentinel only'}[a.campaign],vm=vm.name,guest=vm.guest,noOSReboot=True,directGuestSocket=True)
-selectedFixtures=([fixtures/'model'/name for name in ['profile.json','weights.safetensors','config.json','template.txt','tokenizer.json']]+[fixtures/'requests/native-guided.json']) if a.lane=='schema' else [p for p in fixtures.rglob('*') if p.is_file()]
+selectedFixtures=([fixtures/'model'/name for name in ['profile.json','weights.safetensors','config.json','template.txt','tokenizer.json']]+[fixtures/('requests/'+{'schema':'native-guided.json','required':'native-required.json'}[a.lane])]) if a.lane!='ordinary' else [p for p in fixtures.rglob('*') if p.is_file()]
 write(root/'inputs.json',dict(lane=a.lane,slice=sliceID,executableSHA256=sha(a.executable),serviceSHA256=sha(a.service),metallibSHA256=sha(a.metallib),sources={p.name:sha(p) for p in PRODUCT.glob('*.py')},existingVMRecipeSHA256=sha(PRODUCT.parent/'CrossBootRoleLifecycle/vm.py'),fixtureSHA256={str(p.relative_to(fixtures)):sha(p) for p in selectedFixtures},initialFreeBeforeCacheCopy=a.baseline_free))
 payload=False;clean=False
 
@@ -101,7 +101,41 @@ def collect(label):
             else:
                 assert member.size<=192<<20;target.parent.mkdir(exist_ok=True,parents=True,mode=0o700)
                 target.write_bytes(archive.extractfile(member).read());target.chmod(0o600)
+def host_required_probe():
+    folder=vm.e/'host-required';folder.mkdir(mode=0o700);(folder/'tmp').mkdir(mode=0o700)
+    profile='(version 1)(allow default)(deny network*)(deny file-read-data (subpath '+json.dumps(str(Path.home()/'Library/Keychains'))+') (literal '+json.dumps(str(PRODUCT.parent.parent/'.env.local'))+') (subpath '+json.dumps(str(PRODUCT.parent.parent/'tasks'))+'))'
+    prior=vm.env;vm.env=dict(prior,TMPDIR=str(folder/'tmp'))
+    try:
+        for name in ['primary','reference']:
+            vm.run('host-prepare-'+name,['/usr/bin/sandbox-exec','-p',profile,str(a.executable),'durable-native-recovery','prepare-fixture',
+                '--model',str(fixtures/'model'),'--request',str(fixtures/'requests/native-required.json'),'--operation','s109-original-common-operation',
+                '--output',str(folder/(name+'-prepared.json')),'--public-model',str(folder/(name+'-model.json'))])
+        assert (folder/'primary-prepared.json').read_bytes()==(folder/'reference-prepared.json').read_bytes()
+        assert (folder/'primary-model.json').read_bytes()==(folder/'reference-model.json').read_bytes()
+        report=folder/'required-feasibility.json'
+        _,output,_=vm.run('host-required-feasibility',['/usr/bin/sandbox-exec','-p',profile,str(a.executable),'durable-native-recovery','probe-required-fixture',
+            '--model',str(fixtures/'model'),'--prepared',str(folder/'primary-prepared.json'),'--report',str(report)])
+        data=json.loads(report.read_bytes());assert output==report.read_bytes()+b'\n' and len(report.read_bytes())<=65536
+        cut=data['cut'];ready=data['ready'];m=data['consumedTokens'];c=cut['guided']['consumedTokens']
+        assert data['beforeOriginals'] and cut['phase']=='generating' and c>0 and cut['guided']['pendingTokens']>1 and m-c>1
+        assert cut['whole'] and all(x>0 for x in cut['guided']['modelOffsets'])
+        assert ready['phase']=='ready' and ready['guided']['terminalReason']=='complete' and ready['guided']['interceptedEndings']==1 and ready['guided']['pendingTokens']==0
+        assert 1<=m<=48 and 1<=data['preparedTokens']<=512 and data['initialPrepareCalls']==(data['preparedTokens']+255)//256<=2
+        assert data['restoredReadyCalls']==data['readyDeliveryCalls']==0 and data['nativePeak']<=128<<20
+        assert data['initialPrepareNanoseconds']<10_000_000_000 and data['maximumStepNanoseconds']<10_000_000_000
+        assert data['providerBytes']<=16384 and data['maximumStepFrameBytes']<=65536 and 2*m+16<=112 and m+3<=51
+        for name in data['steps']:
+            step=report.parent/(report.name+'.steps')/name
+            assert step.parent==report.parent/(report.name+'.steps') and step.stat().st_size<=65536
+        write(folder/'expectation.json',dict(lane=a.lane,beforeVMClone=True,beforeOriginals=True,consumedTokens=m,cutConsumed=c,pendingTokens=cut['guided']['pendingTokens'],
+            positiveRequests=2*m+16,largestOwner=m+3,reportSHA256=sha(report),preparedSHA256=sha(folder/'primary-prepared.json'),
+            frameBytes=report.stat().st_size,nativePeak=data['nativePeak'],initialPrepareNanoseconds=data['initialPrepareNanoseconds'],
+            maximumStepNanoseconds=data['maximumStepNanoseconds'],sandbox=profile,scope='Current host preparation/probe only; guest binding and measurements are established independently.'))
+        return sha(folder/'expectation.json')
+    finally:vm.env=prior
+
 try:
+    if a.lane=='required':result['hostRequiredProbeSHA256']=host_required_probe()
     vm.clone();vm.start(sliceID+'-initial-boot')
     vm.rpc('prepare-owned-guest','set -eu\n[[ $EUID == 0 ]]\n[[ ! -e '+vm.guest+' && ! -L '+vm.guest+' ]]\n/bin/mkdir -m 700 '+vm.guest+'\n/usr/sbin/chown 503:20 '+vm.guest+'\n')
     bundle=root/'payload.tar'

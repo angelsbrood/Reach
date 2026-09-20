@@ -1,5 +1,6 @@
 import XCTest
 import Foundation
+import Dispatch
 import Darwin
 import CryptoKit
 import DurableStoreBootstrap
@@ -62,8 +63,8 @@ final class NativeWitnessTests:XCTestCase {
         XCTAssertThrowsError(try s.exchange(a,clock:f.receiverClock,transport:{_,_,_ in transports+=1;return Data()},report:{_ in}))
         XCTAssertEqual(transports,0);XCTAssertThrowsError(try a.check());XCTAssertThrowsError(try f.owner.begin(.advance))
     }
-    func testToolProvisionRefusesBeforeModelAndRequestRead() throws {
-        for route in ["required","allowed","combined"] {
+    func testAllowedAndCombinedProvisionRefuseBeforeModelAndRequestRead() throws {
+        for route in ["allowed","combined"] {
             let f=try NativeRecoveryFixture(request:ArtifactFixtures.request(route,maximum:16)),(s,_,_)=try selection(f)
             let prepared=f.base+"/prepared",output=f.base+"/not-created"
             try LocalFiles.writeNew(AuthorityCodec.encode(f.scope.provision.execution!),to:prepared)
@@ -83,7 +84,7 @@ final class NativeWitnessTests:XCTestCase {
         XCTAssertEqual(loads,0)
     }
     func testMetadataRouteRefusalPrecedesCredentialsAtExecutableEntries() throws {
-        let f=try NativeRecoveryFixture(request:ArtifactFixtures.request("required",maximum:16)),(s,_,_)=try selection(f)
+        let f=try NativeRecoveryFixture(request:ArtifactFixtures.request("allowed",maximum:16)),(s,_,_)=try selection(f)
         let h=try LifecycleFixture(role:.host,unlock:true,authority:f.scope.provision),c=try LifecycleFixture(unlock:true,authority:f.scope.provision)
         let hd=try XCTUnwrap(h.digest),cd=try XCTUnwrap(c.digest)
         let checks:[()throws->Void]=[
@@ -95,8 +96,8 @@ final class NativeWitnessTests:XCTestCase {
         // No selection leaves the old pipe entry path in control of metadata.
         try NativeRecoveryRoots.validateWitness(nil,hostReceipt:"/missing",hostDigest:"",clientReceipt:"/missing",clientDigest:"",fixture:nil)
     }
-    func testOrdinaryAndCanonicalSchemaSelectionsUseAuthenticatedOriginalMetadata() throws {
-        for route in ["ordinary","guided"] {
+    func testSupportedSelectionsUseAuthenticatedOriginalMetadata() throws {
+        for route in ["ordinary","guided","required"] {
             let f=try NativeRecoveryFixture(request:ArtifactFixtures.request(route,maximum:route == "guided" ? 32 : 16)),(s,_,_)=try selection(f)
             XCTAssertEqual(try AuthorityCodec.encode(s.validate(f.scope.provision,fixture:nil)),try AuthorityCodec.encode(f.provider))
             let h=try LifecycleFixture(role:.host,unlock:true,authority:f.scope.provision),c=try LifecycleFixture(unlock:true,authority:f.scope.provision)
@@ -104,6 +105,12 @@ final class NativeWitnessTests:XCTestCase {
             try NativeRecoveryRoots.validateWitness(s,hostReceipt:h.receipt,hostDigest:hd,clientReceipt:c.receipt,clientDigest:cd,fixture:nil)
             if route == "guided" {
                 try NativeRecoveryRoots.validateWitness(s,hostReceipt:h.receipt,hostDigest:hd,clientReceipt:c.receipt,clientDigest:cd,fixture:nil,stopWithPendingGuided:true)
+            }
+            if route == "required" {
+                for boundary in ["generating","ready","emitted"] {
+                    try NativeRecoveryRoots.validateWitness(s,hostReceipt:h.receipt,hostDigest:hd,clientReceipt:c.receipt,clientDigest:cd,fixture:nil,requiredBoundary:boundary)
+                }
+                try NativeRecoveryRoots.validateWitness(s,hostReceipt:h.receipt,hostDigest:hd,clientReceipt:c.receipt,clientDigest:cd,fixture:nil,duplicateExact:true)
             }
             XCTAssertThrowsError(try NativeRecoveryRoots.validateWitness(s,hostReceipt:h.receipt,hostDigest:String(repeating:"0",count:64),clientReceipt:c.receipt,clientDigest:cd,fixture:nil,stopWithPendingGuided:true))
             XCTAssertEqual(h.provider.loads,0);XCTAssertEqual(c.provider.loads,0);XCTAssertEqual(f.counter.models,0)
@@ -138,9 +145,9 @@ final class NativeWitnessTests:XCTestCase {
         XCTAssertEqual(h.provider.loads,0);XCTAssertEqual(c.provider.loads,0);XCTAssertEqual(f.counter.models,0)
     }
     func testUnsupportedSocketOptionsRefuseBeforeReceiptAndCredentialAccess() throws {
-        for route in ["ordinary","guided"] {
+        for route in ["ordinary","guided","required"] {
             let f=try NativeRecoveryFixture(request:ArtifactFixtures.request(route,maximum:16)),(s,_,_)=try selection(f)
-            for options in [("generating","none",false,"none"),("none","guided",false,"none"),("none","none",true,"none"),("none","none",false,"after-next-pass-native")] {
+            for options in [("unknown","none",false,"none"),("none","guided",false,"none"),("none","none",false,"after-next-pass-native")] {
                 XCTAssertThrowsError(try NativeRecoveryRuntime.run(hostReceipt:"/missing",hostDigest:"",clientReceipt:"/missing",clientDigest:"",hostSecret:-1,clientSecret:-1,original:false,stopAfterCalls:0,leaveHostAhead:false,report:"/missing",fault:options.3,stopWithPendingGuided:route == "guided",requiredBoundary:options.0,duplicateExact:options.2,allowedBoundary:options.1,witness:s)) {XCTAssertEqual($0 as? AuthorityError,.scope)}
             }
             XCTAssertEqual(f.counter.models,0)
@@ -154,8 +161,92 @@ final class NativeWitnessTests:XCTestCase {
         XCTAssertThrowsError(try NativeRecoveryRoots.validateWitness(s,hostReceipt:h.receipt,hostDigest:XCTUnwrap(h.digest),clientReceipt:wrong.receipt,clientDigest:XCTUnwrap(wrong.digest),fixture:nil,stopWithPendingGuided:true)) {XCTAssertEqual($0 as? AuthorityError,.scope)}
         XCTAssertEqual(h.provider.loads+c.provider.loads+wrong.provider.loads,0)
     }
-    func testOriginalR0AndSameOwnerCapacityAcrossRenewals() throws {
+    func testRequiredTagStillRequiresCanonicalSoleToolBinding() throws {
+        let f=try NativeRecoveryFixture(request:RequiredNativeRecoveryTests.request()),(s,_,_)=try selection(f)
+        try s.validate(f.scope.provision,fixture:nil)
+        guard case .required(let original,let tokens)=f.provider.lane else {return XCTFail("required fixture")}
+        for index in 0..<6 {
+            var lane=original
+            switch index {
+            case 0:lane.tools.append(.init(name:"b",schemaJSON:lane.tools[0].schemaJSON))
+            case 1:lane.tools[0].schemaJSON=lane.tools[0].schemaJSON.replacingOccurrences(of:"\"maximum\":7",with:"\"maximum\":8")
+            case 2:lane.specification.source=" "+lane.specification.source
+            case 3:lane.requestIdentity="replacement-request"
+            case 4:lane.options.model.prefillStepSize=64
+            default:lane.options.model.maximumTokens=49
+            }
+            var binding=f.provider;binding.lane = .required(lane,tokens:tokens)
+            XCTAssertThrowsError(try s.validate(originals:f.scope.provision.originals,binding:binding,fixture:nil))
+        }
+        XCTAssertEqual(f.counter.models,0)
+    }
+    func testRequiredIntentJoinPrecedesHeldLeasesAndCredentialConsumption() throws {
+        for route in ["ordinary","guided","required"] {
+            let f=try NativeRecoveryFixture(request:ArtifactFixtures.request(route,maximum:16)),(s,_,_)=try selection(f)
+            let h=try LifecycleFixture(role:.host,unlock:true,authority:f.scope.provision),c=try LifecycleFixture(unlock:true,authority:f.scope.provision)
+            let hd=try XCTUnwrap(h.digest),cd=try XCTUnwrap(c.digest)
+            let (_,hostLease)=try RoleLifecycleLease.selectNativeRecovery(receipt:h.receipt,expectedDigest:hd)
+            let (_,clientLease)=try RoleLifecycleLease.selectNativeRecovery(receipt:c.receipt,expectedDigest:cd)
+            defer {hostLease.close();clientLease.close()}
+            let secret=f.base+"/intent-secret",report=f.base+"/not-created"
+            try LocalFiles.writeNew(Data(repeating:65,count:64),to:secret)
+            let fd=open(secret,O_RDONLY|O_NOFOLLOW);XCTAssertGreaterThanOrEqual(fd,0);defer {close(fd)}
+            // original, numeric cut, pending guided, required boundary, duplicate
+            var invalid:[(Bool,Int,Bool,String,Bool)]=[]
+            if route != "required" {
+                invalid += ["generating","ready","emitted"].map{(false,0,false,$0,false)}
+                invalid.append((false,0,false,"none",true))
+            } else {
+                invalid += [(true,0,false,"none",true),(false,1,false,"none",true),(false,0,true,"none",true),
+                            (false,0,true,"none",false),(false,1,false,"generating",false),(false,0,true,"ready",false)]
+                invalid += ["generating","ready","emitted"].map{(false,0,false,$0,true)}
+            }
+            for option in invalid {
+                XCTAssertThrowsError(try NativeRecoveryRuntime.run(hostReceipt:h.receipt,hostDigest:hd,clientReceipt:c.receipt,clientDigest:cd,hostSecret:fd,clientSecret:fd,original:option.0,stopAfterCalls:option.1,leaveHostAhead:true,report:report,fault:"none",stopWithPendingGuided:option.2,requiredBoundary:option.3,duplicateExact:option.4,witness:s)) {XCTAssertEqual($0 as? AuthorityError,.scope)}
+                XCTAssertEqual(lseek(fd,0,SEEK_CUR),0)
+            }
+            XCTAssertFalse(FileManager.default.fileExists(atPath:report))
+            XCTAssertEqual(h.provider.loads+c.provider.loads+f.counter.models,0)
+        }
+        // Absent witness selection keeps the existing pipe entry in control.
+        try NativeRecoveryRoots.validateWitness(nil,hostReceipt:"/missing",hostDigest:"",clientReceipt:"/missing",clientDigest:"",fixture:nil,requiredBoundary:"ready",duplicateExact:true,original:true)
+    }
+    func testCLIRejectsOrdinaryAndSchemaRequiredIntentBeforeCredentials() throws {
+        guard let executable=ProcessInfo.processInfo.environment["REACH_NATIVE_RECOVERY_EXECUTABLE"] else {
+            throw XCTSkip("Provide the current normal daemon for executable-entry qualification.")
+        }
+        struct Result:Encodable {let route:String,option:[String],pid:Int32,exitCode:Int32,stdoutBytes:Int,stderr:String,hostDigest:String,clientDigest:String,descriptorDigest:String}
+        var results:[Result]=[]
         for route in ["ordinary","guided"] {
+            let f=try NativeRecoveryFixture(request:ArtifactFixtures.request(route,maximum:16)),(_,descriptor,digest)=try selection(f)
+            let h=try LifecycleFixture(role:.host,unlock:true,authority:f.scope.provision),c=try LifecycleFixture(unlock:true,authority:f.scope.provision)
+            let hd=try XCTUnwrap(h.digest),cd=try XCTUnwrap(c.digest),report=f.base+"/no-cli-report"
+            for option in [["--required-boundary","generating"],["--required-boundary","ready"],["--required-boundary","emitted"],["--duplicate-exact"]] {
+                let process=Process(),output=Pipe(),error=Pipe(),finished=DispatchSemaphore(value:0)
+                process.executableURL=URL(fileURLWithPath:executable)
+                process.arguments=["durable-native-recovery","run","--witness-descriptor",descriptor,"--witness-digest",digest,
+                    "--host-receipt",h.receipt,"--host-digest",hd,"--client-receipt",c.receipt,"--client-digest",cd,
+                    "--host-secret-fd=-1","--client-secret-fd=-1","--report",report]+option
+                process.standardInput=FileHandle.nullDevice;process.standardOutput=output;process.standardError=error
+                process.terminationHandler={_ in finished.signal()}
+                try process.run()
+                if finished.wait(timeout:.now()+10) == .timedOut {
+                    process.terminate()
+                    if finished.wait(timeout:.now()+1) == .timedOut {kill(process.processIdentifier,SIGKILL)}
+                    process.waitUntilExit();XCTFail("Owned CLI refusal exceeded its bound")
+                }
+                process.waitUntilExit()
+                let stdout=output.fileHandleForReading.readDataToEndOfFile(),stderr=String(decoding:error.fileHandleForReading.readDataToEndOfFile(),as:UTF8.self)
+                XCTAssertEqual(process.terminationStatus,1);XCTAssertTrue(stdout.isEmpty);XCTAssertTrue(stderr.contains("AuthorityError:scope"))
+                XCTAssertFalse(FileManager.default.fileExists(atPath:report))
+                results.append(.init(route:route,option:option,pid:process.processIdentifier,exitCode:process.terminationStatus,stdoutBytes:stdout.count,stderr:stderr,hostDigest:hd,clientDigest:cd,descriptorDigest:digest))
+            }
+            XCTAssertEqual(h.provider.loads+c.provider.loads+f.counter.models,0)
+        }
+        try LocalFiles.writeNew(ArtifactFixtures.encode(results),to:ArtifactFixtures.base()+"/witness-cli-refusals-"+UUID().uuidString.lowercased()+".json")
+    }
+    func testOriginalR0AndSameOwnerCapacityAcrossRenewals() throws {
+        for route in ["ordinary","guided","required"] {
         let f=try NativeRecoveryFixture(request:ArtifactFixtures.request(route,maximum:16)),(s,_,_)=try selection(f)
         var nonces=Set<String>(),reports=0
         for _ in 0..<64 {
@@ -187,8 +278,9 @@ final class NativeWitnessTests:XCTestCase {
         XCTAssertThrowsError(try a.check());XCTAssertThrowsError(try owner.begin(.advance))
     }
     func testAmbiguousMalformedWrongPinAndClockFailuresLatchExistingOwner() throws {
+        for route in ["ordinary","required"] {
         for failure in 0..<4 {
-            let f=try NativeRecoveryFixture(),(s,_,_)=try selection(f),a=try f.owner.begin(.reopen)
+            let f=try NativeRecoveryFixture(request:ArtifactFixtures.request(route,maximum:16)),(s,_,_)=try selection(f),a=try f.owner.begin(.reopen)
             XCTAssertThrowsError(try s.exchange(a,clock:f.receiverClock,transport:{request,_,_ in
                 switch failure {
                 case 0:throw AccessError.io
@@ -198,6 +290,7 @@ final class NativeWitnessTests:XCTestCase {
                 }
             },report:{r in XCTAssertFalse(r.accepted)}))
             XCTAssertThrowsError(try a.check());XCTAssertThrowsError(try a.finish());XCTAssertThrowsError(try f.owner.begin(.advance))
+        }
         }
     }
     func testSocketControlsCannotAffirmWitnessAndCompletedActionKeepsAgeLimit() throws {

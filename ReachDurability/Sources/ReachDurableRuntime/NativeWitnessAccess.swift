@@ -21,7 +21,7 @@ public struct NativeWitnessSelection {
     }
     func validate(originals:Originals,binding:ProviderBinding,fixture:AllowedRecoveryQualificationFactory?) throws {
         try requireArtifact(fixture:fixture);try NativeRecoveryRuntime.validateFixture(binding)
-        guard [.ordinary,.guided].contains(binding.lane.route) else {throw AuthorityError.scope}
+        guard [.ordinary,.guided,.required].contains(binding.lane.route) else {throw AuthorityError.scope}
         let subject=try originals.records().host.subject
         guard try descriptor.select(subject:subject)==originals else {throw AuthorityError.scope}
     }
@@ -32,9 +32,9 @@ public struct NativeWitnessSelection {
         try validate(originals:provision.originals,binding:binding,fixture:fixture)
         return binding
     }
-    func requireSupportedOptions(requiredBoundary:String,allowedBoundary:String,duplicateExact:Bool,fault:String,fixture:AllowedRecoveryQualificationFactory?) throws {
+    func requireSupportedOptions(requiredBoundary:String,allowedBoundary:String,fault:String,fixture:AllowedRecoveryQualificationFactory?) throws {
         try requireArtifact(fixture:fixture)
-        guard requiredBoundary=="none",allowedBoundary=="none",!duplicateExact,fault != "after-next-pass-native" else {throw AuthorityError.scope}
+        guard ["none","generating","ready","emitted"].contains(requiredBoundary),allowedBoundary=="none",fault != "after-next-pass-native" else {throw AuthorityError.scope}
     }
     func exchange(_ action:GenerationAuthorityAction,clock:any PolicyClock,
                   transport:(Data,UnixEndpoint,IODeadline)throws->Data = {try SocketIO.exchange($0,endpoint:$1,deadline:$2)},
@@ -80,7 +80,8 @@ extension NativeRecoveryRoots {
     /// Bounded metadata only: reject socket selection/route before leases, secrets,
     /// Keychain access, native construction or executable storage operations.
     static func validateWitness(_ witness:NativeWitnessSelection?,hostReceipt:String,hostDigest:String,
-                                clientReceipt:String,clientDigest:String,fixture:AllowedRecoveryQualificationFactory?,stopWithPendingGuided:Bool=false) throws {
+                                clientReceipt:String,clientDigest:String,fixture:AllowedRecoveryQualificationFactory?,stopWithPendingGuided:Bool=false,
+                                requiredBoundary:String="none",duplicateExact:Bool=false,original:Bool=false,stopAfterCalls:Int=0) throws {
         guard let witness else {return}
         try witness.requireArtifact(fixture:fixture)
         let h=try receipt(hostReceipt,expectedDigest:hostDigest).ready.core
@@ -88,6 +89,11 @@ extension NativeRecoveryRoots {
         guard h.role == .host,c.role == .client,let provision=h.authority,provision==c.authority else {throw AuthorityError.scope}
         let binding=try witness.validate(provision,fixture:fixture)
         // Join cut intent to the authenticated original metadata before leases or keys.
-        guard !stopWithPendingGuided || binding.lane.route == .guided else {throw AuthorityError.scope}
+        guard !stopWithPendingGuided || binding.lane.route == .guided,
+              ["none","generating","ready","emitted"].contains(requiredBoundary),
+              requiredBoundary=="none" || binding.lane.route == .required && !stopWithPendingGuided && stopAfterCalls==0,
+              !duplicateExact || binding.lane.route == .required && !original && requiredBoundary=="none" && !stopWithPendingGuided && stopAfterCalls==0 else {throw AuthorityError.scope}
+        // Terminal eligibility comes from the encrypted store before its factory,
+        // not from receipt metadata. This only authenticates compatible intent.
     }
 }

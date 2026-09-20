@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Guest-owned ordinary/schema native recovery through the selected local socket."""
+"""Guest-owned ordinary/schema/required native recovery through the selected local socket."""
 import base64, hashlib, json, os, select, shutil, stat, subprocess, sys, time, traceback, uuid
 from pathlib import Path
 sys.dont_write_bytecode=True
@@ -16,8 +16,8 @@ if len(sys.argv)>1 and sys.argv[1]=='worker':
     sys.stdout.buffer.write(data+b'\n');sys.stdout.buffer.flush()
     os.execv(selected['command'][0],selected['command'])
 BASE=Path(sys.argv[1]).resolve(strict=True);PHASE=sys.argv[2] if len(sys.argv)>2 else 'campaign'
-LANE=sys.argv[3] if len(sys.argv)>3 else 'ordinary';assert len(sys.argv)<=4 and LANE in ['ordinary','schema']
-SLICE={'ordinary':'s107','schema':'s108'}[LANE]
+LANE=sys.argv[3] if len(sys.argv)>3 else 'ordinary';assert len(sys.argv)<=4 and LANE in ['ordinary','schema','required']
+SLICE={'ordinary':'s107','schema':'s108','required':'s109'}[LANE]
 assert PHASE in ['campaign','loss','retirement'] or PHASE.startswith('cleanup-') and PHASE[8:].isdigit()
 assert str(BASE).startswith('/Users/threshold-auto/reach-'+SLICE+'-') and os.getuid()==503
 assert BASE.stat().st_uid==503 and stat.S_IMODE(BASE.stat().st_mode)==0o700
@@ -221,7 +221,7 @@ def fixture():
         request=json.loads((BASE/'fixtures/requests/ordinary.json').read_bytes());request['options']['maximumResponseTokens']=16
         write(INPUTS/'request.json',request)
     else:
-        shutil.copyfile(BASE/'fixtures/requests/native-guided.json',INPUTS/'request.json');(INPUTS/'request.json').chmod(0o600)
+        shutil.copyfile(BASE/('fixtures/requests/'+{'schema':'native-guided.json','required':'native-required.json'}[LANE]),INPUTS/'request.json');(INPUTS/'request.json').chmod(0o600)
     # Two real preparation passes freeze one exact binding before either run.
     for name in ['primary','reference']:
         command('prepare-'+name,['prepare-fixture','--model',BASE/'fixtures/model','--request',INPUTS/'request.json',
@@ -235,6 +235,7 @@ def fixture():
         launcherSHA256=sha(shim),nativeCompileDisabled=False,modelSHA256={p.name:sha(p) for p in (BASE/'fixtures/model').iterdir()})
     write(BASE/'reports/fixture-binding.json',dict(evidence,lane=LANE,slice=SLICE));event('exact-common-preparation-frozen',evidence)
     if LANE=='schema':schema_feasibility(provider)
+    elif LANE=='required':required_feasibility(provider)
 def guided_pending(v):
     return v.get('terminalReason') is None and v['consumedTokens']>0 and v['pendingTokens']>0 and bool(base64.b64decode(v['cumulativeEmittedBytes'])) and all(x>0 for x in v['modelOffsets'])
 
@@ -283,15 +284,128 @@ def schema_reference(cut,result,reference):
     assert reference['nativeCalls']==expected['referenceNativeCalls']
     assert reference['admission']!=result['admission']
 
-def schema_cli_refusals(service):
-    options=[['--required-boundary','generating'],['--allowed-boundary','guided'],['--duplicate-exact'],['--fault','after-next-pass-native']]
+def cli_intent_refusals(pair):
+    if LANE=='required':
+        options=[['--duplicate-exact','--original'],['--duplicate-exact','--stop-after-calls','1'],
+            ['--duplicate-exact','--stop-with-pending-guided'],['--duplicate-exact','--required-boundary','generating'],
+            ['--duplicate-exact','--required-boundary','ready'],['--duplicate-exact','--required-boundary','emitted'],
+            ['--stop-with-pending-guided'],['--allowed-boundary','guided'],['--required-boundary','unknown'],['--fault','after-next-pass-native']]
+    else:options=[['--required-boundary','generating'],['--allowed-boundary','guided'],['--duplicate-exact'],['--fault','after-next-pass-native']]
     for index,option in enumerate(options):
         label='unsupported-socket-option-'+str(index)
-        item=command(label,['run',*selectionargs(service),'--host-receipt','/missing','--host-digest','missing','--client-receipt','/missing','--client-digest','missing',
-            '--host-secret-fd=-1','--client-secret-fd=-1','--report',BASE/'reports/not-created','--stop-with-pending-guided',*option],expected=1)
+        item=command(label,['run',*selectionargs(pair),*pairargs(pair),'--host-secret-fd=-1','--client-secret-fd=-1','--report',BASE/'reports/not-created',*option],expected=1)
         assert not item['frames'] and not item['exchanges'] and not (BASE/'reports/not-created').exists()
         assert b'AuthorityError:scope' in (BASE/'logs'/(label+'.stderr.log')).read_bytes()
-    event('schema-cli-options-refuse-before-receipts',dict(cases=options,noCredentialsSupplied=True,noReceiptsRead=True,beforeRoles=True))
+    event('socket-cli-intents-refuse-before-credentials',dict(cases=options,noCredentialsSupplied=True,authenticatedReceiptMetadata=True))
+
+def required_pending(v):
+    g=v['guided']
+    return v['phase']=='generating' and g.get('terminalReason') is None and g['consumedTokens']>0 and g['pendingTokens']>1 and bool(base64.b64decode(v['whole'])) and all(x>0 for x in g['modelOffsets'])
+
+def required_feasibility(provider):
+    assert serviceOwner is None and not list((BASE/'roots').iterdir()) and not list((BASE/'control').iterdir())
+    report=BASE/'reports/required-feasibility.json'
+    item=command('required-feasibility',['probe-required-fixture','--model',BASE/'fixtures/model','--prepared',INPUTS/'primary-prepared.json','--report',report])
+    probe=json.loads(report.read_bytes());cut=probe['cut'];ready=probe['ready'];m=probe['consumedTokens'];c=cut['guided']['consumedTokens']
+    assert probe['beforeOriginals'] and probe['provider']==provider and required_pending(cut) and m-c>1
+    assert ready['phase']=='ready' and ready['guided']['terminalReason']=='complete' and ready['guided']['interceptedEndings']==1 and ready['guided']['pendingTokens']==0
+    assert json.loads(base64.b64decode(ready['whole']))=={'name':'a','arguments':{'n':7}}
+    assert 1<=m<=48 and 1<=probe['preparedTokens']<=512 and probe['initialPrepareCalls']==(probe['preparedTokens']+255)//256<=2
+    assert probe['initialPrepareNanoseconds']<10_000_000_000 and probe['maximumStepNanoseconds']<10_000_000_000
+    assert probe['restoredReadyCalls']==probe['readyDeliveryCalls']==0 and probe['nativePeak']<=128<<20
+    assert probe['providerBytes']<=16384 and probe['maximumStepFrameBytes']<=65536
+    owners=dict(primaryCut=c+2,resumedToReady=m-c+1,freshReady=2,terminalReplay=2,duplicateReplay=2,reference=m+3)
+    primary=2+sum(owners[k] for k in ['primaryCut','resumedToReady','freshReady','terminalReplay','duplicateReplay']);reference=2+owners['reference']
+    assert primary==m+11 and reference==m+5 and primary+reference==2*m+16<=112 and max(owners.values())<=51
+    frameSizes={}
+    for name in probe['steps']:
+        p=BASE/'reports/required-feasibility.json.steps'/name
+        assert p.parent==BASE/'reports/required-feasibility.json.steps';data=p.read_bytes();v=json.loads(data);assert raw(v)==data and len(data)<=65536
+        assert v['nanoseconds']<10_000_000_000 and v['nativeCalls']<=(2 if v['operation']=='prepare' else 1)
+        frameSizes[name]=len(data)
+    evidence=dict(beforeServiceOriginals=True,cut=cut,ready=ready,consumedTokens=m,cutConsumed=c,ownerActions=owners,
+        primaryCertificates=primary,referenceCertificates=reference,positiveServiceNonceBound=primary+reference,nonceCeiling=128,
+        registrationCount=4,expiryRequestBound=c+5,faultRequestBound=c+11,additionalReplacementAvailabilityRequest=1,
+        faultAccounting='Includes one active duplicate-terminal refusal, age and loss plus refused replacement selection.',
+        initialPrepareCalls=probe['initialPrepareCalls'],initialPrepareNanoseconds=probe['initialPrepareNanoseconds'],maximumStepNanoseconds=probe['maximumStepNanoseconds'],
+        referenceNativeCalls=probe['nativeCalls'],maximumFrameBytes=max(item['maximumFrameBytes'],max(frameSizes.values())),stepFrameBytes=frameSizes,
+        nativePeak=probe['nativePeak'],providerBytes=probe['providerBytes'],reportSHA256=sha(report))
+    write(BASE/'reports/required-expectation.json',dict(evidence,lane=LANE,slice=SLICE));event('required-feasibility-before-originals',evidence)
+
+def required_steps(report,label):
+    directory=BASE/'reports'/(label+'-native.json.steps');result=[]
+    for reference in report['requiredSteps']:
+        p=directory/reference['file'];data=p.read_bytes()
+        assert p.parent==directory and len(data)==reference['bytes'] and sha(p)==reference['sha256'] and len(data)<=65536
+        item=json.loads(data);assert raw(item)==data and item['actionNanoseconds']<10_000_000_000
+        assert item['nativeCalls']<=(2 if item['operation']=='prepare' else 0 if item['operation']=='restore' else 1)
+        assert item['nativeCalls']==len(item['nativeOffsets'])==len(item['nativeInputs'])
+        if item['progress']['phase']!='emitted':assert base64.b64decode(item['eventBytes'])==b'[]'
+        result.append(item)
+    return result
+
+def fresh_required_receiver(previous,current,pair):
+    a=previous['exchanges'][0];b=current['exchanges'][0];ca=json.loads(base64.b64decode(a['request']));cb=json.loads(base64.b64decode(b['request']))
+    assert previous['joined'] and current['joined'] and previous['pid']!=current['pid']
+    assert ca['receiverBoot']==cb['receiverBoot'] and ca['receiverIncarnation']!=cb['receiverIncarnation'] and ca['nonce']!=cb['nonce'] and a['sent']!=b['sent']
+    assert ca['witness']==cb['witness']==pair['originals']['pin'] and boot()==pair['boot']
+    assert serviceOwner[0].pid==pair['servicePID'] and serviceOwner[0].poll() is None
+    return dict(priorReceiver=previous['pid'],freshReceiver=current['pid'],firstChallenge=ca,freshChallenge=cb,sameBoot=True,originalServicePID=pair['servicePID'])
+
+def required_positive(pair,cut,first):
+    ready,second=run(pair,'primary-resumed',required='ready');fresh=fresh_required_receiver(first,second,pair)
+    assert ready['nativeCalls']>0 and ready['beforeInbox']==ready['inbox']==[] and ready['modelLoads']==1
+    assert all(ready[k]==0 for k in ['modelPrepares','requestPreparations','templateCalls','requestTokenizations','issues','begins'])
+    assert ready['traces'][0]['offsets'][0]>0
+    saved=cut['requiredProgress'];progress=[s['progress'] for s in required_steps(ready,'primary-resumed')];assert progress[0]==saved
+    old=saved['guided']
+    for step in range(1,old['pendingTokens']+1):
+        current=progress[step]['guided']
+        assert current['sampledTokens']==old['sampledTokens'] and current['accepts']==old['accepts']
+        assert current['forcedTokens']==old['forcedTokens']+step and current['consumedTokens']==old['consumedTokens']+step
+        assert current['pendingTokens']==old['pendingTokens']-step and current['modelOffsets']==[x+step for x in old['modelOffsets']]
+    pair['ready']=ready;savepair(pair);event('same-service-required-ready',dict(report=ready,freshReceiver=fresh,savedForcedSuffixConsumedBeforeResampling=True))
+    emitted,third=run(pair,'primary-ready-emission',required='emitted');fresh=fresh_required_receiver(second,third,pair)
+    assert emitted['requiredInitial']==ready['requiredProgress'] and emitted['requiredProgress']['phase']=='emitted'
+    assert emitted['requiredProgress']['call']==ready['requiredProgress']['call'] and emitted['modelLoads']==1 and emitted['nativeCalls']==0
+    assert all(emitted[k]==0 for k in ['modelPrepares','requestPreparations','templateCalls','requestTokenizations','issues','begins'])
+    assert emitted['hostHigh']==3 and emitted['client']['high']==emitted['client']['registrations']==0 and emitted['inbox']==[]
+    pair['emitted']=emitted;savepair(pair);event('fresh-ready-zero-forward-emission',dict(report=emitted,freshReceiver=fresh))
+    terminal,fourth=run(pair,'primary-terminal-replay',terminal=True);fresh=fresh_required_receiver(third,fourth,pair)
+    assert terminal['client']['terminal'] and terminal['client']['high']==3 and terminal['client']['registrations']==1 and terminal['replayedBeforeNative']==3
+    assert terminal['beforeInbox']==[] and terminal['selectedCommit']==emitted['selectedCommit']
+    assert all(terminal[k]==0 for k in ['nativeCalls','modelLoads','modelPrepares','requestPreparations','templateCalls','requestTokenizations','issues','begins'])
+    assert not terminal['traces'] and not terminal['requiredSteps'] and not terminal.get('requiredInitial') and not terminal.get('requiredProgress')
+    pair['terminal']=terminal;savepair(pair);event('model-free-terminal-replay-under-read-denial',dict(report=terminal,denied=fourth['readDenials'],freshReceiver=fresh))
+    duplicate,fifth=run(pair,'primary-duplicate-replay',terminal=True,duplicate=True);fresh=fresh_required_receiver(fourth,fifth,pair)
+    assert duplicate['duplicateExact'] and duplicate['inbox']==duplicate['beforeInbox']==terminal['inbox'] and duplicate['client']==terminal['client']
+    assert duplicate['selectedCommit']==terminal['selectedCommit'] and duplicate['client']['registrations']==1
+    assert all(duplicate[k]==0 for k in ['nativeCalls','modelLoads','modelPrepares','requestPreparations','templateCalls','requestTokenizations','issues','begins'])
+    assert not duplicate['traces'] and not duplicate['requiredSteps'] and not duplicate.get('requiredInitial') and not duplicate.get('requiredProgress')
+    expectation=json.loads((BASE/'reports/required-expectation.json').read_bytes())['ownerActions']
+    assert [cut['actions'],ready['actions'],emitted['actions'],terminal['actions'],duplicate['actions']]==[expectation[k] for k in ['primaryCut','resumedToReady','freshReady','terminalReplay','duplicateReplay']]
+    event('fresh-exact-duplicate-one-registration',dict(report=duplicate,denied=fifth['readDenials'],freshReceiver=fresh))
+    return terminal
+
+def required_reference(pair,reference):
+    split=[pair['checkpoint'],pair['ready'],pair['emitted']]
+    assert reference['requiredProgress']==pair['emitted']['requiredProgress'] and reference['client']['registrations']==1
+    assert reference['admission']!=pair['terminal']['admission']
+    joined=[]
+    for i,(report,label) in enumerate(zip(split,['primary-cut','primary-resumed','primary-ready-emission'])):
+        progress=[x['progress'] for x in required_steps(report,label)];joined+=progress if i==0 else progress[1:]
+    assert joined==[x['progress'] for x in required_steps(reference,'reference-uninterrupted')]
+    for key in ['offsets','inputDigests']:
+        assert [v for report in split for trace in report['traces'] for v in trace[key]]==[v for trace in reference['traces'] for v in trace[key]]
+    assert sum(report['nativeCalls'] for report in split)==reference['nativeCalls']
+    expectation=json.loads((BASE/'reports/required-expectation.json').read_bytes())
+    assert reference['actions']==expectation['ownerActions']['reference'] and reference['nativeCalls']==expectation['referenceNativeCalls']
+    call=reference['requiredProgress']['call'];assert call['name']=='a' and json.loads(call['argumentsJSON'])=={'n':7}
+    events=[json.loads(x) for x in exact_events(reference)];assert len(events)==3
+    original=reference['provider']['lane']['required']['_0'];event=events[0]['toolCallAppendArguments']
+    assert event['entryID']==original['entryID'] and event['id']==original['callID'] and event['name']==original['tools'][0]['name']
+    assert json.loads(event['content'])=={'n':7} and event['tokenCount']==1
+    assert events[-1]=={'finished':{'_0':{'complete':{}}}}
 
 def original(name,service,subject):
     assert not list((BASE/'roots').iterdir())
@@ -315,11 +429,18 @@ def original(name,service,subject):
         target=BASE/'originals'/name/relative;target.parent.mkdir(parents=True,exist_ok=True,mode=0o700);shutil.copyfile(BASE/relative,target);target.chmod(0o600)
     event(name+'-original-admission',dict(boot=pair['boot'],admission=admitted,registrations=pair['registrations'],hashes=pair['initialHashes']))
     return pair
-def run(pair,label,original=False,checkpoint=False,fault=None,boundary=None,expected=0,terminal=False):
+def run(pair,label,original=False,checkpoint=False,fault=None,boundary=None,expected=0,terminal=False,required="none",duplicate=False):
     report=BASE/'reports'/(label+'-native.json')
     args=['run',*pairargs(pair),*selectionargs(pair),'--report',report]
     if original:args+=['--original']
-    if checkpoint:args+=(['--stop-after-calls','8'] if LANE=='ordinary' else ['--stop-with-pending-guided'])+['--leave-host-ahead']
+    if LANE=='required':
+        if checkpoint:assert required=='none';required='generating'
+        checkpoint=required in ['generating','ready']
+        if required!='none':args+=['--required-boundary',required,'--leave-host-ahead']
+        if duplicate:args+=['--duplicate-exact']
+    else:
+        assert required=='none' and not duplicate
+        if checkpoint:args+=(['--stop-after-calls','8'] if LANE=='ordinary' else ['--stop-with-pending-guided'])+['--leave-host-ahead']
     if fault:args+=['--fault',fault]
     item=command(label,args,pair=pair,checkpoint=checkpoint,boundary=boundary,expected=expected,denyInputs=not original,denyModel=terminal)
     if expected==0:
@@ -327,15 +448,29 @@ def run(pair,label,original=False,checkpoint=False,fault=None,boundary=None,expe
         assert data['admission']==pair['admission']['admission']
         assert data['hostDeadline']==pair['registrations']['host']['deadline'] and data['clientDeadline']==pair['registrations']['client']['deadline']
         assert data['provider']==json.loads((BASE/'reports/fixture-binding.json').read_bytes())['provider']
-        if checkpoint:
-            assert data['client']['high']>0 and not data['client']['terminal'] and data['hostHigh']>data['client']['high']
-            if LANE=='ordinary':assert data['nativeCalls']==8
-            else:
-                expected=json.loads((BASE/'reports/schema-expectation.json').read_bytes());v=data['guidedProgress'][-1]
-                assert guided_pending(v) and v==expected['cut'] and v['commit']==data['selectedCommit']
-                assert data['nativeCalls']>0 and data['actions']==expected['expectedActions']['cut']
-                assert any(json.loads(x).get('responseAppend',{}).get('text') for x in exact_events(data))
-            pair['checkpoint']=data;pair['checkpointHashes']=hashes(pair);savepair(pair)
+        if LANE=='required':
+            observed=required_steps(data,label)
+            if data.get('requiredProgress'):
+                assert observed[0]['progress']==data['requiredInitial'] and observed[-1]['progress']==data['requiredProgress']
+                assert data['requiredProgress']['guided']['commit']==data['selectedCommit']
+            if required=='generating':
+                expectation=json.loads((BASE/'reports/required-expectation.json').read_bytes());v=data['requiredProgress']
+                assert required_pending(v) and v==expectation['cut'] and data['actions']==expectation['ownerActions']['primaryCut']
+                assert data['client']['high']==data['hostHigh']==data['client']['registrations']==0 and data['inbox']==data['beforeInbox']==[] and not data['client']['terminal']
+                pair['checkpoint']=data;pair['checkpointHashes']=hashes(pair);savepair(pair)
+            elif required=='ready':
+                v=data['requiredProgress'];assert v['phase']=='ready' and v['guided']['terminalReason']=='complete' and v['guided']['interceptedEndings']==1 and v['guided']['pendingTokens']==0
+                assert data['client']['high']==data['hostHigh']==data['client']['registrations']==0 and data['inbox']==[] and not data['client']['terminal']
+        else:
+            if checkpoint:
+                assert data['client']['high']>0 and not data['client']['terminal'] and data['hostHigh']>data['client']['high']
+                if LANE=='ordinary':assert data['nativeCalls']==8
+                else:
+                    expected=json.loads((BASE/'reports/schema-expectation.json').read_bytes());v=data['guidedProgress'][-1]
+                    assert guided_pending(v) and v==expected['cut'] and v['commit']==data['selectedCommit']
+                    assert data['nativeCalls']>0 and data['actions']==expected['expectedActions']['cut']
+                    assert any(json.loads(x).get('responseAppend',{}).get('text') for x in exact_events(data))
+                pair['checkpoint']=data;pair['checkpointHashes']=hashes(pair);savepair(pair)
         return data,item
     assert not report.exists()
     return None,item
@@ -426,36 +561,39 @@ try:
         if PHASE!='loss':
             selected=selected_pairs([(600,900),(900,1200)])
             svc=service_start('positive',selected)
-            if LANE=='schema':schema_cli_refusals(svc)
             started=time.monotonic();pair=original('primary',svc,selected[0]['subject'])
+            if LANE in ['schema','required']:cli_intent_refusals(pair)
             cut,first=run(pair,'primary-cut',original=True,checkpoint=True)
             setupSeconds=time.monotonic()-started
             assert serviceOwner[0].poll() is None and boot()==pair['boot'] and hashes(pair)==pair['checkpointHashes']
-            event('eight-call-checkpoint-and-joined-receiver' if LANE=='ordinary' else 'pending-guided-checkpoint-and-joined-receiver',dict(report=cut,workerPID=first['pid'],exitCode=first['exitCode'],joined=first['joined'],setupSeconds=setupSeconds))
-            result,second=run(pair,'primary-resumed');before=cut['inbox']
-            assert second['pid']!=first['pid'] and result['nativeCalls']>0 and result['client']['terminal']
-            assert result['inbox'][:len(before)]==before and result['beforeInbox']==before
-            assert result['replayedBeforeNative']>=cut['hostHigh']-cut['client']['high']
-            assert all(result[x]==0 for x in ['modelPrepares','requestPreparations','templateCalls','requestTokenizations','issues','begins'])
-            assert result['modelLoads']==1 and result['traces'][0]['offsets'][0]>0
-            a=first['exchanges'][0];b=second['exchanges'][0]
-            ca=json.loads(base64.b64decode(a['request']));cb=json.loads(base64.b64decode(b['request']))
-            assert ca['receiverBoot']==cb['receiverBoot'] and ca['receiverIncarnation']!=cb['receiverIncarnation'] and ca['nonce']!=cb['nonce']
-            assert a['sent']!=b['sent'] and serviceOwner[0].pid==pair['servicePID'] and serviceOwner[0].poll() is None
-            assert ca['witness']==cb['witness']==pair['originals']['pin']
-            if LANE=='schema':schema_resume(cut,result)
-            pair['terminal']=result;savepair(pair)
-            event('same-service-fresh-receiver-native-continuation',dict(report=result,firstReceiver=first['pid'],freshReceiver=second['pid'],originalService=svc,firstChallenge=ca,freshChallenge=cb,sameBoot=True,noReboot=True))
-            replay,third=run(pair,'primary-terminal-replay',terminal=True)
-            assert replay['inbox']==result['inbox'] and replay['client']==result['client']
-            assert all(replay[x]==0 for x in ['nativeCalls','modelLoads','modelPrepares','requestPreparations','templateCalls','requestTokenizations','issues','begins']) and not replay['traces']
-            if LANE=='schema':assert not replay['guidedProgress'] and replay['selectedCommit']==result['selectedCommit']
-            event('model-free-terminal-replay-under-read-denial',dict(report=replay,denied=third['readDenials']))
+            event({'ordinary':'eight-call-checkpoint-and-joined-receiver','schema':'pending-guided-checkpoint-and-joined-receiver','required':'private-required-checkpoint-and-joined-receiver'}[LANE],dict(report=cut,workerPID=first['pid'],exitCode=first['exitCode'],joined=first['joined'],setupSeconds=setupSeconds))
+            if LANE=='required':result=required_positive(pair,cut,first)
+            else:
+                result,second=run(pair,'primary-resumed');before=cut['inbox']
+                assert second['pid']!=first['pid'] and result['nativeCalls']>0 and result['client']['terminal']
+                assert result['inbox'][:len(before)]==before and result['beforeInbox']==before
+                assert result['replayedBeforeNative']>=cut['hostHigh']-cut['client']['high']
+                assert all(result[x]==0 for x in ['modelPrepares','requestPreparations','templateCalls','requestTokenizations','issues','begins'])
+                assert result['modelLoads']==1 and result['traces'][0]['offsets'][0]>0
+                a=first['exchanges'][0];b=second['exchanges'][0]
+                ca=json.loads(base64.b64decode(a['request']));cb=json.loads(base64.b64decode(b['request']))
+                assert ca['receiverBoot']==cb['receiverBoot'] and ca['receiverIncarnation']!=cb['receiverIncarnation'] and ca['nonce']!=cb['nonce']
+                assert a['sent']!=b['sent'] and serviceOwner[0].pid==pair['servicePID'] and serviceOwner[0].poll() is None
+                assert ca['witness']==cb['witness']==pair['originals']['pin']
+                if LANE=='schema':schema_resume(cut,result)
+                pair['terminal']=result;savepair(pair)
+                event('same-service-fresh-receiver-native-continuation',dict(report=result,firstReceiver=first['pid'],freshReceiver=second['pid'],originalService=svc,firstChallenge=ca,freshChallenge=cb,sameBoot=True,noReboot=True))
+                replay,third=run(pair,'primary-terminal-replay',terminal=True)
+                assert replay['inbox']==result['inbox'] and replay['client']==result['client']
+                assert all(replay[x]==0 for x in ['nativeCalls','modelLoads','modelPrepares','requestPreparations','templateCalls','requestTokenizations','issues','begins']) and not replay['traces']
+                if LANE=='schema':assert not replay['guidedProgress'] and replay['selectedCommit']==result['selectedCommit']
+                event('model-free-terminal-replay-under-read-denial',dict(report=replay,denied=third['readDenials']))
             retire(pair)
             reference=original('reference',svc,selected[1]['subject']);ref,_=run(reference,'reference-uninterrupted',original=True)
             assert ref['provider']==result['provider'] and ref['client']['terminal'] and exact_events(ref)==exact_events(result)
             if LANE=='schema':schema_reference(cut,result,ref)
-            event('exact-independent-reference',dict(exactEventBytes=True,exactFullNativeTrace=LANE=='schema',exactFullGuidedProgress=LANE=='schema',eventCount=len(exact_events(ref)),eventStreamSHA256=hashlib.sha256(b''.join(exact_events(ref))).hexdigest(),report=ref))
+            elif LANE=='required':required_reference(pair,ref)
+            event('exact-independent-reference',dict(exactEventBytes=True,exactFullNativeTrace=LANE in ['schema','required'],exactFullGuidedProgress=LANE=='schema',exactFullRequiredProgress=LANE=='required',eventCount=len(exact_events(ref)),eventStreamSHA256=hashlib.sha256(b''.join(exact_events(ref))).hexdigest(),report=ref))
             retire(reference);positiveJoin=service_stop()
             # Each serial negative gets fresh originals. Budget follows measured setup.
             short=max(45,int(setupSeconds*2+20));assert short<=120
@@ -479,6 +617,10 @@ try:
                 retire(pair);service_stop()
         selected=selected_pairs([(300,450)]);svc=service_start('faults',selected);pair=original('faults',svc,selected[0]['subject'])
         active,_=run(pair,'faults-cut',original=True,checkpoint=True)
+        if LANE=='required':
+            _,activeDuplicate=run(pair,'active-duplicate-terminal-refusal',terminal=True,duplicate=True,expected=1)
+            assert activeDuplicate['frames'][-1]['nativeCalls']==activeDuplicate['frames'][-1]['modelLoads']==0
+            event('active-duplicate-refuses-before-model-factory',dict(refusal=activeDuplicate['frames'][-1],denied=activeDuplicate['readDenials']))
         if PHASE!='loss':
             _,delayed=run(pair,'after-native-delay',fault='after-native',boundary='delay',expected=1)
             assert delayed['seconds']>=11 and delayed['frames'][-1]['nativeCalls']==1
@@ -486,6 +628,9 @@ try:
             if LANE=='schema':
                 boundary=next(x for x in delayed['frames'] if x['stage']=='boundary')
                 assert boundary['guided']==active['guidedProgress'][-1] and guided_pending(boundary['guided'])
+            elif LANE=='required':
+                boundary=next(x for x in delayed['frames'] if x['stage']=='boundary')
+                assert boundary['required']==active['requiredProgress'] and required_pending(boundary['required'])
             event('completed-action-native-commit-age-refusal',dict(seconds=delayed['seconds'],refusal=delayed['frames'][-1],completedExchanges=len(delayed['exchanges']),diskState='requires-authenticated-reconciliation'))
         _,lost=run(pair,'actual-socket-loss',fault='before-native',boundary='loss',expected=1)
         assert lost['joinedServiceLoss']['joined'] and not lost['exchanges'][-1]['accepted']
@@ -494,6 +639,9 @@ try:
             boundary=next(x for x in lost['frames'] if x['stage']=='boundary')
             assert guided_pending(boundary['guided']) and boundary['guided']['pendingTokens']>1
             assert lost['frames'][-1]['nativeCalls']==1 and len(lost['exchanges'])>=3
+        elif LANE=='required':
+            boundary=next(x for x in lost['frames'] if x['stage']=='boundary')
+            assert required_pending(boundary['required']) and lost['frames'][-1]['nativeCalls']==1 and len(lost['exchanges'])>=3
         event('actual-socket-loss-at-next-exchange',dict(joinedOriginal=lost['joinedServiceLoss'],refusal=lost['frames'][-1],failedExchange=lost['exchanges'][-1],observationLimit='completed action remains bounded until next exchange; no continuous observation'))
         replacementSelection=selected_pairs([(300,450)]);replacement=service_start('replacement',replacementSelection)
         assert replacement['identity']!=pair['originals']['pin'];available=live_replacement_probe(replacement,replacementSelection[0]['subject'])
